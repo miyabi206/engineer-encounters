@@ -20,14 +20,14 @@ The following rules apply to every screen, sketch, card and external surface:
 - Show an encounter's **day only**, never its time or place. Do not request location. Session time remaining and the daily report's scheduled time are control information, not encounter times.
 - Ambient encounters appear only through the viewer's daily report; the two viewers may reveal at different times (`design.md`, **Encounter states** and **Daily report delivery**). Before reveal, show no names, cards, counts, avatars or nearby-person prompts for them. A session encounter appears immediately only when both people are in a session and confirmation succeeds. QR encounters appear immediately after confirmation.
 - Show only currently authorized fields. Matching orders the feed and gates compatible-only fields; it does not hide an otherwise eligible encounter. A card can have no visible links. **DEFAULT:** while an encounter is not eligible, for example because the other person turned discovery off, it is hidden from the feed and from favorites, and it returns if it becomes eligible again within its retention period. The non-identifying shell is used only when the encounter is eligible and every field is private. An eligible all-private shell has no initial avatar or inferred identity (`design.md`, **Matching and visibility**).
-- Eligibility requires a confirmed encounter, discovery on for both people, and no block in either direction. Compatibility also requires overlapping purposes and both people's shared-interest thresholds. The three visibility choices are everyone eligible, compatible only and private.
+- Eligibility requires a confirmed encounter, discovery on for both people, and no block in either direction. Compatibility also requires overlapping purposes and both people's shared-interest thresholds. The three visibility choices are everyone eligible, compatible only and private. Once discovery is on, display name, self-introduction, interests and purposes default to everyone eligible; contact detail defaults to private, and links require an explicit choice.
 - Current visibility applies to old encounters, favorites and saved links. Under `design.md`, **iOS app structure**, other people's cards stay only in memory, are re-fetched on opening or foregrounding, and are cleared on sign-out, access changes or loss of a fresh authorization response. Favorites and saved links store references, not card snapshots. If access disappears, remove that content. A deleted encounter or a block removes it for both people, including favorites and saved links. Turning discovery off does not itself delete encounters.
 - Ordinary encounters expire after 30 days. A favorite is retained for its viewer; the other viewer's unretained access expires independently. Under `design.md`, **Retention and deletion contract**, expiry is at the start of the local encounter date plus 30 days, and a saved link follows the same retention rule. Neither overrides current authorization or encounter removal. Unconfirmed candidates are never cards and expire after 48 hours.
 - There is no AI. There are no connection requests, mutual connections or private messages. Link previews come from the source readers and are edited by their owner. Originals stay on their platforms.
 - Use initial-letter avatars only from an authorized display name under the source drafting default. Do not add a role field or an uploaded avatar. Verification is a property of each link, not a badge certifying the whole person.
 - **DEFAULT:** the friends test uses development builds pointed at a hosted non-production Supabase project, because the phones leave the owner's Mac. Anonymous sign-in is enabled only on that non-production project and disabled on production, in addition to being compiled out of the release build. Local Supabase is for automated checks and the owner's own development.
 - **DEFAULT:** the server rejects a change that would remove a discovery prerequisite (the name, the self-introduction, the last interest or the last link) while discovery is on, and the user must turn discovery off first.
-- Anonymous sign-in exists only on S01 in development builds. Internal builds use durable Sign in with Apple. Diagnostics and the immediate ambient demo switch exist only on S22 in development and internal builds (`design.md`, **Stack, tools and workflow**, **Build kinds**). All three are compiled out of release builds, including their navigation entries.
+- Anonymous sign-in exists only on S01 in development builds. Internal builds use durable Sign in with Apple and go only to the owner's own devices. The 20-person event uses a TestFlight build made with the release configuration against the production backend; attendees sign in with Apple, with no anonymous sign-in, demo switch or diagnostics. Diagnostics and the immediate ambient demo switch exist only on S22 in development and internal builds (`design.md`, **Stack, tools and workflow**, **Build kinds**). All three are compiled out of release builds, including their navigation entries.
 
 For a failed write, keep the input and show an inline error with Retry. Confirm success before leaving the form; the session stop follows the immediate local-stop rule on S08. Do not show stale protected content on a loading or error screen. System permission sheets, browser pages and confirmations are surfaces, not additional numbered screens.
 
@@ -170,7 +170,7 @@ Purposes
 [Continue]
 ```
 
-**Elements:** A curated interest list under the source drafting default; no free-text interest entry. Discovery and Collaboration can both be selected and changed later. Select at least one interest for discovery. **DEFAULT:** require at least one purpose here so compatibility can be evaluated; do not preselect one.
+**Elements:** A curated interest list under the source drafting default; no free-text interest entry. Discovery and Collaboration can both be selected and changed later. Once discovery is on, purposes default to everyone eligible, like display name, self-introduction and interests. Select at least one interest for discovery. **DEFAULT:** require at least one purpose here so compatibility can be evaluated; do not preselect one.
 
 **States:** Empty: nothing selected, with selection guidance. Loading: show progress for the list or saving, preserving selections. Error: list-load Retry or save failure without losing selections. Final interest vocabulary remains open.
 
@@ -309,6 +309,7 @@ Only information shared with you
 [Initial] Display name
 Introduction
 Day · Ambient / Session / QR
+Purposes [authorized purpose chips]
 What you have in common [interest / purpose chips]
 Link cards: source, title, description, tags, opening text
   Verified / Unverified  [Open original link] [Save link]
@@ -316,7 +317,7 @@ Link cards: source, title, description, tags, opening text
 [More: report or block]  [Delete encounter]
 ```
 
-**Elements:** Initial avatar, authorized profile fields, common interests/purposes only when authorized, day and kind, all visible link cards, per-link verification and an optional authorized contact detail. Only when eligible and every field is private, retain a non-identifying shell with day and kind, omit the avatar, and use “No information is shared with you” under the visibility **DEFAULT** (`design.md`, **Matching and visibility**). No role is inferred. Explain that an unverified link's ownership is not confirmed. A sample is labelled throughout and has no real contact or live safety action.
+**Elements:** Initial avatar, authorized profile fields, authorized purposes, common interests/purposes only when authorized, day and kind, all visible link cards, per-link verification and an optional authorized contact detail. Only when eligible and every field is private, retain a non-identifying shell with day and kind, omit the avatar, and use “No information is shared with you” under the visibility **DEFAULT** (`design.md`, **Matching and visibility**). Purposes default to everyone eligible once discovery is on, like display name, self-introduction and interests; show authorized purposes even when they do not overlap with the viewer's purposes. No role is inferred. Explain that an unverified link's ownership is not confirmed. A sample is labelled throughout and has no real contact or live safety action.
 
 **States:** Empty: no visible links → say so without implying poor compatibility; missing/removed encounter → return to S06 or S10. Loading: placeholders until authorization succeeds. Error: Retry without protected cached content. Sample mode uses fictitious on-device data and no encounter date/kind pretending it is real.
 
@@ -326,6 +327,7 @@ Link cards: source, title, description, tags, opening text
 |---|---|
 | すれちがった相手 | Encounter |
 | あなたに公開されている情報だけを表示しています | Only information shared with you |
+| 利用目的 | Purposes |
 | 共通点 | What you have in common |
 | 元のリンクを開く | Open original link |
 | リンクを保存 | Save link |
@@ -450,13 +452,14 @@ Profile
 Preview your shared card
 [Everyone eligible] [Compatible only]
 [Initial] Display name
-Introduction · Interests · (Authorized purposes/contact)
+Introduction · Interests · Purposes (when authorized)
+(Authorized contact detail)
 Visible link cards
 [Edit profile] [My links] [Visibility]
 [Discover] [Profile] [Settings]
 ```
 
-**Elements:** A preview of the owner's own profile, eligible/compatible audience selector under a drafting default and links to editing. Private fields are omitted from the shared preview; the owner's full data remains available in editors. Label this as a preview, not evidence that a particular person has access. When discovery is off, explain that the preview is what would be shared after activation.
+**Elements:** A preview of the owner's own profile, eligible/compatible audience selector under a drafting default and links to editing. Once discovery is on, purposes default to everyone eligible, like display name, self-introduction and interests, so both audience previews initially include them. Private fields are omitted from the shared preview; the owner's full data remains available in editors. Label this as a preview, not evidence that a particular person has access. When discovery is off, explain that the preview is what would be shared after activation.
 
 **States:** Empty: missing basics or links show completion guidance. Loading: load the owner's profile and selected visibility preview. Error: Retry without claiming a preview is current. No encounter dates or invented encounter metadata appear on an own-card preview.
 
@@ -485,7 +488,7 @@ Contact detail [optional, one value]
 [Visibility]
 ```
 
-**Elements:** The same fields and source drafting limits as onboarding, plus one optional contact detail. Contact starts private. No chat, role, free-text interest or avatar uploader. **DEFAULT:** the server rejects a change that would remove a discovery prerequisite (the name, the self-introduction, the last interest or the last link) while discovery is on, and the user must turn discovery off first.
+**Elements:** The same fields and source drafting limits as onboarding, plus one optional contact detail. Name, introduction, interests and purposes default to everyone eligible once discovery is on. Contact starts private. No chat, role, free-text interest or avatar uploader. **DEFAULT:** the server rejects a change that would remove a discovery prerequisite (the name, the self-introduction, the last interest or the last link) while discovery is on, and the user must turn discovery off first.
 
 **States:** Empty: show missing-field guidance; optional contact may stay blank. Loading: load/save without losing unsaved edits. Error: field-level validation or save error with retained input. Visibility changes affect past cards as well as future ones.
 
@@ -621,7 +624,7 @@ Matching orders encounters; it does not hide them.
 [Save matching settings]
 ```
 
-**Elements:** Master discovery switch, missing-prerequisite links, purposes and adjustable shared-interest threshold (source default: 1). Display name, introduction, at least one interest and at least one link of any kind are necessary for activation. Show the S05 promise/limitations in concise help before activation if onboarding explanation was not completed. No background/foreground mode selector or location switch.
+**Elements:** Master discovery switch, missing-prerequisite links, purposes and adjustable shared-interest threshold (source default: 1). Display name, introduction, at least one interest and at least one link of any kind are necessary for activation. Purposes default to everyone eligible once discovery is on; change their visibility on S17. Show the S05 promise/limitations in concise help before activation if onboarding explanation was not completed. No background/foreground mode selector or location switch.
 
 **States:** Empty: prerequisites missing, with precise completion links. Loading: load/update settings; do not claim activation until success. Error: save failure restores the last confirmed switch state; Bluetooth unavailable → S23. Threshold range is open, so no final minimum/maximum wording is specified here. Discovery off hides cards under S24 but does not erase them.
 
@@ -647,16 +650,16 @@ Matching orders encounters; it does not hide them.
 Display name       [Everyone eligible / Compatible only / Private]
 Introduction       [same three choices]
 Interests          [same three choices]
-Purposes           [same choices; initial level unresolved]
+Purposes           [Everyone eligible initially; same three choices]
 Contact detail     [Private initially]
 [Link visibility → My links]
 Changes also apply to past encounters and saved items.
 [Save visibility]
 ```
 
-**Elements:** Three-level selectors for profile fields and a route to each link's own selector on S15. Display name, introduction and interests start at everyone eligible once discovery is on. Contact starts private. Links require an explicit selection with no default. Purposes' initial visibility is an open item; do not assume a public default. Explain eligibility and compatibility beside the controls. Visibility updates apply in both directions to past cards, favorites and saved links.
+**Elements:** Three-level selectors for profile fields and a route to each link's own selector on S15. Display name, introduction, interests and purposes start at everyone eligible once discovery is on. Contact starts private. Links require an explicit selection with no default. Explain eligibility and compatibility beside the controls. Visibility updates apply in both directions to past cards, favorites and saved links.
 
-**States:** Empty: optional contact is not set; keep its private choice available for future entry. Loading: load/save settings. Error: preserve choices with Retry; do not imply a failed write changed access. An unresolved purposes default is documented under Open items rather than silently selected in the design.
+**States:** Empty: optional contact is not set; keep its private choice available for future entry. Loading: load/save settings. Error: preserve choices with Retry; do not imply a failed write changed access.
 
 **Actions:** Select choices/Retry stays S17. Save visibility stays S17 after success. Link visibility → S13 → S15; return via S13 to S17. Back → Settings list, S11 or S12, its origin; unsaved changes use the common discard confirmation.
 
@@ -745,14 +748,16 @@ Linked identity: GitHub connected / Not connected
 (When connected: [Disconnect GitHub])
 [Sign out]
 [Delete account] (destructive)
-Deletion is immediate and permanent.
+Deletion is immediate and permanent, with a disclosed safety exception.
 ```
 
 **Elements:** Sign-in status, linked GitHub verification status, Disconnect GitHub, sign-out and in-app deletion. GitHub is not a replacement sign-in method. **DEFAULT:** after confirmation, Disconnect GitHub makes links verified through that GitHub account unverified and removes repository link cards read through it. If removal would delete the last link while discovery is on, the server rejects the change; turn discovery off first. A development temporary account warning explains that reinstalling is not a durable identity.
 
+Deletion retains only a one-way hash of the Apple account identifier together with operator moderation outcomes and blocks other people placed on that account, for the period stated in the privacy policy, and re-applies them if the same Apple identity signs up again. Nothing else survives; the hash cannot be reversed and holds no name, profile field, link, token, encounter or contact detail. A block is dropped when the person who placed it deletes their own account. The privacy policy and the deletion confirmation both disclose this exception; the exact period is an open item to settle with the legal review.
+
 **States:** Empty: GitHub not connected is valid. Loading: process disconnect/sign-out/deletion with repeated actions disabled. Error: retain the account screen and offer Retry; never claim deletion succeeded while offline or after a failed request. Once deletion begins, access stays denied even if a later deletion step fails; report an actionable error without restoring access (`design.md`, **Retention and deletion contract**). On auth expiry, return S01 without claiming deletion.
 
-**Actions:** **DEFAULT:** Disconnect GitHub → confirmation explaining verification loss and repository-card removal → S20 after success; prerequisite rejection → guidance to S16 to turn discovery off first. Sign out → confirmation → S01 after success; it does not delete the account. Delete account → destructive confirmation describing immediate, permanent deletion → S01 after success, with no grace period or recovery flow. Cancel stays S20. Back → Settings list. Retry → S20. Sign-out stops local radio participation, clears local cards, receipts and token batches, and removes that installation's push association; deletion also removes all push associations and queued notifications (`design.md`, **Bluetooth transport**, **iOS app structure**, **Daily report delivery** and **Retention and deletion contract**). Active-session ledger behavior across sign-out remains in **Open items**; no continued signed-out access is displayed.
+**Actions:** **DEFAULT:** Disconnect GitHub → confirmation explaining verification loss and repository-card removal → S20 after success; prerequisite rejection → guidance to S16 to turn discovery off first. Sign out → confirmation → S01 after success; it does not delete the account. Delete account → destructive confirmation describing immediate, permanent deletion of personal data and the safety exception in the bilingual wording below → S01 after success, with no grace period or recovery flow. Cancel stays S20. Back → Settings list. Retry → S20. Sign-out stops local radio participation, clears local cards, receipts and token batches, and removes that installation's push association; deletion also removes all push associations and queued notifications (`design.md`, **Bluetooth transport**, **iOS app structure**, **Daily report delivery** and **Retention and deletion contract**). Active-session ledger behavior across sign-out remains in **Open items**; no continued signed-out access is displayed.
 
 | Japanese | English |
 |---|---|
@@ -765,7 +770,7 @@ Deletion is immediate and permanent.
 | 未連携 | Not connected |
 | サインアウト | Sign out |
 | アカウントを削除 | Delete account |
-| アカウントはすぐに完全削除され、元に戻せません。 | Your account is deleted immediately and permanently. This cannot be undone. |
+| 個人データはすぐに完全削除され、元に戻せません。安全のための唯一の例外として、Appleアカウント識別子を元に戻せない一方向ハッシュにした値と、運営者の対応結果、他の人があなたに設定したブロックだけを、プライバシーポリシーに記載した期間保存します。同じAppleアカウントで再登録すると、対応結果とブロックを再適用します。それ以外は何も残りません。名前、プロフィール項目、リンク、トークン、すれちがい、連絡先は保存しません。ブロックした人が自分のアカウントを削除すると、そのブロックも削除します。 | Your personal data is deleted immediately and permanently. This cannot be undone. The only safety exception is that we keep a one-way hash of your Apple account identifier, operator moderation outcomes and blocks other people placed on your account for the period stated in the privacy policy. The hash cannot be turned back into your Apple identifier. If you sign up again with the same Apple identity, we re-apply those outcomes and blocks. Nothing else survives: no name, profile field, link, token, encounter or contact detail. A block is dropped when the person who placed it deletes their own account. |
 | この一時アカウントは、再インストールすると維持できません | This temporary account does not survive reinstalling |
 
 ### S21 Legal and support
@@ -781,7 +786,7 @@ Moderation contact: published address
 Engineer Encounters · App version
 ```
 
-**Elements:** Japanese and English legal/support pages, operator contact and app version. Explain no location collection, date-only encounter records, retention and deletion in the linked privacy policy. Do not present unfinished legal review or unresolved retention periods as settled. No other user's information appears here.
+**Elements:** Japanese and English legal/support pages, operator contact and app version. Explain no location collection, date-only encounter records, retention and deletion, including the S20 safety exception and its retention period, in the linked privacy policy. Do not present unfinished legal review or unresolved retention periods as settled. No other user's information appears here.
 
 **States:** Empty: a public build must have working published URLs and contact; missing content is a release prerequisite, not an empty legal page. Loading: external page loading. Error: show the URL/contact and retry if a page cannot open.
 
@@ -800,7 +805,9 @@ Engineer Encounters · App version
 
 ### S22 Diagnostics
 
-**Purpose and entry:** Run and inspect local radio trials in development and internal builds. Reach from their Settings list. **DEFAULT:** development builds also reach S22 from S01 before sign-in for the no-backend, no-account one-day check. The screen, routes and sharing are absent from release.
+**Purpose and entry:** Run and inspect local radio trials in development and internal builds. Reach from their Settings list. **DEFAULT:** development builds also reach S22 from S01 before sign-in for the no-backend, no-account one-day check.
+
+Internal builds retain the demo switch and diagnostics and go only to the owner's own devices. The 20-person event uses a TestFlight build made with the release configuration against the production backend, with Apple sign-in and no anonymous sign-in, demo switch or diagnostics. The screen, routes and sharing are absent from release, including this event build.
 
 ```text
 [Back] Diagnostics
@@ -1082,12 +1089,11 @@ These are proposed UI choices, not additional features or confirmed owner decisi
 ## Open items
 
 - **Interests and matching controls:** What is the initial curated Japanese/English interest list, and what values may the shared-interest threshold take? `decisions.md`, **Profile** and **Matching and visibility**, fix the approach but not the vocabulary or range. S03/S12/S16 need these values; no new purpose or free-text interest is proposed.
-- **Purpose visibility:** What is the initial visibility of purposes, and should common-purpose chips appear publicly by default? `specification.md`, **Visibility levels**, says each profile field uses a level, while `decisions.md`, **Matching and visibility**, sets initial levels only for name, introduction, interests and contact. S07/S11/S17 must not assume a public purposes default. **Proposed, not decided:** everyone eligible, like the name, self-introduction and interests; see owner question B in the other product documents.
 - **Blocked-user references:** What minimal identifier may S19 retain/display after blocking while the server sends no unauthorized profile fields? `decisions.md`, **Privacy and safety** and **Matching and visibility**, require blocks and current authorization but do not define the list's identification contract. No retained name or link preview is promised.
 - **Report failure:** How is immediate reporter-side hiding persisted when report submission fails or is offline, and how is a pending report retried? S26 conceals the card immediately but cannot claim server acceptance. `decisions.md`, **Privacy and safety**, specifies immediate hiding without the failure contract.
 - **Session interruptions:** Does discovery off, Bluetooth loss, sign-out or auth expiry also stop the server session ledger, or let it expire? `design.md`, **iOS app structure**, settles online start, offline continuation and explicit local stop; **Bluetooth transport** settles radio teardown on discovery off/sign-out, but neither defines all automatic session-stop triggers. S08/S20 and external surfaces must follow a single interruption rule once settled. Eligibility is never bypassed; no signed-out card access is shown.
 - **One-tap and Live Activity availability:** Verify the chosen Control Center start action, authentication requirements and interactive stop on supported devices. Define the unavailable/disabled surface wording without claiming the control bypasses device security.
 - **Unproven discovery behavior:** Device tests must settle locked/background behavior before stronger wording is used. S05 says only “may also work”; the app-open promise remains subject to the release gate in `decisions.md`, **Build, test and release path**.
 - **Reader metadata:** Verify whether Zenn provides opening text; otherwise use its page preview as specified in `decisions.md`, **Rules for links**. S15 must not invent article-body content.
-- **Public support and policy content:** Supply the Japanese/English public URLs and moderation address for S01/S21, settle resolved-report retention, verify managed-service backup/log deletion behavior, and complete the legal review. Internal diagnostics already follow the 7-day default in `design.md`, **Retention and deletion contract**. See `decisions.md`, **Compliance deliverables**, **Retention and deletion contract** and **Open and unverified items**. No final address or unresolved retention period is invented here.
+- **Public support and policy content:** Supply the Japanese/English public URLs and moderation address for S01/S21, settle resolved-report retention and the exact account-deletion safety-record period with the legal review, disclose that period and the S20 exception in the privacy policy and deletion confirmation, verify managed-service backup/log deletion behavior, and complete the legal review. Internal diagnostics already follow the 7-day default in `design.md`, **Retention and deletion contract**. See `decisions.md`, **Compliance deliverables**, **Retention and deletion contract** and **Open and unverified items**. No final address or unresolved retention period is invented here.
 - **Public names:** Complete the trademark registry searches before release as required by `decisions.md`, **Product**. The screens use the selected public names without claiming registry clearance.

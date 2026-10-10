@@ -21,7 +21,7 @@ Unmarked items are binding product decisions. **DEFAULT** marks a value chosen t
 - **Receipt:** the record one phone keeps of an exchange, uploaded to the server.
 - **Candidate:** an uploaded receipt the server has not yet confirmed.
 - **Confirmed encounter:** for a Bluetooth encounter, the server holds matching receipts from both phones and the rules in **Encounters** are met. For a QR encounter, the showing phone obtained a short-lived one-time code from the server while signed in and the scanning phone uploaded that code before it expired, so both accounts took part and no receipts are involved.
-- **Revealed encounter per viewer:** a confirmed encounter that a user is now allowed to see. Each of the two users reaches this at their own daily report, so one may see the other before the reverse. This follows from the decision that each user can change their report time.
+- **Revealed encounter:** a confirmed encounter that a user is now allowed to see. Each of the two users reaches this at their own daily report, so one may see the other before the reverse. This follows from the decision that each user can change their report time.
 - **Daily report:** the once-a-day moment when the ambient encounters of that day are revealed, with a notification.
 - **Card:** what one user sees of another, meaning the authorized profile fields and link cards.
 - **Link card:** one shared link with its automatically filled title or name, description, main language, source, tags and opening or preview text, where available.
@@ -139,7 +139,7 @@ All rungs operate at the same time. The app never switches modes.
 - Unresolved candidates are dropped after 48 hours.
 - Encounters are deleted automatically after 30 days, unless the viewing user has marked the encounter as a favorite. A favorite is kept for that viewer but always shows only what the other person currently allows.
 - Deleting an encounter, or a block, by either person removes the encounter for both people, even if it was a favorite.
-- Account deletion is done inside the app, and is immediate and permanent.
+- Account deletion is available inside the app and is immediate and permanent for all personal data, with one safety exception: the server keeps only a one-way hash of the Apple account identifier together with operator moderation outcomes and the blocks other people placed on that account, for a period the privacy policy states, and re-applies them if the same Apple identity signs up again. Nothing else survives. The hash cannot be turned back into the Apple identifier; the kept record holds no name, profile field, link, token, encounter or contact detail. A block is dropped when the person who placed it deletes their own account. The privacy policy and the S20 deletion confirmation disclose this exception. The exact retention period is an open item to settle with the legal review.
 - Block, report and account deletion are all part of v1.
 - A reported person is hidden from the reporter at once. A profile reported by 3 different users is hidden from everyone until the operator reviews it, which happens within 72 hours.
 - **DEFAULT:** report reasons are spam, harassment or inappropriate content, impersonation, other.
@@ -154,7 +154,7 @@ All rungs operate at the same time. The app never switches modes.
 - **Compatible:** eligible, plus overlapping purposes, plus the interest threshold of each side met.
 - **DEFAULT:** the interest threshold defaults to 1 shared interest and is adjustable by the user.
 - Three visibility levels: everyone eligible, compatible only, private. The v0.2 mutual connections level is removed together with connection requests.
-- Defaults: once discovery is on, the display name, self-introduction and interests are visible to everyone eligible. A link has no default level, so the user must choose one when adding it. The contact detail is private by default.
+- Defaults: once discovery is on, the display name, self-introduction, interests and purposes are visible to everyone eligible. A link has no default level, so the user must choose one when adding it. The contact detail is private by default.
 - Matching never hides an encounter. It only orders the feed and gates the compatible-only fields.
 - Current settings always apply, in both directions, including to past encounters.
 - The server enforces all of this. A field the viewer may not see is never sent to the app.
@@ -177,7 +177,7 @@ Each stage gates the next.
 3. **Basic functions.** Then the 160-trial matrix, using a borrowed second iPhone.
 4. **Friends test:** 3 to 5 friends in a small room or cafe, on the free Apple account. **DEFAULT:** the friends test uses development builds pointed at a hosted non-production Supabase project, because the phones leave the owner's Mac. Anonymous sign-in is enabled only on that non-production project and disabled on production, in addition to being compiled out of the release build. Local Supabase is for automated checks and the owner's own development. That means cable installs from the Mac of the owner, builds that stop working after about a week, the temporary anonymous sign-in, sessions for immediate results, and the daily report viewed inside the app without a notification. The GitHub reader alone is enough. If the device cap of the free account is reached, the phone of a friend can be signed with the own free Apple ID of that friend.
 5. **Join the Apple Developer Program.** Add and verify Sign in with Apple, push notifications and TestFlight.
-6. **One real event with 20 or more people,** distributed through TestFlight.
+6. **One real event with 20 or more people,** using a TestFlight build made with the release configuration against the production backend. No demo switch, diagnostics or anonymous sign-in is included; attendees sign in with Apple. Verify these build gates and normal daily reveal and notification timing before the event. Internal builds, which keep the demo switch and diagnostics, go only to the owner's own devices.
 7. **One professional review of the privacy policy and terms,** in Japanese and English. Then public release in Japan.
 8. **Later storefronts in waves,** as in **Product**.
 
@@ -205,7 +205,7 @@ Devices: an iPhone 15 and an iPad (10th generation) owned by the owner, and a se
 
 All are owned by the owner:
 
-- Privacy policy and terms in Japanese and English.
+- Privacy policy and terms in Japanese and English, disclosing the account-deletion safety exception and its retention period.
 - App Store privacy labels.
 - The Bluetooth purpose string.
 - In-app account deletion.
@@ -235,8 +235,8 @@ Three build kinds:
 | Build | Distribution | Included development features |
 |---|---|---|
 | Development build | Run from the Mac of the owner. | Anonymous sign-in, the demo switch and the diagnostics screen. |
-| Internal build | Distributed to the own testers of the owner through TestFlight. | The demo switch and diagnostics. |
-| Release build | The App Store version. | None of those three features is compiled in. |
+| Internal build | TestFlight only to the owner's own devices. | The demo switch and diagnostics; Sign in with Apple, no anonymous sign-in. |
+| Release build | App Store; TestFlight for the 20-person event, made with the release configuration against the production backend. | Sign in with Apple; anonymous sign-in, the demo switch and diagnostics are all compiled out. |
 
 ### Back end
 
@@ -303,7 +303,7 @@ Encounter states for `design.md`, **Encounter states**: Observed (a discovery ca
 State separately how long each of these is kept and what deletes it: on-device diagnostics, receipts on the device, candidates on the server, token batches, confirmed encounters, favorites, reports, and push tokens.
 
 - **DEFAULT:** development-build diagnostics are kept 7 days.
-- **DEFAULT:** reports are kept until resolved and then for a period the privacy policy will state.
+- **DEFAULT:** reports are kept until resolved and then for a period the privacy policy will state, unless account deletion erases them; only operator moderation outcomes may survive under the safety exception in **Privacy and safety**.
 - Removing access cannot retract an external URL a reader has already copied.
 
 ### Fetching other pages
@@ -404,7 +404,5 @@ For each screen `ui.md` gives: its purpose, how the user reaches it, a text sket
 - Whether a foreign developer needs a government filing number for the China mainland storefront. Sources conflict.
 - Whether a solo developer with a free, ad-free app counts as a trader under EU rules.
 - The exact retention period for resolved reports.
+- The exact retention period for the account-deletion safety record (hashed Apple identifier, operator moderation outcomes and incoming blocks), to settle with the legal review and state in the privacy policy.
 - **UNVERIFIED:** whether the Supabase free plan allows the second, hosted non-production project.
-- **Owner question A — open:** What survives account deletion so that blocks and moderation outcomes still hold for the same Apple identity? **Proposed, not decided:** keep only a one-way hash of the Apple account identifier together with operator moderation outcomes and the blocks other people placed on that account, for a period the privacy policy states, and re-apply them if the same Apple identity signs up again. This possible safety-record exception to deletion awaits the owner's decision; it is not an implemented retention rule.
-- **Owner question B — open:** What is the initial visibility of purposes? **Proposed, not decided:** everyone eligible, like the name, self-introduction and interests.
-- **Owner question C — open:** What build kind and backend does the 20-person event use? **Proposed, not decided:** the event uses a TestFlight build made with the release configuration against the production backend, with no demo switch and no diagnostics, and internal builds go only to the owner's own devices.

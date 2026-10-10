@@ -184,7 +184,7 @@ Each profile field and link uses one of three levels:
 | Compatible only | Eligible users who also meet compatibility conditions. |
 | Private | No other user. |
 
-Once discovery is on, the display name, self-introduction and interests default to everyone eligible. Links have no default level: the user must choose a level when adding each link. The optional contact detail defaults to private.
+Once discovery is on, the display name, self-introduction, interests and purposes default to everyone eligible. Links have no default level: the user must choose a level when adding each link. The optional contact detail defaults to private.
 
 Current settings apply in both directions, including to past encounters, favorites and saved links. The server enforces authorization and never sends an unauthorized field to the app. Direct table access from the app is denied by default.
 
@@ -200,10 +200,10 @@ Current settings apply in both directions, including to past encounters, favorit
 - Delete encounters automatically after 30 days unless the viewing user marks them as favorites. A favorite is retained for that viewer and shows only what the other user currently allows.
 - An encounter deletion or block by either user removes the encounter for both, including favorites.
 - Users can save individual link cards. **DEFAULT:** saved links follow the same rules as favorites and disappear when the encounter is removed.
-- Account deletion is available inside the app and is immediate and permanent.
+- Account deletion is available inside the app and is immediate and permanent for all personal data, with one safety exception: the server keeps only a one-way hash of the Apple account identifier together with operator moderation outcomes and the blocks other people placed on that account, for a period the privacy policy states, and re-applies them if the same Apple identity signs up again. Nothing else survives. The hash cannot be turned back into the Apple identifier; the kept record holds no name, profile field, link, token, encounter or contact detail. A block is dropped when the person who placed it deletes their own account. The privacy policy and the S20 deletion confirmation disclose this exception. The exact retention period is an open item to settle with the legal review.
 - Bluetooth exchanges must not carry account IDs, names, GitHub handles, email addresses or links; only temporary tokens identify the participants.
 
-The retention and deletion contract must also cover on-device diagnostics, on-device receipts, token batches, reports and push tokens. **DEFAULT:** development diagnostics are kept for 7 days; reports are kept until resolved, then for a period stated in the privacy policy. Unspecified retention periods remain open. Details belong in `design.md`, **Retention and deletion contract**.
+The retention and deletion contract must also cover on-device diagnostics, on-device receipts, token batches, reports and push tokens. **DEFAULT:** development diagnostics are kept for 7 days; reports are kept until resolved, then for a period stated in the privacy policy, unless account deletion erases them; only operator moderation outcomes may survive under the safety exception above. Unspecified retention periods remain open. Details belong in `design.md`, **Retention and deletion contract**.
 
 ### Moderation
 
@@ -256,8 +256,8 @@ Development and radio tests use the owner's iPhone 15 and iPad (10th generation)
 | Build kind | Distribution | Development features |
 |---|---|---|
 | Development | Run from the owner's Mac. | Temporary anonymous sign-in, the demo switch and diagnostics. |
-| Internal | TestFlight distribution to the owner's own testers. | The demo switch and diagnostics. |
-| Release | App Store distribution. | Anonymous sign-in, the demo switch and diagnostics are all compiled out. |
+| Internal | TestFlight only to the owner's own devices. | The demo switch and diagnostics; Sign in with Apple, no anonymous sign-in. |
+| Release | App Store; TestFlight for the 20-person event, made with the release configuration against the production backend. | Sign in with Apple; anonymous sign-in, the demo switch and diagnostics are all compiled out. |
 
 Core Bluetooth provides discovery; it is the only Apple framework that works in the background between strangers without pairing and permits a later Android implementation of the same protocol.
 
@@ -274,7 +274,7 @@ Each stage gates the next. Device radio tests and battery measurements are perfo
 | 3 — Basic functions | Build the basic functions, then complete the 160-trial matrix with a borrowed second iPhone. |
 | 4 — Friends test | Test with 3 to 5 friends in a small room or cafe using the free Apple account, cable installs from the owner's Mac, temporary anonymous sign-in and sessions for immediate results. **DEFAULT:** the friends test uses development builds pointed at a hosted non-production Supabase project, because the phones leave the owner's Mac. Anonymous sign-in is enabled only on that non-production project and disabled on production, in addition to being compiled out of the release build. Local Supabase is for automated checks and the owner's own development. View the daily report inside the app without a notification. The GitHub reader alone is sufficient. |
 | 5 — Developer Program | Join the Apple Developer Program; add and verify Sign in with Apple, push notifications and TestFlight. |
-| 6 — Event | Test at one real event with 20 or more people through TestFlight. |
+| 6 — Event | Test at one real event with 20 or more people using a TestFlight build made with the release configuration against the production backend. No demo switch, diagnostics or anonymous sign-in; attendees sign in with Apple. Internal builds keep the demo switch and diagnostics and go only to the owner's own devices. |
 | 7 — Review and Japan release | Obtain one professional review of the privacy policy and terms in Japanese and English, then release publicly in Japan. All link readers must be complete. |
 | 8 — Other storefronts | Expand in waves under the regional conditions below, with worldwide availability as the goal. |
 
@@ -291,7 +291,7 @@ Each stage gates the next. Device radio tests and battery measurements are perfo
 
 Run detached from the debugger. Record iOS and build versions, reset state between trials, bound pending connection lifetimes, and record per-trial elapsed values for discovery, exchange completion, two-minute evidence and server confirmation separately. Test the first-unlock-after-reboot limitation separately. Radio procedures belong in `design.md`, **Test plan**.
 
-The simulator has no Bluetooth. Automated encounter-logic tests use a fake behind the Bluetooth interface for the 2-minute rule, token rotation and both-phones-report rule. Implementation units have terminal checks for Swift packages, simulator builds, backend functions and the local database; commands and tooling belong in `design.md`, **Stack, tools and workflow**.
+The simulator has no Bluetooth. Automated encounter-logic tests use a fake behind the Bluetooth interface for the 2-minute rule, token rotation and both-phones-report rule. Implementation units have terminal checks for Swift packages, simulator builds, backend functions and the local database; commands and tooling belong in `design.md`, **Stack, tools and workflow**. Before the event, verify the TestFlight artifact uses the release configuration and production backend, requires Apple sign-in, contains no anonymous sign-in, demo switch or diagnostics, and follows normal daily reveal and notification timing. Internal builds go only to the owner's own devices.
 
 ### Distribution and operational limits
 
@@ -305,7 +305,7 @@ The simulator has no Bluetooth. Automated encounter-logic tests use a fake behin
 
 The owner is responsible for:
 
-- Privacy policy and terms in Japanese and English, with public URLs for these and support.
+- Privacy policy and terms in Japanese and English, disclosing the account-deletion safety exception and its retention period, with public URLs for these and support.
 - App Store privacy labels and the Bluetooth purpose string.
 - In-app account deletion and a published moderation contact.
 - An App Review demonstration using the sample encounter and review notes.
@@ -354,7 +354,7 @@ The objective is meaningful discovery, not maximizing the number of encounters. 
 | Friends-test backend | Development builds use hosted non-production Supabase; anonymous sign-in enabled only there, disabled on production and compiled out of release. Local Supabase is for automated checks and the owner's own development. |
 | Success measurement | No usage analytics in v1; ask friends-test/event participants for product measures and use development/internal diagnostics for technical measures. |
 | Diagnostics | Development-build diagnostics kept for 7 days. |
-| Moderation report retention | Kept until resolved, then for a period the privacy policy will state. |
+| Moderation report retention | Kept until resolved, then for a period the privacy policy will state, unless account deletion erases them; only operator moderation outcomes may survive under the safety exception. |
 
 Discovery off, the 21:00 daily report, profile visibility and private contact details are specified product defaults, rather than gaps filled during drafting. Links require an explicit visibility choice.
 
@@ -368,14 +368,12 @@ Discovery off, the 21:00 daily report, profile visibility and private contact de
 - Whether a foreign developer needs a government filing number for China mainland distribution; sources conflict.
 - Whether a solo developer with a free, ad-free app counts as a trader under EU rules.
 - The exact retention period for resolved moderation reports.
+- The exact retention period for the account-deletion safety record (hashed Apple identifier, operator moderation outcomes and incoming blocks), to settle with the legal review and state in the privacy policy.
 - `design.md`, **Retention and deletion contract**, now proposes retention periods and deletion triggers for on-device receipts, token batches, push tokens and development/internal diagnostics as **DEFAULT**, pending confirmation after the device checks.
 - `design.md`, **Daily report delivery**, now proposes time-zone handling values as **DEFAULT**, pending confirmation after the device checks.
 - `design.md`, **Bluetooth transport**, now proposes connection timeouts, teardown and background presence-confirmation values as **DEFAULT**, pending confirmation after the device checks.
 - Product success targets; no numerical targets are specified.
 - **UNVERIFIED:** whether the Supabase free plan allows the second, hosted non-production project.
-- **Owner question A — open:** What survives account deletion so that blocks and moderation outcomes still hold for the same Apple identity? **Proposed, not decided:** keep only a one-way hash of the Apple account identifier together with operator moderation outcomes and the blocks other people placed on that account, for a period the privacy policy states, and re-apply them if the same Apple identity signs up again. This possible safety-record exception to deletion awaits the owner's decision; it is not an implemented retention rule.
-- **Owner question B — open:** What is the initial visibility of purposes? **Proposed, not decided:** everyone eligible, like the name, self-introduction and interests.
-- **Owner question C — open:** What build kind and backend does the 20-person event use? **Proposed, not decided:** the event uses a TestFlight build made with the release configuration against the production backend, with no demo switch and no diagnostics, and internal builds go only to the owner's own devices.
 
 The full source list and evidence markings are in `decisions.md`, **Verified sources**, **Encounters**, **Build, test and release path**, and **Stack, tools and workflow**.
 
