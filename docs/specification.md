@@ -76,7 +76,7 @@ Onboarding requests Bluetooth permission and explains what discovery promises, i
 
 ## 5. Links
 
-A link card is one shared link with its automatically filled title, source, tags and opening text, where available for that source. A link reader is the server component that reads one kind of source.
+A link card is one shared link with its automatically filled title or name, description, main language, source, tags and opening or preview text, where available for that source. A link reader is the server component that reads one kind of source.
 
 ### Supported sources
 
@@ -91,7 +91,7 @@ A link card is one shared link with its automatically filled title, source, tags
 
 ### Reading and ownership
 
-- Do not scrape page bodies. Store only the title, source, tags and roughly the first 200 characters of opening text, with the source-specific metadata above.
+- Do not scrape page bodies. Store only title or name, description, main language, source, tags, and roughly the first 200 characters of opening or preview text. Nothing else from the source is stored.
 - The owner previews and can edit every automatically filled field before sharing, and can refresh it on demand.
 - Links open the original content on its platform. The app does not host portfolios, repositories, articles, documents or resumes.
 - External links can identify their owners even when an in-app nickname is used. Explain this before sharing identifiable links.
@@ -113,7 +113,7 @@ Build the GitHub reader first; it alone is enough for the friends test. Qiita an
 
 An encounter records physical co-presence under the rules below. Bluetooth encounters require at least 2 minutes within Bluetooth range, with the session exception described below.
 
-- An **ambient encounter** is an encounter in which at least one of the two people was not in a session. This includes an exchange when only one user is in a session; it is revealed at the daily report. The 2-minute threshold is mandatory. Shorter ambient contacts are discarded so a person walking past cannot collect a card.
+- An **ambient encounter** is a Bluetooth encounter in which at least one of the two people was not in a session. A QR encounter is never ambient. This includes an exchange when only one user is in a session; it is revealed at the daily report. The 2-minute threshold is mandatory. Shorter ambient contacts are discarded so a person walking past cannot collect a card.
 - A **session** is a time-boxed period started deliberately by the user. A **session encounter** is between two users who are both in a session; an exchange counts immediately.
 - A **QR encounter** is created when one user scans the other's QR code, without Bluetooth, and is confirmed immediately under the QR confirmation rule in `design.md`, **Confirmed encounter, security definition**.
 
@@ -152,12 +152,12 @@ Force-quitting the app stops discovery until it is reopened. Onboarding must exp
 
 ## 7. Reveal and notifications
 
-A **revealed encounter** is a confirmed encounter the two users are now allowed to see. The **daily report** is the once-a-day reveal of that day's ambient encounters.
+A **revealed encounter per viewer** is a confirmed encounter that a user is now allowed to see. Each of the two users reaches this at their own daily report, so one may see the other before the reverse. This follows from the decision that each user can change their report time. The **daily report** is the once-a-day reveal of that day's ambient encounters.
 
-- Ambient encounters become visible, with names, only when the daily report arrives.
+- Ambient encounters become visible, with names, only when that viewer's daily report arrives. The reveal gate is per viewer; before it passes, that viewer receives no identifiable preview.
 - The report defaults to 21:00 local time. Users can change its time and turn its notification on or off. Skip the report on days with no encounters.
 - A daily report notification may show names. Delay provides the protection: immediate ambient reveal would identify nearby strangers in real time.
-- Session encounters and QR encounters are revealed immediately.
+- Session encounters and QR encounters pass both viewers' reveal gates immediately.
 - The release build has no immediate ambient notifications.
 - Do not issue someone-is-nearby notifications or prompts of any kind. There is no weekly digest.
 - Development and internal builds have a demo switch for immediate ambient reveal and notification. The same switch is used in device tests and is compiled out of the release build.
@@ -272,7 +272,7 @@ Each stage gates the next. Device radio tests and battery measurements are perfo
 | 1 — Toolchain check | Prove that `swift test` and `xcodebuild` run in the implementing agent's sandbox on this Mac. This is **UNVERIFIED** until the first implementation unit. |
 | 2 — Bluetooth engine | Build the engine inside the real app with diagnostics. Run a one-day check of rungs 3 and 4 on real devices, with made-up identities, no backend and logs kept on the devices. |
 | 3 — Basic functions | Build the basic functions, then complete the 160-trial matrix with a borrowed second iPhone. |
-| 4 — Friends test | Test with 3 to 5 friends in a small room or cafe using the free Apple account, cable installs from the owner's Mac, temporary anonymous sign-in and sessions for immediate results. View the daily report inside the app without a notification. The GitHub reader alone is sufficient. |
+| 4 — Friends test | Test with 3 to 5 friends in a small room or cafe using the free Apple account, cable installs from the owner's Mac, temporary anonymous sign-in and sessions for immediate results. **DEFAULT:** the friends test uses development builds pointed at a hosted non-production Supabase project, because the phones leave the owner's Mac. Anonymous sign-in is enabled only on that non-production project and disabled on production, in addition to being compiled out of the release build. Local Supabase is for automated checks and the owner's own development. View the daily report inside the app without a notification. The GitHub reader alone is sufficient. |
 | 5 — Developer Program | Join the Apple Developer Program; add and verify Sign in with Apple, push notifications and TestFlight. |
 | 6 — Event | Test at one real event with 20 or more people through TestFlight. |
 | 7 — Review and Japan release | Obtain one professional review of the privacy policy and terms in Japanese and English, then release publicly in Japan. All link readers must be complete. |
@@ -283,13 +283,13 @@ Each stage gates the next. Device radio tests and battery measurements are perfo
 - Test rungs 1 to 4 on two pairs: iPhone with iPad and iPhone with iPhone. Run 20 stationary trials for each rung and pair, for 160 trials total.
 - Record 10-second and 30-second passes for information only.
 - Measure completion time of the two-way token exchange and whether both phones confirm two minutes of continued presence.
-- Rung 3 must confirm an encounter within 5 minutes in at least 90 percent of trials.
+- A rung-3 trial passes when both phones hold the two-minute presence evidence for the same exchange within 5 minutes of the start of the trial. Server confirmation time is recorded separately and is not part of the pass mark, because uploads may be deferred. At least 90 percent of rung-3 trials must pass.
 - Rungs 1 and 2 have no pass mark; their results determine only how they are described.
 - Discovery must add at most 5 percentage points of battery use over 8 hours compared with discovery off.
 - If rung 3 fails, stop and rethink: only the QR rung would remain.
 - Twenty trials cannot distinguish 90 percent from 80 percent with confidence. The outcome is a go or no-go signal, not a measured reliability rate.
 
-Run detached from the debugger. Record iOS and build versions, reset state between trials, bound pending connection lifetimes, and record discovery, exchange completion and confirmation times separately. Test the first-unlock-after-reboot limitation separately. Radio procedures belong in `design.md`, **Test plan**.
+Run detached from the debugger. Record iOS and build versions, reset state between trials, bound pending connection lifetimes, and record per-trial elapsed values for discovery, exchange completion, two-minute evidence and server confirmation separately. Test the first-unlock-after-reboot limitation separately. Radio procedures belong in `design.md`, **Test plan**.
 
 The simulator has no Bluetooth. Automated encounter-logic tests use a fake behind the Bluetooth interface for the 2-minute rule, token rotation and both-phones-report rule. Implementation units have terminal checks for Swift packages, simulator builds, backend functions and the local database; commands and tooling belong in `design.md`, **Stack, tools and workflow**.
 
@@ -316,10 +316,12 @@ Japan is the first storefront. Other storefronts follow in waves. EU and UK rele
 
 ## 13. Success metrics
 
+**DEFAULT:** v1 collects no usage analytics. Product measures are gathered by asking participants at the friends test and at the event, and technical measures come from the diagnostics of development and internal builds.
+
 Technical measures:
 
 - Encounter confirmation success and latency, reported separately by rung and device pair.
-- Discovery, exchange completion and confirmation times.
+- Per-trial elapsed values for discovery, exchange completion, two-minute evidence and server confirmation.
 - False-positive and duplicate encounters.
 - Additional battery use with discovery enabled.
 
@@ -349,6 +351,8 @@ The objective is meaningful discovery, not maximizing the number of encounters. 
 | Feed card | Display name, shared interests, first visible link card, a verified or unverified label per link, encounter kind (ambient, session or QR), and day. Never time or place. Layout belongs in `ui.md`, **The 26 screens**. |
 | Temporary tokens | Random, server-issued in batches, valid for 15-minute windows and the only identifiers exchanged. Details belong in `design.md`, **Bluetooth transport**. |
 | Presence confirmation | Keep the connection and read again after two minutes, or exchange again with the same peer at least two minutes after the first exchange. The one-day check determines background feasibility; details belong in `design.md`, **Bluetooth transport**. |
+| Friends-test backend | Development builds use hosted non-production Supabase; anonymous sign-in enabled only there, disabled on production and compiled out of release. Local Supabase is for automated checks and the owner's own development. |
+| Success measurement | No usage analytics in v1; ask friends-test/event participants for product measures and use development/internal diagnostics for technical measures. |
 | Diagnostics | Development-build diagnostics kept for 7 days. |
 | Moderation report retention | Kept until resolved, then for a period the privacy policy will state. |
 
@@ -364,10 +368,14 @@ Discovery off, the 21:00 daily report, profile visibility and private contact de
 - Whether a foreign developer needs a government filing number for China mainland distribution; sources conflict.
 - Whether a solo developer with a free, ad-free app counts as a trader under EU rules.
 - The exact retention period for resolved moderation reports.
-- Retention periods and deletion triggers not yet specified for on-device receipts, token batches, push tokens and internal-build diagnostics. Define the complete contract in `design.md`, **Retention and deletion contract**.
-- Time-zone handling for the daily report, to be defined in `design.md`, **Daily report delivery**.
-- Connection timeouts, teardown and the background presence-confirmation approach, to be settled in `design.md`, **Bluetooth transport**, and the device checks.
+- `design.md`, **Retention and deletion contract**, now proposes retention periods and deletion triggers for on-device receipts, token batches, push tokens and development/internal diagnostics as **DEFAULT**, pending confirmation after the device checks.
+- `design.md`, **Daily report delivery**, now proposes time-zone handling values as **DEFAULT**, pending confirmation after the device checks.
+- `design.md`, **Bluetooth transport**, now proposes connection timeouts, teardown and background presence-confirmation values as **DEFAULT**, pending confirmation after the device checks.
 - Product success targets; no numerical targets are specified.
+- **UNVERIFIED:** whether the Supabase free plan allows the second, hosted non-production project.
+- **Owner question A — open:** What survives account deletion so that blocks and moderation outcomes still hold for the same Apple identity? **Proposed, not decided:** keep only a one-way hash of the Apple account identifier together with operator moderation outcomes and the blocks other people placed on that account, for a period the privacy policy states, and re-apply them if the same Apple identity signs up again. This possible safety-record exception to deletion awaits the owner's decision; it is not an implemented retention rule.
+- **Owner question B — open:** What is the initial visibility of purposes? **Proposed, not decided:** everyone eligible, like the name, self-introduction and interests.
+- **Owner question C — open:** What build kind and backend does the 20-person event use? **Proposed, not decided:** the event uses a TestFlight build made with the release configuration against the production backend, with no demo switch and no diagnostics, and internal builds go only to the owner's own devices.
 
 The full source list and evidence markings are in `decisions.md`, **Verified sources**, **Encounters**, **Build, test and release path**, and **Stack, tools and workflow**.
 

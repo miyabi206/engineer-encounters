@@ -19,12 +19,14 @@ The following rules apply to every screen, sketch, card and external surface:
 
 - Show an encounter's **day only**, never its time or place. Do not request location. Session time remaining and the daily report's scheduled time are control information, not encounter times.
 - Ambient encounters appear only through the viewer's daily report; the two viewers may reveal at different times (`design.md`, **Encounter states** and **Daily report delivery**). Before reveal, show no names, cards, counts, avatars or nearby-person prompts for them. A session encounter appears immediately only when both people are in a session and confirmation succeeds. QR encounters appear immediately after confirmation.
-- Show only currently authorized fields. Matching orders the feed and gates compatible-only fields; it does not hide an otherwise eligible encounter. A card can have no visible links. If every field is private, show a non-identifying encounter shell, without an initial avatar or inferred identity (`design.md`, **Matching and visibility**).
+- Show only currently authorized fields. Matching orders the feed and gates compatible-only fields; it does not hide an otherwise eligible encounter. A card can have no visible links. **DEFAULT:** while an encounter is not eligible, for example because the other person turned discovery off, it is hidden from the feed and from favorites, and it returns if it becomes eligible again within its retention period. The non-identifying shell is used only when the encounter is eligible and every field is private. An eligible all-private shell has no initial avatar or inferred identity (`design.md`, **Matching and visibility**).
 - Eligibility requires a confirmed encounter, discovery on for both people, and no block in either direction. Compatibility also requires overlapping purposes and both people's shared-interest thresholds. The three visibility choices are everyone eligible, compatible only and private.
 - Current visibility applies to old encounters, favorites and saved links. Under `design.md`, **iOS app structure**, other people's cards stay only in memory, are re-fetched on opening or foregrounding, and are cleared on sign-out, access changes or loss of a fresh authorization response. Favorites and saved links store references, not card snapshots. If access disappears, remove that content. A deleted encounter or a block removes it for both people, including favorites and saved links. Turning discovery off does not itself delete encounters.
 - Ordinary encounters expire after 30 days. A favorite is retained for its viewer; the other viewer's unretained access expires independently. Under `design.md`, **Retention and deletion contract**, expiry is at the start of the local encounter date plus 30 days, and a saved link follows the same retention rule. Neither overrides current authorization or encounter removal. Unconfirmed candidates are never cards and expire after 48 hours.
 - There is no AI. There are no connection requests, mutual connections or private messages. Link previews come from the source readers and are edited by their owner. Originals stay on their platforms.
 - Use initial-letter avatars only from an authorized display name under the source drafting default. Do not add a role field or an uploaded avatar. Verification is a property of each link, not a badge certifying the whole person.
+- **DEFAULT:** the friends test uses development builds pointed at a hosted non-production Supabase project, because the phones leave the owner's Mac. Anonymous sign-in is enabled only on that non-production project and disabled on production, in addition to being compiled out of the release build. Local Supabase is for automated checks and the owner's own development.
+- **DEFAULT:** the server rejects a change that would remove a discovery prerequisite (the name, the self-introduction, the last interest or the last link) while discovery is on, and the user must turn discovery off first.
 - Anonymous sign-in exists only on S01 in development builds. Internal builds use durable Sign in with Apple. Diagnostics and the immediate ambient demo switch exist only on S22 in development and internal builds (`design.md`, **Stack, tools and workflow**, **Build kinds**). All three are compiled out of release builds, including their navigation entries.
 
 For a failed write, keep the input and show an inline error with Retry. Confirm success before leaving the form; the session stop follows the immediate local-stop rule on S08. Do not show stale protected content on a loading or error screen. System permission sheets, browser pages and confirmations are surfaces, not additional numbered screens.
@@ -54,7 +56,7 @@ The visibility explanations clarify that “Everyone eligible” still requires 
 
 The bottom tab bar contains **Discover**, **Profile** and **Settings**. Discover opens S06, Profile opens S11, and Settings opens a plain list. The list has no numbered screen identifier. It links to S16 Discovery and matching, S17 Visibility, S18 Daily report, S19 Blocked users, S20 Account and S21 Legal and support. S22 Diagnostics is an additional row only in development and internal builds. Release has six visible rows. The list uses the same bilingual titles as its destinations.
 
-Onboarding has no tab bar: S01 → S02 → S03 → S04 → S05. S04 uses S14 and S15 to add its first link, then returns to S04. S05 offers explicit discovery activation or continuing with discovery off. Right after successful activation, explain that the daily report arrives as a notification and request notification permission on S05. Granting enables notifications; declining leaves them off. Both continue to S06 with discovery enabled. Skip this request where push is unavailable and read the report in-app. S18 changes the preference later. Existing signed-in users with completed onboarding enter S06; unfinished setup resumes at its unfinished screen. S21 is also available from S01 before sign-in.
+Onboarding has no tab bar: S01 → S02 → S03 → S04 → S05. **DEFAULT:** onboarding requires the name, self-introduction, an interest, a purpose and a first link before S05, although the product decision requires the name, self-introduction, an interest and a link only for turning discovery on. S04 uses S14 and S15 to add its first link, then returns to S04. S05 offers explicit discovery activation or continuing with discovery off. Right after successful activation, explain that the daily report arrives as a notification and request notification permission on S05. Granting enables notifications; declining leaves them off. Both continue to S06 with discovery enabled. Skip this request where push is unavailable and read the report in-app. S18 changes the preference later. Existing signed-in users with completed onboarding enter S06; unfinished setup resumes at its unfinished screen. S21 is also available from S01 before sign-in. **DEFAULT:** development builds also expose S01 → S22 before sign-in for the no-backend, no-account one-day check; internal builds reach S22 only from Settings. Both the pre-sign-in route and trial-log sharing are absent from release builds.
 
 **DEFAULT:** Tab roots keep their own navigation stacks. Details and editors push onto the current stack; S26 is a sheet. Back returns to the named originating screen. S23, S24 and S25 are shared state views within the Discover flow, rather than extra tabs. They retain navigation to Profile and Settings. S06 can contain the S25 empty state or an S23/S24 status panel while retaining accessible, authorized content. S24 never exposes another person's card while discovery is off.
 
@@ -62,7 +64,7 @@ Navigation map (an arrow names an in-app destination; “same” means the curre
 
 | Origin | Action and destination |
 |---|---|
-| S01 | Sign in → S02 for new users, unfinished setup screen for returning users, or S06; legal links → S21. |
+| S01 | Sign in → S02 for new users, unfinished setup screen for returning users, or S06; legal links → S21; development-only diagnostics before sign-in → S22 (**DEFAULT**). |
 | S02 | Continue → S03; Back → S01. |
 | S03 | Continue → S04; Back → S02. |
 | S04 | Add first link → S14 → S15 → S04; edit saved link → S15; Continue → S05; Back → S03. |
@@ -73,18 +75,18 @@ Navigation map (an arrow names an in-app destination; “same” means the curre
 | S09 | Confirmed QR exchange → S07; discovery off → S24; Back → S06, S08, S23 or S25, its origin. |
 | S10 | Favorite or saved-link context → S07; original link → browser, return S10; remove favorite/save → same; Back → S06. |
 | S11 | Edit → S12; My links → S13; visibility → S17; original link → browser, return S11. |
-| S12 | Save or Cancel → S11; visibility → S17, then return S12. |
+| S12 | Save, Cancel or Back → whichever screen opened it: S11, S06, S16 or S24; prerequisite guidance → S16; visibility → S17, then return S12. |
 | S13 | Add → S14 → S15 → S13; edit → S15; original link → browser, return S13; Back → S11/S17/S16/S24, its origin. |
 | S14 | Select source item or fetch page → S15; Cancel/Back → S04 or S13, its origin. |
 | S15 | Save/delete existing link → S04 or S13, its origin; Cancel → S14 for a new link or S04/S13 for an existing link; prerequisite guidance → S16. |
 | Settings list | Rows → S16–S21, plus S22 only in permitted builds. |
-| S16 | Save settings → same; complete profile → S12; add link → S13; Bluetooth issue → S23; discovery off → S24; Back → Settings list or S24, its origin. |
+| S16 | Save settings → same; complete profile → S12; add link → S13; Bluetooth issue → S23; discovery off → S24; Back → whichever screen opened it: Settings list, S06, S12, S15, S20, S23 or S24. |
 | S17 | Save → same; link visibility → S13 → S15; Back → Settings list, S11 or S12, its origin. |
 | S18 | Time/notification change → same; system settings → iOS Settings, return S18; Back → Settings list. |
 | S19 | Unblock → same; Back → Settings list. |
-| S20 | Sign out/delete account → S01; Cancel → same; Back → Settings list. |
+| S20 | Disconnect GitHub → confirmation → same (**DEFAULT**); sign out/delete account → S01; Cancel → same; prerequisite guidance → S16; Back → Settings list. |
 | S21 | Policy, terms or support → external surface, return S21; Back → Settings list or S01, its origin. |
-| S22 | Demo switch/diagnostic refresh → same; Back → Settings list. |
+| S22 | Trial reset with visible confirmation, presence selector, recorded trials, diagnostic refresh or demo switch → same; share local trial log as file → system share sheet, return S22 (**DEFAULT**); Back → Settings list or development-only S01, its origin. |
 | S23 | Retry → S06/S08/S05/S16, its origin, if ready; QR → S09; discovery settings → S16; iOS Settings → system, return S23. |
 | S24 | Enable discovery → S16; complete basics → S12; add link → S13; sample → S07 in sample context; return to Discover → S06 containing S24 until enabled. |
 | S25 | Sample → S07 in sample context; Start session → S08; QR → S09; dismiss → same empty state. |
@@ -107,14 +109,14 @@ Discover the work of engineers you encounter.
 [ ] I agree to the terms and privacy policy
 [Terms]  [Privacy policy]
 [Sign in with Apple]
-(Development only: [Temporary sign-in])
+(Development only: [Temporary sign-in] [Diagnostics])
 ```
 
 **Elements:** Public name, short introduction, separate age and agreement declarations, legal links and the standard Apple sign-in control. Both declarations are required before sign-in. GitHub is not a sign-in option. The temporary anonymous control is compiled in only for development, with the same declarations; it is absent in internal and release builds.
 
 **States:** Empty: declarations are unchecked. Loading: disable repeated sign-in and show progress. Error: show sign-in failure with Retry; cancellation returns to this screen without an error. A person who cannot make the 18+ declaration cannot proceed.
 
-**Actions:** Successful new sign-in → S02. Existing account → its unfinished S02–S05 step or S06 when setup is complete. Terms/privacy → S21 in signed-out context; Back there → S01. Temporary sign-in follows the same setup route. Retry → S01 sign-in flow.
+**Actions:** Successful new sign-in → S02. Existing account → its unfinished S02–S05 step or S06 when setup is complete. Terms/privacy → S21 in signed-out context; Back there → S01. Temporary sign-in follows the same setup route. Retry → S01 sign-in flow. **DEFAULT:** Diagnostics → S22 before sign-in only in development builds, with no backend or account required; Back → S01.
 
 | Japanese | English |
 |---|---|
@@ -126,6 +128,7 @@ Discover the work of engineers you encounter.
 | プライバシーポリシー | Privacy policy |
 | Appleでサインイン | Sign in with Apple |
 | テスト用の一時サインイン | Temporary sign-in |
+| 診断 | Diagnostics |
 
 ### S02 Profile basics
 
@@ -185,7 +188,7 @@ Purposes
 
 ### S04 First link
 
-**Purpose and entry:** Add and preview one link before discovery can be enabled. Reach from S03, S15 after saving a first link, or Back on S05.
+**Purpose and entry:** Add and preview one link before S05 under the onboarding **DEFAULT**. Reach from S03, S15 after saving a first link, or Back on S05.
 
 ```text
 [Back] Your first link
@@ -270,7 +273,7 @@ No need to message. Explore at your pace.
 [Discover] [Profile] [Settings]
 ```
 
-**Elements:** Discovery status linked to S16, session action (View session when active), QR, the user's interest chips, favorites filter and day groups. The source drafting card includes display name, shared interests, first visible link, per-link verification and encounter kind. No encounter time or place appears. Omit unauthorized fields; if no link is visible, the card can still open S07. **DEFAULT:** newer day groups come first. Within a day, follow `design.md`, **Matching and visibility**: compatible encounters first, then shared-interest count, then a stable encounter ID; never encounter time. If every field is private, show a non-identifying shell with day and kind and no avatar or identity.
+**Elements:** Discovery status linked to S16, session action (View session when active), QR, the user's interest chips, favorites filter and day groups. The source drafting card includes display name, shared interests, first visible link, per-link verification and encounter kind. No encounter time or place appears. Omit unauthorized fields; if no link is visible, the card can still open S07. **DEFAULT:** newer day groups come first. Within a day, follow `design.md`, **Matching and visibility**: compatible encounters first, then shared-interest count, then a stable encounter ID; never encounter time. **DEFAULT:** hide ineligible encounters from this feed and from favorites; they return if eligible again within retention. Only eligible encounters with every field private use a non-identifying shell with day and kind and no avatar or identity.
 
 **States:** Empty: S25. Loading: neutral skeletons without names, counts or candidate data. Error: inline Retry; never present an unrevealed ambient card as a fallback. Discovery off: S24 suppresses cards. Bluetooth unavailable: S23 status; existing authorized revealed cards remain readable, and QR can still work.
 
@@ -313,7 +316,7 @@ Link cards: source, title, description, tags, opening text
 [More: report or block]  [Delete encounter]
 ```
 
-**Elements:** Initial avatar, authorized profile fields, common interests/purposes only when authorized, day and kind, all visible link cards, per-link verification and an optional authorized contact detail. If every field is private, retain a non-identifying shell with day and kind, omit the avatar, and use “No information is shared with you” (`design.md`, **Matching and visibility**). No role is inferred. Explain that an unverified link's ownership is not confirmed. A sample is labelled throughout and has no real contact or live safety action.
+**Elements:** Initial avatar, authorized profile fields, common interests/purposes only when authorized, day and kind, all visible link cards, per-link verification and an optional authorized contact detail. Only when eligible and every field is private, retain a non-identifying shell with day and kind, omit the avatar, and use “No information is shared with you” under the visibility **DEFAULT** (`design.md`, **Matching and visibility**). No role is inferred. Explain that an unverified link's ownership is not confirmed. A sample is labelled throughout and has no real contact or live safety action.
 
 **States:** Empty: no visible links → say so without implying poor compatibility; missing/removed encounter → return to S06 or S10. Loading: placeholders until authorization succeeds. Error: Retry without protected cached content. Sample mode uses fictitious on-device data and no encounter date/kind pretending it is real.
 
@@ -423,7 +426,7 @@ Saved link cards: source, title, preview, verification
 
 **Elements:** Two segments under a drafting default, current authorized cards, original-link and encounter-context actions. Favorites survive ordinary 30-day expiry for this viewer; saved links do so under the source default. Store references only, never persist other people's cards on the device; re-fetch on opening or foregrounding (`design.md`, **iOS app structure**). Removing the last favorite or saved-link retention after normal expiry removes that viewer's retained access (`design.md`, **Retention and deletion contract**).
 
-**States:** Empty: explain how to favorite an encounter or save a link on S07. Loading: recheck access before showing cards. Error: Retry, without stale restricted content. Removed/blocked encounters disappear; private links disappear from this view. Discovery off uses S24 and suppresses other people's cards.
+**States:** Empty: explain how to favorite an encounter or save a link on S07. Loading: recheck access before showing cards. Error: Retry, without stale restricted content. Removed/blocked encounters disappear; private links disappear from this view. **DEFAULT:** ineligible retained encounters are hidden, including when the other person turns discovery off, and return if eligible again within their retention period; no shell stands in for an ineligible encounter. Discovery off uses S24 and suppresses other people's cards.
 
 **Actions:** Encounter or View encounter → S07. Open original link → browser, return S10. Remove favorite/Unsave link stays on S10 and updates the list. Segment change/Retry stays on S10. Back → S06.
 
@@ -482,11 +485,11 @@ Contact detail [optional, one value]
 [Visibility]
 ```
 
-**Elements:** The same fields and source drafting limits as onboarding, plus one optional contact detail. Contact starts private. No chat, role, free-text interest or avatar uploader. **DEFAULT:** if an edit removes a required discovery field while discovery is on, require the user to keep it or explicitly turn discovery off on S16 first.
+**Elements:** The same fields and source drafting limits as onboarding, plus one optional contact detail. Contact starts private. No chat, role, free-text interest or avatar uploader. **DEFAULT:** the server rejects a change that would remove a discovery prerequisite (the name, the self-introduction, the last interest or the last link) while discovery is on, and the user must turn discovery off first.
 
 **States:** Empty: show missing-field guidance; optional contact may stay blank. Loading: load/save without losing unsaved edits. Error: field-level validation or save error with retained input. Visibility changes affect past cards as well as future ones.
 
-**Actions:** Save → S11 after success. Cancel → S11, with discard confirmation if changed. Visibility → S17, then Back → S12. Missing discovery prerequisite guidance → S16. Editing/Retry stays on S12. Returning from S17 preserves other unsaved input.
+**Actions:** Save after success, Cancel or Back → whichever screen opened S12: S11, S06, S16 or S24, with discard confirmation for unsaved changes. Visibility → S17, then Back → S12. Missing discovery prerequisite guidance → S16. Editing/Retry stays on S12. Returning from S17 preserves other unsaved input.
 
 | Japanese | English |
 |---|---|
@@ -580,9 +583,9 @@ Preview card · Identity warning
 (Existing link: [Delete link])
 ```
 
-**Elements:** All automatically filled fields are editable, including source-specific description, tags, language and opening text where present. Keep the actual source URL/reader identity clear; editing a source display label does not change verification. Verification itself is determined by the account/link rules, not an editable checkbox. A connected GitHub account verifies its repository links. Other links are verified under a website/social address on that verified GitHub profile; Qiita also qualifies if its linked GitHub ID matches. All others show Unverified. Only roughly the first 200 characters of opening text are stored. GitHub uses name, description, main language and README opening; Qiita uses title, tags and opening; Zenn uses title and opening or page preview; other pages use title and preview description. No full article body is displayed. Show a preview and identity warning before saving. New links have three unselected visibility choices; existing links retain their explicit choice.
+**Elements:** All automatically filled fields are editable, including source-specific description, tags, language and opening text where present. Keep the actual source URL/reader identity clear; editing a source display label does not change verification. Verification itself is determined by the account/link rules, not an editable checkbox. A connected GitHub account verifies its repository links. Other links are verified under a website/social address on that verified GitHub profile; Qiita also qualifies if its linked GitHub ID matches. All others show Unverified. Only roughly the first 200 characters of opening or preview text are stored. **DEFAULT:** descriptions are also capped at 200 characters, following `design.md`, **Link readers**. GitHub uses name, description, main language and README opening; Qiita uses title, tags and opening; Zenn uses title and opening or page preview; other pages use title and preview description. No full article body is displayed. Show a preview and identity warning before saving. New links have three unselected visibility choices; existing links retain their explicit choice.
 
-**States:** Empty: missing required title or visibility → inline guidance and unavailable Save; absent optional metadata is allowed. Loading: save or refresh progress. Error: save/refresh failure preserves the edited card. **DEFAULT:** refresh presents replacement values before they overwrite edits; confirm replacement or cancel. Deleting the last link while discovery is on requires turning discovery off on S16 first.
+**States:** Empty: missing required title or visibility → inline guidance and unavailable Save; absent optional metadata is allowed. Loading: save or refresh progress. Error: save/refresh failure preserves the edited card. **DEFAULT:** refresh presents replacement values before they overwrite edits; confirm replacement or cancel. **DEFAULT:** the server rejects a change that would remove a discovery prerequisite (the name, the self-introduction, the last interest or the last link) while discovery is on, and the user must turn discovery off first. Deleting the last link requires turning discovery off on S16 first.
 
 **Actions:** Edit/select visibility stays on S15. Save → S04 or S13, its origin, after success. Refresh → S15 replacement confirmation/preview, then same. Delete existing link → confirmation → S13 (S04 if edited in onboarding); Cancel deletion stays S15. Removing a link removes in-app access, not the original or copied URLs. Cancel new link → S14; Cancel existing edit → S04/S13, its origin, with discard confirmation when needed. Discovery prerequisite guidance → S16. Retry stays S15.
 
@@ -622,7 +625,7 @@ Matching orders encounters; it does not hide them.
 
 **States:** Empty: prerequisites missing, with precise completion links. Loading: load/update settings; do not claim activation until success. Error: save failure restores the last confirmed switch state; Bluetooth unavailable → S23. Threshold range is open, so no final minimum/maximum wording is specified here. Discovery off hides cards under S24 but does not erase them.
 
-**Actions:** Enable discovery → stays on S16 after success; next Discover visit → S06/S25. Missing basics/interests → S12; missing link → S13. Bluetooth issue → S23. Disable discovery → S24 in Discover under a drafting default; current visibility immediately stops access in both directions. Save matching settings stays on S16 and reorders eligible encounters without removing incompatible ones. Back → Settings list or S24, its origin. Retry stays S16.
+**Actions:** Enable discovery → stays on S16 after success; next Discover visit → S06/S25. Missing basics/interests → S12; missing link → S13. Bluetooth issue → S23. Disable discovery → S24 in Discover under a drafting default; current visibility immediately stops access in both directions. Save matching settings stays on S16 and reorders eligible encounters without removing incompatible ones. Back → whichever screen opened S16: Settings list, S06, S12, S15, S20, S23 or S24. Retry stays S16.
 
 | Japanese | English |
 |---|---|
@@ -739,16 +742,17 @@ Unblocking does not restore deleted encounters.
 [Back] Account
 Sign-in: Apple (development may show Temporary account)
 Linked identity: GitHub connected / Not connected
+(When connected: [Disconnect GitHub])
 [Sign out]
 [Delete account] (destructive)
 Deletion is immediate and permanent.
 ```
 
-**Elements:** Sign-in status, linked GitHub verification status, sign-out and in-app deletion. GitHub is not a replacement sign-in method. Do not add identity unlinking or account migration. A development temporary account warning explains that reinstalling is not a durable identity.
+**Elements:** Sign-in status, linked GitHub verification status, Disconnect GitHub, sign-out and in-app deletion. GitHub is not a replacement sign-in method. **DEFAULT:** after confirmation, Disconnect GitHub makes links verified through that GitHub account unverified and removes repository link cards read through it. If removal would delete the last link while discovery is on, the server rejects the change; turn discovery off first. A development temporary account warning explains that reinstalling is not a durable identity.
 
-**States:** Empty: GitHub not connected is valid. Loading: process sign-out/deletion with repeated actions disabled. Error: retain the account screen and offer Retry; never claim deletion succeeded while offline or after a failed request. Once deletion begins, access stays denied even if a later deletion step fails; report an actionable error without restoring access (`design.md`, **Retention and deletion contract**). On auth expiry, return S01 without claiming deletion.
+**States:** Empty: GitHub not connected is valid. Loading: process disconnect/sign-out/deletion with repeated actions disabled. Error: retain the account screen and offer Retry; never claim deletion succeeded while offline or after a failed request. Once deletion begins, access stays denied even if a later deletion step fails; report an actionable error without restoring access (`design.md`, **Retention and deletion contract**). On auth expiry, return S01 without claiming deletion.
 
-**Actions:** Sign out → confirmation → S01 after success; it does not delete the account. Delete account → destructive confirmation describing immediate, permanent deletion → S01 after success, with no grace period or recovery flow. Cancel stays S20. Back → Settings list. Retry → S20. Sign-out stops local radio participation, clears local cards, receipts and token batches, and removes that installation's push association; deletion also removes all push associations and queued notifications (`design.md`, **Bluetooth transport**, **iOS app structure**, **Daily report delivery** and **Retention and deletion contract**). Active-session ledger behavior across sign-out remains in **Open items**; no continued signed-out access is displayed.
+**Actions:** **DEFAULT:** Disconnect GitHub → confirmation explaining verification loss and repository-card removal → S20 after success; prerequisite rejection → guidance to S16 to turn discovery off first. Sign out → confirmation → S01 after success; it does not delete the account. Delete account → destructive confirmation describing immediate, permanent deletion → S01 after success, with no grace period or recovery flow. Cancel stays S20. Back → Settings list. Retry → S20. Sign-out stops local radio participation, clears local cards, receipts and token batches, and removes that installation's push association; deletion also removes all push associations and queued notifications (`design.md`, **Bluetooth transport**, **iOS app structure**, **Daily report delivery** and **Retention and deletion contract**). Active-session ledger behavior across sign-out remains in **Open items**; no continued signed-out access is displayed.
 
 | Japanese | English |
 |---|---|
@@ -756,6 +760,8 @@ Deletion is immediate and permanent.
 | サインイン方法 | Sign-in method |
 | 一時アカウント | Temporary account |
 | GitHub連携 | GitHub connection |
+| GitHub連携を解除 | Disconnect GitHub |
+| 連携を解除すると、このアカウントで確認されたリンクは未確認となり、読み込んだリポジトリのリンクカードは削除されます。 | Disconnecting makes links verified through this account unverified and removes repository link cards read through it. |
 | 未連携 | Not connected |
 | サインアウト | Sign out |
 | アカウントを削除 | Delete account |
@@ -794,23 +800,28 @@ Engineer Encounters · App version
 
 ### S22 Diagnostics
 
-**Purpose and entry:** Inspect local test status in development and internal builds. Reach only from their Settings list. Both the screen and its row are compiled out of release.
+**Purpose and entry:** Run and inspect local radio trials in development and internal builds. Reach from their Settings list. **DEFAULT:** development builds also reach S22 from S01 before sign-in for the no-backend, no-account one-day check. The screen, routes and sharing are absent from release.
 
 ```text
 [Back] Diagnostics
 Development / Internal build · App and iOS versions
 Bluetooth / discovery / own-session status
-Anonymous trial counters and elapsed durations
+Presence approach [Held connection / Second exchange]
+[Reset trial]  (Reset confirmed / Reset failed)
+Per-trial elapsed values from trial start:
+  Discovery / Exchange completion / Two-minute evidence / Server confirmation
+Recorded trials [list, including missing or pending values]
 Local diagnostic summary [Refresh]
+[Share trial log]
 Immediate ambient demo [off / on]
 Test-only: reveals and notifies ambient encounters immediately.
 ```
 
-**Elements:** Build/device versions, own-device status, anonymous aggregate trial counts and elapsed measurements. Keep logs on the device. Do not show encounter timestamps, places, participant identities, tokens, raw receipts or credential values. Radio test recording procedures belong in `design.md`, **Test plan**, rather than a user encounter timeline. The demo switch is available only here in development/internal builds; it reveals and notifies ambient encounters immediately for tests. It changes reveal/notification timing only, preserving the two-minute and both-receipts rules, and never adds a nearby-person prompt. The demo route exists only on non-production backends (`design.md`, **Stack, tools and workflow**, **Build kinds**). Diagnostics are kept 7 days in both development and internal builds, pruned on launch/write and available background work, and cleared on sign-out or account deletion (`design.md`, **Retention and deletion contract**).
+**Elements:** Build/device versions, own-device status, presence-approach selector (held connection or second exchange), trial reset with visible success/failure confirmation, recorded-trial list and per-trial elapsed values from trial start for discovery, exchange completion, two-minute evidence and server confirmation. Record both devices' evidence for the same exchange; server confirmation does not decide rung-3 success. Missing, one-sided and pending values are explicit. **DEFAULT:** share the local trial log as a file using the system share sheet in development/internal builds; release has no sharing feature. Keep the source log on the device and apply the same diagnostic-data limits to the shared file. Do not show encounter timestamps, places, participant identities, tokens, raw receipts or credential values. Radio test recording procedures belong in `design.md`, **Test plan**, rather than a user encounter timeline. The demo switch is available only here in development/internal builds; it reveals and notifies ambient encounters immediately for tests. It changes reveal/notification timing only, preserving the two-minute and both-receipts rules, and never adds a nearby-person prompt. The demo route exists only on non-production backends (`design.md`, **Stack, tools and workflow**, **Build kinds**). Diagnostics are kept 7 days in both development and internal builds, pruned on launch/write and available background work, and cleared on sign-out or account deletion (`design.md`, **Retention and deletion contract**).
 
 **States:** Empty: No diagnostic data yet. Loading: read local summary. Error: show a local-read or demo-setting error with Retry. No server is required for the initial made-up-identity radio test's local measurements; unavailable server/push functions are labelled unavailable, not simulated as successful.
 
-**Actions:** Refresh/Retry stays S22. Demo toggle stays S22 after success, with a persistent test-only warning while on. Back → Settings list. No log export, new sign-in method or production override is added.
+**Actions:** Reset trial cancels connections, clears pending attempts and resets trial state/timers with fresh attempt nonces; reset server test state when a backend is in use. Show visible Reset confirmed only after success; a failure stays visible and prevents claiming a clean next trial. Select the presence approach before starting a trial. Selector, recorded trials, Refresh/Retry and demo toggle stay S22, with a persistent test-only warning while demo is on. **DEFAULT:** Share trial log → system share sheet with the local log file, return S22; cancellation sends nothing. Back → Settings list or development-only S01, its origin. Pre-sign-in trials use development-only local test tokens and the local confirmation harness; server confirmation is unavailable without a backend.
 
 | Japanese | English |
 |---|---|
@@ -819,6 +830,18 @@ Test-only: reveals and notifies ambient encounters immediately.
 | 内部テストビルド | Internal build |
 | 診断データはまだありません | No diagnostic data yet |
 | 更新 | Refresh |
+| 試行をリセット | Reset trial |
+| リセット完了 | Reset confirmed |
+| リセット失敗 | Reset failed |
+| 存在確認の方式 | Presence approach |
+| 接続を維持 | Held connection |
+| 2回目の交換 | Second exchange |
+| 発見までの経過時間 | Discovery elapsed |
+| 交換完了までの経過時間 | Exchange completion elapsed |
+| 2分間の証拠取得までの経過時間 | Two-minute evidence elapsed |
+| サーバー確認までの経過時間 | Server confirmation elapsed |
+| 記録した試行 | Recorded trials |
+| 試行ログを共有 | Share trial log |
 | 通常のすれちがいを即時表示するデモ | Immediate ambient demo |
 | テスト専用：通常のすれちがいをすぐに表示・通知します | Test only: reveals and notifies ambient encounters immediately |
 | 利用できません | Unavailable |
@@ -1038,11 +1061,14 @@ These are proposed UI choices, not additional features or confirmed owner decisi
 | Navigation | Independent tab stacks, pushed details/editors, S26 sheet, shared-state panels in Discover, no tab bar during onboarding. Preserve form values when returning from a subflow. Resume incomplete onboarding. |
 | Forms | Inline field errors, neutral progress, disable duplicate writes, explicit saves, retained input on failure. Save buttons require required fields; unsaved edits prompt before discarding. Source-reader failure is not successful import. |
 | Purposes | No preselection; require at least one purpose during onboarding and subsequent edits. Users may select both supported purposes. This requirement does not add a fifth discovery prerequisite. |
-| Activation and required data | S05 offers Not now while keeping discovery off. Missing fields link to their editors. Removing the last required field/link while discovery is on requires explicit disabling first. Disabling on S16 leads to S24. |
-| Feed order | Newer day groups first; within a day, compatible cards first, then shared-interest count, then stable encounter ID (`design.md`, **Matching and visibility**). All-private cards use a non-identifying shell. Never display encounter times. |
+| Onboarding prerequisites | Name, self-introduction, an interest, a purpose and a first link required before S05; product discovery prerequisites alone do not impose this onboarding gate. |
+| Friends-test backend | Development builds use hosted non-production Supabase; anonymous sign-in enabled only there, disabled on production and compiled out of release. Local Supabase is for automated checks and the owner's own development. |
+| Activation and required data | S05 offers Not now while keeping discovery off. Missing fields link to their editors. Server rejects removal of name, self-introduction, last interest or last link while discovery is on; explicitly turn discovery off first. Disabling on S16 leads to S24. |
+| Feed order | Newer day groups first; within a day, compatible cards first, then shared-interest count, then stable encounter ID (`design.md`, **Matching and visibility**). Ineligible retained encounters are hidden from feed/favorites and return if eligible again within retention. Only eligible all-private cards use a non-identifying shell. Never display encounter times. |
 | Favorites | S10 uses Encounters and Saved links segments; star/bookmark actions on S07 toggle without a confirmation. Unavailable content is removed rather than frozen in a saved snapshot. |
 | Own-card preview | S11 starts with an eligible-viewer preview and offers a compatible-viewer preview. No audience selector represents a real person's access. |
-| Link editing | One link per import; source-specific editable fields; title required; existing visibility retained; refresh confirmation before replacing edits. Source label editing does not alter source identity or verification. |
+| Link editing | One link per import; source-specific editable fields; title required; existing visibility retained; refresh confirmation before replacing edits. Source label editing does not alter source identity or verification; description also capped at 200 characters. |
+| GitHub disconnect | S20 confirmation; dependent verified links become unverified and imported repository cards are removed, subject to server rejection if discovery is on and the last link would be removed. |
 | Confirmations | Confirm encounter deletion, link deletion, blocking, unblocking, sign-out and account deletion with their consequences. No success claim before the operation completes; session stop confirms the local stop while its server sync may remain queued. Starting/stopping a session has no extra confirmation. |
 | Notification permission | Request on S05 immediately after discovery is enabled, with “Your daily report arrives as a notification”. Declining leaves discovery enabled. S18 changes the preference later and provides OS denial recovery. Skip requests when push is unavailable, including free-account development builds; read the report in-app. Daily reveal is independent of permission and preference. |
 | Notification content | Public product name as title; body shows up to two currently authorized display names and counts the remaining authorized named people, using the one/two/three-or-more bilingual wording in Daily report notification. Use neutral report-ready text only when no name is authorized. No time, place or unrevealed count. Tap opens S06's revealed day groups. |
@@ -1050,13 +1076,13 @@ These are proposed UI choices, not additional features or confirmed owner decisi
 | One-tap control | Choose Control Center rather than a widget for v1. Prerequisite failures open the corresponding app screen; they never silently enable discovery. |
 | QR | Show/scan segments, explicit refresh invalidating the previous code, 2-minute validity and one outstanding code; reject self-scans; issue/redeem online (`design.md`, **Confirmed encounter, security definition**). Progress until server confirmation and camera-denial recovery. No peer identity before reveal. |
 | Sample | Fictitious fields and safe example links; label S25 and S07, and reuse the sample in S24 for new users who defer discovery. Omit favorites, saving, deletion and report/block in sample mode. Do not recreate a dismissed sample automatically. |
-| Diagnostics | Only local anonymous aggregate counters, elapsed trial measurements and own-device status; no raw participant records or export action. Demo has a persistent test-only warning. |
+| Diagnostics | Local recorded trials, elapsed values for discovery/exchange/two-minute evidence/server confirmation, reset with visible confirmation, presence selector and own-device status; no participant identities, raw tokens, receipts or credentials. Share local trial log as a file in development/internal, absent from release. Development-only S01 → S22 before sign-in for no-backend/no-account trials; Back returns to its origin. Demo has a persistent test-only warning. |
 | Support | Use public web pages and an email composer/copy action for the published operator address. Opening a composer does not send a message. |
 
 ## Open items
 
 - **Interests and matching controls:** What is the initial curated Japanese/English interest list, and what values may the shared-interest threshold take? `decisions.md`, **Profile** and **Matching and visibility**, fix the approach but not the vocabulary or range. S03/S12/S16 need these values; no new purpose or free-text interest is proposed.
-- **Purpose visibility:** What is the initial visibility of purposes, and should common-purpose chips appear publicly by default? `specification.md`, **Visibility levels**, says each profile field uses a level, while `decisions.md`, **Matching and visibility**, sets initial levels only for name, introduction, interests and contact. S07/S11/S17 must not assume a public purposes default.
+- **Purpose visibility:** What is the initial visibility of purposes, and should common-purpose chips appear publicly by default? `specification.md`, **Visibility levels**, says each profile field uses a level, while `decisions.md`, **Matching and visibility**, sets initial levels only for name, introduction, interests and contact. S07/S11/S17 must not assume a public purposes default. **Proposed, not decided:** everyone eligible, like the name, self-introduction and interests; see owner question B in the other product documents.
 - **Blocked-user references:** What minimal identifier may S19 retain/display after blocking while the server sends no unauthorized profile fields? `decisions.md`, **Privacy and safety** and **Matching and visibility**, require blocks and current authorization but do not define the list's identification contract. No retained name or link preview is promised.
 - **Report failure:** How is immediate reporter-side hiding persisted when report submission fails or is offline, and how is a pending report retried? S26 conceals the card immediately but cannot claim server acceptance. `decisions.md`, **Privacy and safety**, specifies immediate hiding without the failure contract.
 - **Session interruptions:** Does discovery off, Bluetooth loss, sign-out or auth expiry also stop the server session ledger, or let it expire? `design.md`, **iOS app structure**, settles online start, offline continuation and explicit local stop; **Bluetooth transport** settles radio teardown on discovery off/sign-out, but neither defines all automatic session-stop triggers. S08/S20 and external surfaces must follow a single interruption rule once settled. Eligibility is never bypassed; no signed-out card access is shown.

@@ -56,7 +56,7 @@ Supabase Auth provides native Sign in with Apple and links GitHub to an already 
 
 **DEFAULT:** XcodeGen defines `Development`, `Internal` and `Release` configurations. `DEVELOPMENT_BUILD` includes anonymous authentication; `DEVELOPMENT_BUILD` or `INTERNAL_BUILD` includes diagnostics and the demo switch. Release defines neither. Exclude their source files, routes, resources and test token issuer from the release target, as well as guarding imports and call sites with conditional compilation. Verify the Release artifact, not just a hidden settings row.
 
-**DEFAULT:** Development uses local Supabase; internal testing uses a separate non-production backend. Only those environments expose the demo reveal endpoint. The production backend has no such endpoint, and a client-supplied build label never grants access. The switch changes ambient reveal and notification timing, never the two-minute or both-receipts rules. Device tests use the same switch; free-account tests show results in-app without push.
+**DEFAULT:** the friends test uses development builds pointed at a hosted non-production Supabase project, because the phones leave the owner's Mac. Anonymous sign-in is enabled only on that non-production project and disabled on production, in addition to being compiled out of the release build. Local Supabase is for automated checks and the owner's own development. Internal testing also uses a hosted non-production backend. **DEFAULT:** only local and hosted non-production environments expose the demo reveal endpoint. **UNVERIFIED:** whether the Supabase free plan allows the second, hosted non-production project. The production backend has no such endpoint, and a client-supplied build label never grants access. The switch changes ambient reveal and notification timing, never the two-minute or both-receipts rules. Device tests use the same switch; free-account tests show results in-app without push.
 
 ### Repository
 
@@ -86,7 +86,7 @@ The top-level directories are binding. **DEFAULT:** child paths, package names, 
 
 ### Terminal checks and owner's tools
 
-Every implementation unit has terminal checks for Swift packages, a simulator build, backend functions and the local database. **DEFAULT:** establish these entry points in the first unit, then run the commands separately for each unit. Keep empty-area smoke checks until that area has implementation. The three simulator configurations check the build gates.
+Every implementation unit has terminal checks for Swift packages, a simulator build, backend functions and the local database. **DEFAULT:** establish these entry points in the first unit, then run the commands separately for each unit. Keep empty-area smoke checks until that area has implementation. The three simulator configurations check the build gates. **DEFAULT:** use the iPhone 17 simulator, which exists on the owner's Mac, for app-target and Apple-specific package tests; the EngineerEncounters scheme's test action includes the app target and every package that cannot run as portable command-line tests.
 
 ```sh
 swift test --package-path ios/Packages/EncounterDomain
@@ -96,11 +96,12 @@ xcodegen generate --spec ios/project.yml
 xcodebuild -project ios/EngineerEncounters.xcodeproj -scheme EngineerEncounters -configuration Development -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
 xcodebuild -project ios/EngineerEncounters.xcodeproj -scheme EngineerEncounters -configuration Internal -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
 xcodebuild -project ios/EngineerEncounters.xcodeproj -scheme EngineerEncounters -configuration Release -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
+xcodebuild -project ios/EngineerEncounters.xcodeproj -scheme EngineerEncounters -configuration Development -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17' CODE_SIGNING_ALLOWED=NO test
 deno test supabase/functions
 supabase test db
 ```
 
-**DEFAULT:** start Docker and use `supabase start` and `supabase db reset` to prepare the local database before its checks. Grant backend tests only their declared local permissions. Simulator builds cover the Apple-specific packages that cannot run as portable command-line tests. These are future implementation checks, not checks already passed by this documentation change.
+**DEFAULT:** start Docker and use `supabase start` and `supabase db reset` to prepare the local database before its checks. Grant backend tests only their declared local permissions. The simulator test command runs the app-target tests and tests of Apple-specific packages that cannot run as portable command-line tests. These are future implementation checks, not checks already passed by this documentation change.
 
 The owner's Mac has macOS 27.0.1, Xcode 27.0 with the iOS 27.0 SDK and simulator, Swift 6.4, Homebrew, Supabase CLI, Docker, Node and Codex CLI. XcodeGen and Deno are approved for installation when implementation starts. Add the VS Code Swift extension then. **UNVERIFIED:** whether `swift test` and `xcodebuild` work in the implementing agent's sandbox; the first unit proves this.
 
@@ -225,7 +226,7 @@ flowchart LR
     F -->|QR: immediate| R
 ```
 
-Revealed is a timing state, not a permanent permission grant. **DEFAULT:** persist the reveal flag per viewer, since the two users' local report times can differ. A confirmed ambient encounter supplies no identifiable preview before that viewer's report. Session and QR encounters pass both viewers' timing gates immediately.
+Revealed is a timing state, not a permanent permission grant. A revealed encounter per viewer is a confirmed encounter that a user is now allowed to see. Each of the two users reaches this at their own daily report, so one may see the other before the reverse. This follows from the decision that each user can change their report time. **DEFAULT:** persist the reveal flag per viewer. A confirmed ambient encounter supplies no identifiable preview before that viewer's report. Session and QR encounters pass both viewers' timing gates immediately.
 
 ## Confirmed encounter, security definition
 
@@ -340,11 +341,11 @@ The field columns assume the encounter is already revealed and retained for this
 | 1 | 1 | 1 | 0 | 0 | 1 | 1 | 0 | Yes | No | Yes | No | No |
 | 1 | 1 | 1 | 0 | 0 | 1 | 1 | 1 | Yes | Yes | Yes | Yes | No |
 
-Discovery is off by default. Enabling it requires a display name, a user-written self-introduction, at least one interest and at least one link of any kind. Enforce these prerequisites on the server.
+Discovery is off by default. Enabling it requires a display name, a user-written self-introduction, at least one interest and at least one link of any kind. Enforce these prerequisites on the server. **DEFAULT:** the server rejects a change that would remove a discovery prerequisite (the name, the self-introduction, the last interest or the last link) while discovery is on, and the user must turn discovery off first.
 
 Once discovery is on, display name, self-introduction and interests default to everyone eligible. Contact detail defaults to private. A link has no default level: publishing requires the owner's choice. A field or link the viewer cannot see is omitted from the response, not sent for SwiftUI to hide.
 
-Incompatible eligible encounters remain in the feed, with whatever fields are authorized. **DEFAULT:** order compatible encounters first within each day, then by shared-interest count and a stable encounter ID; never by stored encounter time. If every field is private, show a non-identifying encounter shell. The feed groups by day and offers Start session, QR and a favorites filter.
+Incompatible eligible encounters remain in the feed, with whatever fields are authorized. **DEFAULT:** order compatible encounters first within each day, then by shared-interest count and a stable encounter ID; never by stored encounter time. **DEFAULT:** while an encounter is not eligible, for example because the other person turned discovery off, it is hidden from the feed and from favorites, and it returns if it becomes eligible again within its retention period. The non-identifying shell is used only when the encounter is eligible and every field is private. The feed groups by day and offers Start session, QR and a favorites filter.
 
 Reporting hides the subject from that reporter immediately. Three distinct reporters hide the profile from everyone until operator review, within 72 hours. **DEFAULT:** count distinct unresolved reporters and keep the reporter's hide in place while the report record is retained, including after resolution. Moderation suppression is an additional read gate, not a change to the definition of compatibility.
 
@@ -367,9 +368,11 @@ All four readers are server-side. Read only the owner's selected public work. Re
 
 **UNVERIFIED:** whether Zenn's feed includes opening text. If absent, fetch only the article page's preview description on the fixed Zenn host. Apply the page-fetch safeguards below to that fallback; never scrape its body.
 
+**DEFAULT:** Disconnect GitHub requires confirmation, makes links verified through that GitHub account unverified, and removes repository link cards read through it. The discovery-prerequisite rejection rule also applies if this would remove the last link.
+
 GitHub links are verified through the connected identity. Other links are verified if under an address on that verified GitHub profile's website or social links; Qiita also qualifies when its linked GitHub ID matches. All others are labelled unverified and reportable as impersonation. **DEFAULT:** compare canonical URLs by exact host and path boundary, not substring or lookalike host; recompute verification after identity/address/link changes. An entered Qiita or Zenn username alone never proves control.
 
-**DEFAULT:** cap stored opening/preview text at 200 characters, strip markup to plain text and keep draft previews only in the owner's editing session. Preserve owner edits until they accept a refreshed preview. On reader failure, retain the existing approved card and original link. Explain before sharing that external URLs can identify the owner even when the in-app nickname does not.
+Store only title or name, description, main language, source, tags, and roughly the first 200 characters of opening or preview text. Nothing else from the source is stored. **DEFAULT:** cap both stored opening/preview text and description at 200 characters, strip markup to plain text and keep draft previews only in the owner's editing session. Preserve owner edits until they accept a refreshed preview. On reader failure, retain the existing approved card and original link. Explain before sharing that external URLs can identify the owner even when the in-app nickname does not.
 
 ### Fetching other pages
 
@@ -470,7 +473,7 @@ The fake validates logic, not radio reachability. **DEFAULT:** retain aggregated
 
 ### One-day radio check
 
-The owner uses the iPhone 15 and iPad (10th generation) with the real app and diagnostics. Use made-up identities, no backend and logs kept on devices. **DEFAULT:** use locally issued test tokens and a local confirmation harness, both compiled only into development builds. This harness consumes receipts from both devices and never substitutes for later backend validation.
+The owner uses the iPhone 15 and iPad (10th generation) with the real app and diagnostics. Use made-up identities, no backend, no account and logs kept on devices. **DEFAULT:** S22 is reachable from S01 before sign-in in development builds; the route is absent from internal and release builds. **DEFAULT:** use locally issued test tokens and a local confirmation harness, both compiled only into development builds. This harness consumes receipts from both devices and never substitutes for later backend validation.
 
 Check rungs 3 and 4 in both central/peripheral orientations. Record discovery, completed two-way exchange and both devices' two-minute evidence separately. Try holding the connection and the second-exchange alternative, including a token-window boundary. Exercise locked storage access, disconnect/reopen and finite connection teardown. Use the demo switch to inspect locally confirmed results immediately. Select a presence approach only from these observations; do not infer background reliability from foreground success.
 
@@ -482,19 +485,19 @@ Borrow a second recent iPhone before the matrix. The iPad is an experimental pee
 |---|---|---|---|
 | 1 — Locked | Both locked, app backgrounded. | 20 trials | 20 trials |
 | 2 — Awake | At least one awake in another app; neither app in front. | 20 trials | 20 trials |
-| 3 — One open | Exactly one app open; the peer backgrounded. | 20 trials | 20 trials |
+| 3 — One open | Exactly one app open; the peer locked (**DEFAULT** trial condition). | 20 trials | 20 trials |
 | 4 — Both open | Both apps open. | 20 trials | 20 trials |
 
-Total: 4 rungs × 2 pairs × 20 = 160 stationary trials. **DEFAULT:** split asymmetric rungs equally between device orientations and alternate them in the written test sheet.
+Total: 4 rungs × 2 pairs × 20 = 160 stationary trials. **DEFAULT:** rung-3 trials run with the peer phone locked, the hardest case of “at least one of the two has the app open”. **DEFAULT:** split asymmetric rungs equally between device orientations and alternate them in the written test sheet.
 
-1. Record device models, iOS version, build version, discovery settings, permissions, battery level and presence approach. Run detached from the debugger.
-2. Reset both devices' trial state and the test accounts' candidates/encounters; cancel all connections and clear pending attempts. Verify reset before starting the next trial. Use fresh attempt nonces.
+1. Select the presence approach under test in S22, then record device models, iOS version, build version, discovery settings, permissions, battery level and presence approach. Run detached from the debugger.
+2. Use S22's trial reset action on both devices to reset trial state; reset the test accounts' candidates/encounters when a backend is in use, cancel all connections and clear pending attempts. Verify S22's visible reset confirmation before starting the next trial. Use fresh attempt nonces.
 3. Set the required device states, bring the pair into range and start the stationary trial. **DEFAULT:** end at 5 minutes, with no state changes during the trial.
-4. Record each phone's discovery callback, two-way exchange completion, two-minute evidence and server confirmation separately. Record missing, one-sided and duplicate results as such, not as success.
+4. In S22, record each phone's per-trial elapsed values from trial start for discovery, two-way exchange completion, two-minute evidence and server confirmation separately. S22 lists recorded trials, including missing values; offline/server-free trials show server confirmation as unavailable or pending. **DEFAULT:** share the local trial log as a file from S22 in development and internal builds; sharing is absent from release. Record missing, one-sided and duplicate results as such, not as success.
 5. Use the demo switch for observable confirmation timing; verify the two-minute and two-receipt rules remain enforced. Measure normal daily reveal separately.
 6. End, tear down and reset. Outside the stationary matrix, record 10-second and 30-second passes for information only; neither can satisfy ambient presence.
 
-Rung 3 must confirm within 5 minutes in at least 90 percent of trials. **DEFAULT:** apply the gate separately to each pair's 20 rung-3 trials, at least 18 successes per pair. Rungs 1 and 2 have no pass mark and only determine their public description. Record rung 4 latency separately. Twenty trials cannot distinguish 90 percent from 80 percent with confidence; the result is a go/no-go signal, not a measured reliability rate. If rung 3 fails, stop and rethink because only QR would remain.
+A rung-3 trial passes when both phones hold the two-minute presence evidence for the same exchange within 5 minutes of the start of the trial. Server confirmation time is recorded separately and is not part of the pass mark, because uploads may be deferred. At least 90 percent of rung-3 trials must pass. **DEFAULT:** apply the gate separately to each pair's 20 rung-3 trials, at least 18 successes per pair. Rungs 1 and 2 have no pass mark and only determine their public description. Record rung 4 latency separately. Twenty trials cannot distinguish 90 percent from 80 percent with confidence; the result is a go/no-go signal, not a measured reliability rate. If rung 3 fails, stop and rethink because only QR would remain.
 
 Measure discovery-on versus discovery-off battery use over 8 hours: at most 5 additional percentage points. **DEFAULT:** use the same device, comparable usage and starting conditions on separate runs, recording the comparison rather than inferring it from one battery reading.
 
@@ -502,7 +505,9 @@ Test first unlock after reboot separately: nothing before first unlock, locked o
 
 ### Friends, event and release
 
-- Friends: 3–5 people in a small room or cafe; free Apple account, cable installs from the owner's Mac, temporary anonymous sign-in, sessions for immediate results and daily report inside the app without notification. GitHub alone is enough. **FACT:** builds expire after about a week. **UNVERIFIED:** the current free-account device cap; if reached, sign a friend's phone with that friend's own free Apple ID.
+**DEFAULT:** v1 collects no usage analytics. Product measures are gathered by asking participants at the friends test and at the event, and technical measures come from the diagnostics of development and internal builds.
+
+- Friends: 3–5 people in a small room or cafe; free Apple account, cable installs from the owner's Mac, temporary anonymous sign-in, sessions for immediate results and daily report inside the app without notification. **DEFAULT:** the friends test uses development builds pointed at a hosted non-production Supabase project, because the phones leave the owner's Mac. Anonymous sign-in is enabled only on that non-production project and disabled on production, in addition to being compiled out of the release build. Local Supabase is for automated checks and the owner's own development. GitHub alone is enough. **FACT:** builds expire after about a week. **UNVERIFIED:** the current free-account device cap; if reached, sign a friend's phone with that friend's own free Apple ID.
 - After friends: join the Apple Developer Program; add and verify Sign in with Apple, APNs and TestFlight. Test release sign-in and production timing, not just anonymous development flows.
 - Event: one real event with 20 or more people via TestFlight. Check radio results, useful discoveries, duplicate encounters, favorites/saves, authorization changes, blocking/reporting and daily delivery. Do not expose the demo switch to public-release users.
 - Public release: all four link readers, one professional review of Japanese/English privacy policy and terms, App Store privacy labels, Bluetooth purpose string, in-app deletion, moderation contact, sample encounter and review notes, and Supabase hosting-region/data-flow documentation.
@@ -519,7 +524,7 @@ Each unit produces a reviewable change and terminal checks. The owner merges eac
 | 3 — Accounts and schema | Development anonymous sign-in, profile prerequisites, interests/purposes, current visibility, tokens, reciprocal receipt resolution and date-only model; no release anonymous path. |
 | 4 — Basic encounters | Feed/detail, sessions with Live Activity/control, QR, favorites/saved links, daily in-app reveal, block/report/deletion and sample encounter. |
 | 5 — GitHub | Linked verification, own public selection, editable preview and explicit link visibility. Complete basic-function checks and the 160-trial/battery gate. Stop if rung 3 fails. |
-| 6 — Friends | Owner cable-installs for 3–5 friends; development anonymous sign-in, sessions and in-app report. Resolve findings before progressing. |
+| 6 — Friends | Owner cable-installs development builds for 3–5 friends against hosted non-production Supabase (**DEFAULT**), with anonymous sign-in only on that project, sessions and in-app report. Local Supabase remains for automated checks and the owner's own development. Resolve findings before progressing. |
 | 7 — Paid developer account integration | Owner joins the Developer Program; verify Apple sign-in, APNs, all three build kinds and TestFlight. |
 | 8 — Qiita and Zenn | Official readers, verification and safe Zenn fallback; resolve or preserve the feed-content unknown. |
 | 9 — Other pages | Bounded SSRF-safe reader, redirect/rebinding tests and failure behaviour. All readers complete before public release. |
@@ -573,11 +578,12 @@ These are not confirmed owner decisions. Revisit technical starting values after
 | Area | Drafting default |
 |---|---|
 | Profile | 30-character display name, 200-character introduction, curated interests, initial-letter avatar, at most 10 links. |
-| Matching | Threshold starts at 1 per user; compatible-first/shared-interest/stable-ID ordering within each day; non-identifying shell if all fields private. |
+| Matching | Threshold starts at 1 per user; compatible-first/shared-interest/stable-ID ordering within each day; ineligible encounters hidden from feed/favorites until eligible again within retention; shell only for eligible all-private encounters. |
+| Discovery prerequisites | Server rejects removing name, self-introduction, last interest or last link while discovery is on; turn discovery off first. |
 | Reports/sample | Four report reasons; count distinct unresolved reporters; reporter hide while report retained, including after resolution; dismissible on-device sample. |
 | Saved links | References with favorite-equivalent per-viewer retention and current permissions; no copied metadata. |
-| Project/build layout | All child paths, package/interface/target names; three XcodeGen configurations and compile flags/source exclusions; local development and separate internal backend; production has no demo route. |
-| Terminal entry points | The commands and local preparation in Stack, tools and workflow; all build configurations per unit; portable versus simulator test allocation. |
+| Project/build layout | All child paths, package/interface/target names; three XcodeGen configurations and compile flags/source exclusions; local Supabase for automated checks/owner development, hosted non-production for friends development builds and internal testing; anonymous sign-in only on hosted non-production, disabled on production; production has no demo route. |
+| Terminal entry points | The commands and local preparation in Stack, tools and workflow; all build configurations per unit; portable versus simulator test allocation; iPhone 17 simulator test destination for app-target and non-portable package tests. |
 | App composition | Package responsibility split; `BluetoothTransport` and paired fake phones; durable `ReceiptQueue`, SwiftData and in-memory adapters; terminal acknowledgement semantics; Control Center start control, online session start and queued local stop. |
 | Card caching | Other people's cards in memory only, refreshed on open/foreground and cleared without fresh authorization. |
 | Transport constants | Listed service/characteristic UUIDs; v1 version/phase/token/nonce framing, 16-byte token/nonce, optional prior nonce, 64-byte bound and immutable fragmented reads. |
@@ -590,13 +596,15 @@ These are not confirmed owner decisions. Revisit technical starting values after
 | Restoration/upload | Distinct manager restoration IDs, completed evidence only, abandon uncertain work; serialized queue, retry 5 seconds–15 minutes with jitter and network/foreground triggers. |
 | Locked storage | After-first-unlock file protection and device-only after-first-unlock Keychain items; callback token selection and restart expired fragmented operations. |
 | Schema/APIs | All proposed table/column/enum/key/index/function names, pair ordering and transaction constraints; per-viewer reveal/date rows derived from transient evidence and time-zone settings; valid zone registered before token/code issuance. |
-| Reader details | No GitHub scope, bounded pagination and owner-requested Zenn `all=1`; 200-character preview, transient editing draft, explicit refresh acceptance, URL host/path-boundary verification and revalidation. |
+| Reader details | No GitHub scope, bounded pagination and owner-requested Zenn `all=1`; 200-character preview and description, transient editing draft, explicit refresh acceptance, URL host/path-boundary verification and revalidation; confirmed GitHub disconnect unverifies dependent links and removes imported repository cards, subject to the discovery-prerequisite rule. |
 | Arbitrary fetch bounds | Port 443, three redirects, 1 MiB received/decoded and 5 seconds total; safe validated-address connection or feature disabled until enforceable. |
 | Daily scheduling | Five-minute Cron, validated IANA zone/latest foreground device, defer missing zone, DST/travel rules, date-only next-report assignment at confirmation, reassignment after time/zone edits, per-local-date idempotency including closed empty dates, per-viewer reveal and transactional reference-only push jobs. |
 | Push lifecycle | Per-installation/account/environment/topic registration; rotate/remove on callbacks, sign-out, invalidation or deletion; 90-day stale expiry and current-report-day retries. |
 | Retention jobs | Receipt evidence 48 hours, incomplete presence 5 minutes, development/internal diagnostics 7 days; token/nonce horizon 48 hours past window end; date + 30-day viewer expiry; 15-minute transient cleanup and hourly encounter/key cleanup. |
 | Other retention/deletion | Resolved-report period pending privacy policy; blocks until unblocked, delivery keys 30 days; active-data/account hard deletion sequence, local clearing and replay tombstones without account-pair links. |
-| Test procedures | Listed automated cases, aggregated outcomes without participant IDs, development-only local token/confirmation harness, balanced trial orientations, 5-minute stationary trials, 18/20 rung-3 successes per device pair and comparable paired battery runs. |
+| Test procedures | Listed automated cases, aggregated outcomes without participant IDs, development-only local token/confirmation harness, balanced trial orientations, 5-minute stationary trials with rung-3 peer locked, 18/20 rung-3 successes per device pair based on both phones' two-minute evidence for the same exchange within 5 minutes of trial start, and comparable paired battery runs. |
+| Diagnostics access/sharing | Development-only S01 → S22 before sign-in for no-account/no-backend trials; local trial-log file sharing in development/internal, absent from release. |
+| Success measurement | No usage analytics in v1; ask friends-test/event participants for product measures and use development/internal diagnostics for technical measures. |
 | Work units | Named unit boundaries and responsibility split; subdivide without bypassing gates. |
 
 Discovery off, the two-hour session, two-minute ambient threshold, 21:00 report, default profile/contact visibility and explicit link visibility are product decisions, not drafting gaps.
@@ -611,9 +619,13 @@ Discovery off, the two-hour session, two-minute ambient threshold, 21:00 report,
 - Supabase free-plan pausing and beta Cron/manual linking can interrupt discovery resolution and reports. Measure recovery and document owner operations; a different operating plan needs a later decision.
 - Token/nonce windows and reported clocks need device validation; paired receipts do not defeat relays or colluding clients. Do not claim physical-distance proof.
 - Choose the resolved-report retention period in the privacy policy before release. Verify managed-service backups/logs and deletion behaviour; do not invent provider retention guarantees. Review whether session expiry metadata and diagnostics meet the disclosed data flow.
-- Owner must publish the moderation contact and meet the 72-hour review obligation. Product success targets remain open; track useful discoveries, original-link opens, favorites/saves, false positives, duplicates, latency and battery without collecting movement histories.
+- Owner must publish the moderation contact and meet the 72-hour review obligation. Product success targets remain open; ask participants about useful discoveries, original-link opens and favorites/saves, and use development/internal diagnostics for false positives, duplicates, latency and battery under the no-usage-analytics **DEFAULT**.
 - Complete trademark registry searches in J-PlatPat and USPTO. **FACT:** the web search recorded in `decisions.md`, **Product**, found no existing use, but registry searches were not done.
 - Obtain the Japanese/English legal review and record Supabase hosting region/data flow, privacy labels and store deliverables. EU/UK privacy-law and trader questions and China mainland government filing remain unresolved; no legal conclusion is assumed.
+- **UNVERIFIED:** whether the Supabase free plan allows the second, hosted non-production project.
+- **Owner question A — open:** What survives account deletion so that blocks and moderation outcomes still hold for the same Apple identity? **Proposed, not decided:** keep only a one-way hash of the Apple account identifier together with operator moderation outcomes and the blocks other people placed on that account, for a period the privacy policy states, and re-apply them if the same Apple identity signs up again. This possible safety-record exception to deletion awaits the owner's decision; it is not an implemented retention rule.
+- **Owner question B — open:** What is the initial visibility of purposes? **Proposed, not decided:** everyone eligible, like the name, self-introduction and interests.
+- **Owner question C — open:** What build kind and backend does the 20-person event use? **Proposed, not decided:** the event uses a TestFlight build made with the release configuration against the production backend, with no demo switch and no diagnostics, and internal builds go only to the owner's own devices.
 - Copied external URLs and delivered notifications cannot be retracted. Current permission enforcement controls later in-app access, including favorites and saved links.
 
 Evidence and source URLs remain in `decisions.md`, **Verified sources**, **Encounters**, **Build, test and release path** and **Stack, tools and workflow**.

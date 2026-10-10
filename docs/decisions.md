@@ -12,7 +12,7 @@ Unmarked items are binding product decisions. **DEFAULT** marks a value chosen t
 ## 0. Glossary
 
 - **Encounter:** two users were within Bluetooth range of each other and the app recorded it under the rules in **Encounters**.
-- **Ambient encounter:** an encounter in which at least one of the two people was not in a session.
+- **Ambient encounter:** a Bluetooth encounter in which at least one of the two people was not in a session. A QR encounter is never ambient.
 - **Session:** a time-boxed period a user starts on purpose with the Start session button.
 - **Session encounter:** an encounter between two users who were both in a session.
 - **QR encounter:** an encounter created by one user scanning the QR code of the other.
@@ -21,10 +21,10 @@ Unmarked items are binding product decisions. **DEFAULT** marks a value chosen t
 - **Receipt:** the record one phone keeps of an exchange, uploaded to the server.
 - **Candidate:** an uploaded receipt the server has not yet confirmed.
 - **Confirmed encounter:** for a Bluetooth encounter, the server holds matching receipts from both phones and the rules in **Encounters** are met. For a QR encounter, the showing phone obtained a short-lived one-time code from the server while signed in and the scanning phone uploaded that code before it expired, so both accounts took part and no receipts are involved.
-- **Revealed encounter:** a confirmed encounter that the two users are now allowed to see.
+- **Revealed encounter per viewer:** a confirmed encounter that a user is now allowed to see. Each of the two users reaches this at their own daily report, so one may see the other before the reverse. This follows from the decision that each user can change their report time.
 - **Daily report:** the once-a-day moment when the ambient encounters of that day are revealed, with a notification.
 - **Card:** what one user sees of another, meaning the authorized profile fields and link cards.
-- **Link card:** one shared link with its automatically filled title, source, tags and opening text.
+- **Link card:** one shared link with its automatically filled title or name, description, main language, source, tags and opening or preview text, where available.
 - **Link reader:** the server component that reads one kind of source (GitHub, Qiita, Zenn, other pages).
 - **Eligible and compatible:** defined in **Matching and visibility**.
 - **Discovery:** the master switch a user has for taking part in encounters.
@@ -74,7 +74,7 @@ Discovery is off by default. Turning it on requires a display name, a self-intro
 ### Rules for links
 
 - **UNVERIFIED:** whether the Zenn feed carries the opening text of each article. If it does not, the preview description of the article page fills that field.
-- No scraping of page bodies. Only the title, source, tags and roughly the first 200 characters are stored. The original stays on its platform and the link opens the original.
+- No scraping of page bodies. Store only title or name, description, main language, source, tags, and roughly the first 200 characters of opening or preview text. Nothing else from the source is stored. The original stays on its platform and the link opens the original.
 - The owner of a link previews and can edit every automatically filled field before sharing, and can refresh it on demand.
 - Verification: a GitHub link is verified by connecting the account. Any other link counts as verified when it sits under an address listed on that verified GitHub profile (its website or social links), or when the linked GitHub ID of the Qiita account matches. Everything else is labelled unverified and can be reported as impersonation.
 - Build order of the readers: GitHub first (it alone is enough for the friends test), then Qiita and Zenn, then other pages. All of them land before public release.
@@ -175,7 +175,7 @@ Each stage gates the next.
 1. **Toolchain check. UNVERIFIED:** whether `swift test` and `xcodebuild` run inside the sandbox that the implementing agent uses on this Mac. The first unit of work proves it.
 2. **Bluetooth engine first,** built inside the real app with a diagnostics screen. Then a one-day check of rungs 3 and 4 on real devices, with made-up identities, no backend, and logs kept on the devices.
 3. **Basic functions.** Then the 160-trial matrix, using a borrowed second iPhone.
-4. **Friends test:** 3 to 5 friends in a small room or cafe, on the free Apple account. That means cable installs from the Mac of the owner, builds that stop working after about a week, the temporary anonymous sign-in, sessions for immediate results, and the daily report viewed inside the app without a notification. The GitHub reader alone is enough. If the device cap of the free account is reached, the phone of a friend can be signed with the own free Apple ID of that friend.
+4. **Friends test:** 3 to 5 friends in a small room or cafe, on the free Apple account. **DEFAULT:** the friends test uses development builds pointed at a hosted non-production Supabase project, because the phones leave the owner's Mac. Anonymous sign-in is enabled only on that non-production project and disabled on production, in addition to being compiled out of the release build. Local Supabase is for automated checks and the owner's own development. That means cable installs from the Mac of the owner, builds that stop working after about a week, the temporary anonymous sign-in, sessions for immediate results, and the daily report viewed inside the app without a notification. The GitHub reader alone is enough. If the device cap of the free account is reached, the phone of a friend can be signed with the own free Apple ID of that friend.
 5. **Join the Apple Developer Program.** Add and verify Sign in with Apple, push notifications and TestFlight.
 6. **One real event with 20 or more people,** distributed through TestFlight.
 7. **One professional review of the privacy policy and terms,** in Japanese and English. Then public release in Japan.
@@ -186,12 +186,12 @@ Each stage gates the next.
 - Rungs 1 to 4, on two device pairs (iPhone with iPad, iPhone with iPhone), 20 stationary trials each, 160 trials in total.
 - 10-second and 30-second passes are recorded for information only.
 - Measured: the time to complete the two-way token exchange, and whether both phones can confirm two minutes of continued presence.
-- Pass mark: rung 3 confirms an encounter within 5 minutes in at least 90 percent of trials.
+- Pass mark: A rung-3 trial passes when both phones hold the two-minute presence evidence for the same exchange within 5 minutes of the start of the trial. Server confirmation time is recorded separately and is not part of the pass mark, because uploads may be deferred. At least 90 percent of rung-3 trials must pass.
 - Rungs 1 and 2 are reported with no pass mark. Their results only decide how the app describes them.
 - Battery: at most 5 percentage points extra over 8 hours with discovery on, compared with discovery off.
 - If rung 3 fails, stop and rethink, because only the QR rung would remain.
 - Twenty trials cannot tell 90 percent from 80 percent with confidence. The result is a go or no-go signal, not a measured rate.
-- Procedure rules: run detached from the debugger. Record the iOS and build versions. Reset state between trials and bound the lifetime of pending connections so one trial cannot contaminate the next. Record discovery, exchange completion and confirmation times separately.
+- Procedure rules: run detached from the debugger. Record the iOS and build versions. Reset state between trials and bound the lifetime of pending connections so one trial cannot contaminate the next. Record per-trial elapsed values for discovery, exchange completion, two-minute evidence and server confirmation separately.
 
 Devices: an iPhone 15 and an iPad (10th generation) owned by the owner, and a second recent iPhone borrowed before the matrix. An iPhone-with-iPad result does not establish iPhone-with-iPhone behaviour.
 
@@ -265,12 +265,19 @@ Three build kinds:
 
 These inputs come from an independent review of the v0.2 documents and belong in `design.md`. Items marked **DEFAULT** are starting values that the one-day check and the matrix may change.
 
+**Defaults chosen during drafting (consistency review additions):**
+
+| Area | Drafting default |
+|---|---|
+| Friends-test backend | Development builds use hosted non-production Supabase; anonymous sign-in enabled only there, disabled on production and compiled out of release. Local Supabase is for automated checks and the owner's own development. |
+
 ### Bluetooth transport
 
 - One fixed application service UUID. Every phone acts as both peripheral (advertising that service) and central (scanning for exactly that service).
 - Tokens are never placed in advertisements. After discovery the central connects, reads the current token of the peripheral from one characteristic, and writes its own current token to another. One connection therefore gives both phones the token of the other.
 - Characteristics carry a protocol version so the format can change.
-- **DEFAULT:** tokens are random, issued by the server in batches, each valid for a 15-minute window, and are the only identifier exchanged. No account ID, name, GitHub handle, email or link is ever sent over Bluetooth.
+- No account ID, name, GitHub handle, email or link is ever sent over Bluetooth. This is a binding rule carried over from v0.2; only temporary tokens identify participants.
+- **DEFAULT:** the token format is random, server-issued in batches, with 15-minute windows.
 - **DEFAULT:** a phone confirms two minutes of continued presence either by keeping the connection and reading again after two minutes, or by a second exchange with the same peer at least two minutes after the first. Which of these works in the background is a question for the one-day check.
 - Define connection timeouts, teardown, and what a one-sided result means. When one phone holds a receipt and the other does not, it stays a candidate and is dropped after 48 hours.
 
@@ -397,3 +404,7 @@ For each screen `ui.md` gives: its purpose, how the user reaches it, a text sket
 - Whether a foreign developer needs a government filing number for the China mainland storefront. Sources conflict.
 - Whether a solo developer with a free, ad-free app counts as a trader under EU rules.
 - The exact retention period for resolved reports.
+- **UNVERIFIED:** whether the Supabase free plan allows the second, hosted non-production project.
+- **Owner question A — open:** What survives account deletion so that blocks and moderation outcomes still hold for the same Apple identity? **Proposed, not decided:** keep only a one-way hash of the Apple account identifier together with operator moderation outcomes and the blocks other people placed on that account, for a period the privacy policy states, and re-apply them if the same Apple identity signs up again. This possible safety-record exception to deletion awaits the owner's decision; it is not an implemented retention rule.
+- **Owner question B — open:** What is the initial visibility of purposes? **Proposed, not decided:** everyone eligible, like the name, self-introduction and interests.
+- **Owner question C — open:** What build kind and backend does the 20-person event use? **Proposed, not decided:** the event uses a TestFlight build made with the release configuration against the production backend, with no demo switch and no diagnostics, and internal builds go only to the owner's own devices.
