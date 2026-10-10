@@ -12,7 +12,7 @@ Unmarked items are binding product decisions. **DEFAULT** marks a value chosen t
 ## 0. Glossary
 
 - **Encounter:** two users were within Bluetooth range of each other and the app recorded it under the rules in **Encounters**.
-- **Ambient encounter:** an encounter recorded without either person being in a session.
+- **Ambient encounter:** an encounter in which at least one of the two people was not in a session.
 - **Session:** a time-boxed period a user starts on purpose with the Start session button.
 - **Session encounter:** an encounter between two users who were both in a session.
 - **QR encounter:** an encounter created by one user scanning the QR code of the other.
@@ -20,7 +20,7 @@ Unmarked items are binding product decisions. **DEFAULT** marks a value chosen t
 - **Exchange:** one Bluetooth connection in which the two phones swap temporary tokens in both directions.
 - **Receipt:** the record one phone keeps of an exchange, uploaded to the server.
 - **Candidate:** an uploaded receipt the server has not yet confirmed.
-- **Confirmed encounter:** the server holds matching receipts from both phones and the rules in **Encounters** are met.
+- **Confirmed encounter:** for a Bluetooth encounter, the server holds matching receipts from both phones and the rules in **Encounters** are met. For a QR encounter, the showing phone obtained a short-lived one-time code from the server while signed in and the scanning phone uploaded that code before it expired, so both accounts took part and no receipts are involved.
 - **Revealed encounter:** a confirmed encounter that the two users are now allowed to see.
 - **Daily report:** the once-a-day moment when the ambient encounters of that day are revealed, with a notification.
 - **Card:** what one user sees of another, meaning the authorized profile fields and link cards.
@@ -86,7 +86,7 @@ Discovery is off by default. Turning it on requires a display name, a self-intro
 Definition: an encounter is co-presence of at least 2 minutes within Bluetooth range.
 
 - This is a hard threshold for ambient encounters. An ambient contact shorter than 2 minutes is discarded, so someone walking past cannot collect a card.
-- Inside a session an exchange counts immediately.
+- Only when both users are in a session does an exchange count immediately. An exchange when only one user is in a session is ambient, requires 2 minutes and is revealed at the daily report.
 
 ### The ladder
 
@@ -106,7 +106,7 @@ All rungs operate at the same time. The app never switches modes.
 - No beacons or other fixed hardware.
 - No location in v1: never requested and never stored. An opt-in background boost in which on-device location wakes the app (nothing sent to the server, off by default) is to be revisited after the test matrix shows how rungs 1 and 2 perform on Bluetooth alone.
 - No someone-is-nearby notifications or prompts of any kind.
-- Symmetric rule: one connection swaps tokens in both directions, and an encounter counts only when both phones report it.
+- Symmetric rule: an encounter counts only when both phones take part, meaning both report the Bluetooth exchange, or one shows and the other scans a QR code.
 - Force-quitting the app stops discovery until the app is reopened. Onboarding must say so.
 
 ### Sessions
@@ -277,9 +277,9 @@ These inputs come from an independent review of the v0.2 documents and belong in
 ### Confirmed encounter, security definition
 
 - A receipt names the two tokens, a per-exchange nonce, whether the phone was in a session, and the observed duration.
-- The server confirms an encounter only when it holds matching receipts from both phones, both tokens were valid for their windows, the receipt is fresh, and it has not been used before (replay rejection).
-- Ambient: confirmed only when the two-minute rule is met. Session: confirmed immediately when the own record of the server shows both users had an active session. QR: confirmed immediately when the scanning phone uploads a short-lived one-time code that the showing phone obtained.
-- Even a correct exchange can be relayed by an attacker, so a confirmed encounter is evidence of a Bluetooth interaction and not cryptographic proof of physical distance. Signal strength is only a rough range indicator.
+- The server confirms a Bluetooth encounter only when it holds matching receipts from both phones, both tokens were valid for their windows, the receipt is fresh, and it has not been used before (replay rejection).
+- Ambient: confirmed only when the two-minute rule is met. Session: confirmed immediately when the own record of the server shows both users had an active session. QR: confirmed immediately when the scanning phone uploads, before expiry, a short-lived one-time code that the showing phone obtained from the server while signed in; both accounts took part and no receipts are involved.
+- Even a correct exchange can be relayed by an attacker, so a confirmed Bluetooth encounter is evidence of a Bluetooth interaction and not cryptographic proof of physical distance. Signal strength is only a rough range indicator.
 - Rate-limit receipt uploads and encounter resolution per account.
 
 Encounter states for `design.md`, **Encounter states**: Observed (a discovery callback), Exchanged (tokens swapped), Candidate (receipt uploaded), Confirmed, Revealed. These replace the v0.2 list.

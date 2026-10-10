@@ -113,11 +113,13 @@ Build the GitHub reader first; it alone is enough for the friends test. Qiita an
 
 An encounter records physical co-presence under the rules below. Bluetooth encounters require at least 2 minutes within Bluetooth range, with the session exception described below.
 
-- An **ambient encounter** is recorded when neither user is in a session. The 2-minute threshold is mandatory. Shorter ambient contacts are discarded so a person walking past cannot collect a card.
+- An **ambient encounter** is an encounter in which at least one of the two people was not in a session. This includes an exchange when only one user is in a session; it is revealed at the daily report. The 2-minute threshold is mandatory. Shorter ambient contacts are discarded so a person walking past cannot collect a card.
 - A **session** is a time-boxed period started deliberately by the user. A **session encounter** is between two users who are both in a session; an exchange counts immediately.
 - A **QR encounter** is created when one user scans the other's QR code, without Bluetooth, and is confirmed immediately under the QR confirmation rule in `design.md`, **Confirmed encounter, security definition**.
 
-An **exchange** is one Bluetooth connection that swaps temporary tokens in both directions. Each phone keeps a **receipt**, which it uploads to the server. An uploaded receipt that has not been confirmed is a **candidate**. A Bluetooth encounter is confirmed only when both phones report it, their receipts match and the encounter rules are met. One-sided receipts remain candidates.
+An **exchange** is one Bluetooth connection that swaps temporary tokens in both directions. Each phone keeps a **receipt**, which it uploads to the server. An uploaded receipt that has not been confirmed is a **candidate**. A **confirmed encounter** has two cases: for a Bluetooth encounter, the server holds matching receipts from both phones and the rules in **Encounters** are met; for a QR encounter, the showing phone obtained a short-lived one-time code from the server while signed in and the scanning phone uploaded that code before it expired, so both accounts took part and no receipts are involved. One-sided receipts remain candidates.
+
+Symmetric rule: an encounter counts only when both phones take part, meaning both report the Bluetooth exchange, or one shows and the other scans a QR code.
 
 Confirmation must reject invalid, stale or replayed receipts. Session confirmation must use the server's own record that both users had active sessions. The protocol and confirmation details belong in `design.md`, **Bluetooth transport** and **Confirmed encounter, security definition**.
 
@@ -365,8 +367,6 @@ Discovery off, the 21:00 daily report, profile visibility and private contact de
 - Retention periods and deletion triggers not yet specified for on-device receipts, token batches, push tokens and internal-build diagnostics. Define the complete contract in `design.md`, **Retention and deletion contract**.
 - Time-zone handling for the daily report, to be defined in `design.md`, **Daily report delivery**.
 - Connection timeouts, teardown and the background presence-confirmation approach, to be settled in `design.md`, **Bluetooth transport**, and the device checks.
-- How to classify and reveal an exchange when only one user is in a session. The glossary defines ambient encounters as neither user in a session and session encounters as both.
-- Whether the glossary's matching-receipts definition of a confirmed encounter is limited to Bluetooth. The separate QR rule confirms an encounter from the scanning phone's uploaded one-time code.
 - Product success targets; no numerical targets are specified.
 
 The full source list and evidence markings are in `decisions.md`, **Verified sources**, **Encounters**, **Build, test and release path**, and **Stack, tools and workflow**.
