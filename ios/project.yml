@@ -1,0 +1,85 @@
+name: EngineerEncounters
+options:
+  minimumXcodeGenVersion: 2.46.0
+  xcodeVersion: "27.0"
+  deploymentTarget:
+    iOS: "26.0"
+  defaultConfig: Development
+configs:
+  Development: debug
+  Internal: release
+  Release: release
+configFiles:
+  Development: Config/Shared.xcconfig
+  Internal: Config/Shared.xcconfig
+  Release: Config/Shared.xcconfig
+fileGroups:
+  - Config
+settings:
+  base:
+    SWIFT_VERSION: 6.0
+  configs:
+    Development:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEVELOPMENT_BUILD
+    Internal:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: INTERNAL_BUILD
+    Release:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: ""
+packages:
+  EncounterDomain:
+    path: Packages/EncounterDomain
+  EncounterBluetooth:
+    path: Packages/EncounterBluetooth
+  EncounterStorage:
+    path: Packages/EncounterStorage
+  EncounterBackend:
+    path: Packages/EncounterBackend
+  EncounterUI:
+    path: Packages/EncounterUI
+targets:
+  EngineerEncounters:
+    type: application
+    platform: iOS
+    sources:
+      - App
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_IDENTIFIER)
+        INFOPLIST_FILE: App/Info.plist
+        TARGETED_DEVICE_FAMILY: "1,2"
+    dependencies:
+      - package: EncounterDomain
+      - package: EncounterBluetooth
+      - package: EncounterStorage
+      - package: EncounterBackend
+      - package: EncounterUI
+  EngineerEncountersTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_IDENTIFIER).Tests
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: EngineerEncounters
+schemes:
+  EngineerEncounters:
+    build:
+      targets:
+        EngineerEncounters: all
+    run:
+      config: Development
+    test:
+      config: Development
+      targets:
+        - name: EngineerEncountersTests
+        - package: EncounterBluetooth/EncounterBluetoothTests
+        - package: EncounterUI/EncounterUITests
+    profile:
+      config: Release
+    analyze:
+      config: Development
+    archive:
+      config: Release
