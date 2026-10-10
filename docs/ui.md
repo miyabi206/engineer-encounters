@@ -56,6 +56,8 @@ The visibility explanations clarify that “Everyone eligible” still requires 
 
 The bottom tab bar contains **Discover**, **Profile** and **Settings**. Discover opens S06, Profile opens S11, and Settings opens a plain list. The list has no numbered screen identifier. It links to S16 Discovery and matching, S17 Visibility, S18 Daily report, S19 Blocked users, S20 Account and S21 Legal and support. S22 Diagnostics is an additional row only in development and internal builds. Release has six visible rows. The list uses the same bilingual titles as its destinations.
 
+**Mockup of the Settings list:** [images/settings-list.png](images/settings-list.png)
+
 Onboarding has no tab bar: S01 → S02 → S03 → S04 → S05. **DEFAULT:** onboarding requires the name, self-introduction, an interest, a purpose and a first link before S05, although the product decision requires the name, self-introduction, an interest and a link only for turning discovery on. S04 uses S14 and S15 to add its first link, then returns to S04. S05 offers explicit discovery activation or continuing with discovery off. Right after successful activation, explain that the daily report arrives as a notification and request notification permission on S05. Granting enables notifications; declining leaves them off. Both continue to S06 with discovery enabled. Skip this request where push is unavailable and read the report in-app. S18 changes the preference later. Existing signed-in users with completed onboarding enter S06; unfinished setup resumes at its unfinished screen. S21 is also available from S01 before sign-in. **DEFAULT:** development builds also expose S01 → S22 before sign-in for the no-backend, no-account one-day check; internal builds reach S22 only from Settings. Both the pre-sign-in route and trial-log sharing are absent from release builds.
 
 **DEFAULT:** Tab roots keep their own navigation stacks. Details and editors push onto the current stack; S26 is a sheet. Back returns to the named originating screen. S23, S24 and S25 are shared state views within the Discover flow, rather than extra tabs. They retain navigation to Profile and Settings. S06 can contain the S25 empty state or an S23/S24 status panel while retaining accessible, authorized content. S24 never exposes another person's card while discovery is off.
@@ -94,11 +96,38 @@ Navigation map (an arrow names an in-app destination; “same” means the curre
 
 Selecting any bottom tab returns to its root. Permission requests return to the invoking screen. Auth and external-link flows return to their invoking screen unless the action explicitly signs out or deletes the account.
 
+## Mockups
+
+`images/` holds illustrative mockups of the screens listed below. They show the Japanese interface in light appearance and were produced with an image generator. They are not screenshots of the app.
+
+This document governs. Where a mockup differs from the purpose, elements, states, actions or wording defined here, follow this document. Use a mockup for look, spacing and layout only. Do not take the following from a mockup: sample people, sample links, interest names (the vocabulary is an open item), icon choices, the device frame or the image size. The mockups do not show dark appearance, English, large text sizes, or empty, loading and error states.
+
+| Screen | Mockup | Known differences (not exhaustive) |
+|---|---|---|
+| S01 Welcome and sign-in | [s01-welcome-sign-in.png](images/s01-welcome-sign-in.png) | None recorded. |
+| S02 Profile basics | [s02-profile-basics.png](images/s02-profile-basics.png) | None recorded. |
+| S03 Interests and purposes | [s03-interests-purposes.png](images/s03-interests-purposes.png) | None recorded. |
+| S04 First link | [s04-first-link.png](images/s04-first-link.png) | The identity warning is shortened. |
+| S05 Permissions and turning discovery on | [s05-permissions-discovery-on.png](images/s05-permissions-discovery-on.png) | The explanatory sentences are shortened. |
+| S06 Feed | [s06-feed.png](images/s06-feed.png) | The あなたの興味 row starts with a selected すべて chip; the row lists the user's own interests and is not a filter. The background-discovery note is not drawn. |
+| S07 Encounter detail | [s07-encounter-detail.png](images/s07-encounter-detail.png) | One chip under 共通点 is drawn as unselected; every chip there is a shared item. |
+| S08 Active session | [s08-active-session.png](images/s08-active-session.png) | The explanatory line says encounters appear immediately; the two session rules in S08 apply instead. |
+| S09 QR exchange | [s09-qr-exchange.png](images/s09-qr-exchange.png) | None recorded. |
+| S10 Favorites, 相手 segment | [s10-favorites.png](images/s10-favorites.png) | Cards are not grouped by day. A 最近保存したリンク block is drawn under this segment; saved links belong only to the other segment. |
+| S10 Favorites, 保存したリンク segment | [s10-favorites-saved-links.png](images/s10-favorites-saved-links.png) | None recorded. |
+| S13 Links list | [s13-links-list.png](images/s13-links-list.png) | None recorded. |
+| S16 Discovery and matching | [s16-discovery-matching.png](images/s16-discovery-matching.png) | None recorded. |
+| Settings list | [settings-list.png](images/settings-list.png) | None recorded. |
+
+S11, S12, S14, S15 and S17 to S26 have no mockup. Build them from their text sketches, in the same visual style.
+
 ## The 26 screens
 
 Sketches show English wording. Label tables provide Japanese and English equivalents. Square brackets mark controls, parentheses mark conditional elements. The common state and authorization rules above apply in addition to each screen's states.
 
 ### S01 Welcome and sign-in
+
+**Mockup:** [images/s01-welcome-sign-in.png](images/s01-welcome-sign-in.png)
 
 **Purpose and entry:** Introduce the product and establish a durable account. Open on first launch, after sign-out or account deletion, or when authentication has expired.
 
@@ -132,6 +161,8 @@ Discover the work of engineers you encounter.
 
 ### S02 Profile basics
 
+**Mockup:** [images/s02-profile-basics.png](images/s02-profile-basics.png)
+
 **Purpose and entry:** Enter the name and introduction used on the card. Reach from S01 or Back on S03.
 
 ```text
@@ -158,6 +189,8 @@ Introduction [                        ] 0/200
 | 表示名と自己紹介を入力してください | Enter a display name and introduction |
 
 ### S03 Interests and purposes
+
+**Mockup:** [images/s03-interests-purposes.png](images/s03-interests-purposes.png)
 
 **Purpose and entry:** Choose interests and why the user wants to discover others. Reach from S02 or Back on S04.
 
@@ -188,6 +221,8 @@ Purposes
 
 ### S04 First link
 
+**Mockup:** [images/s04-first-link.png](images/s04-first-link.png)
+
 **Purpose and entry:** Add and preview one link before S05 under the onboarding **DEFAULT**. Reach from S03, S15 after saving a first link, or Back on S05.
 
 ```text
@@ -215,6 +250,8 @@ External links may reveal your identity.
 | 次へ | Continue |
 
 ### S05 Permissions and turning discovery on
+
+**Mockup:** [images/s05-permissions-discovery-on.png](images/s05-permissions-discovery-on.png)
 
 **Purpose and entry:** Explain the discovery promise, request Bluetooth access before explicit activation, then offer daily report notifications immediately after discovery is enabled. Reach from S04. Discovery starts off.
 
@@ -254,6 +291,8 @@ Bluetooth access [Allow Bluetooth]
 | すれちがいを記録するためにBluetoothを使用します。位置情報は使用しません。 | Bluetooth is used to record encounters. Location is not used. |
 
 ### S06 Feed
+
+**Mockup:** [images/s06-feed.png](images/s06-feed.png)
 
 **Purpose and entry:** Browse revealed encounters grouped by day. Open from the Discover tab, completed onboarding or a daily report notification.
 
@@ -300,6 +339,8 @@ No need to message. Explore at your pace.
 
 ### S07 Encounter detail
 
+**Mockup:** [images/s07-encounter-detail.png](images/s07-encounter-detail.png)
+
 **Purpose and entry:** Read the other person's authorized card and links. Reach from S06, S08, S09, S10 or the S25 sample.
 
 ```text
@@ -343,6 +384,8 @@ Link cards: source, title, description, tags, opening text
 
 ### S08 Active session
 
+**Mockup:** [images/s08-active-session.png](images/s08-active-session.png)
+
 **Purpose and entry:** Show and stop a deliberately started session. Start from S06 or S25, reopen from View session, or open from the Live Activity or one-tap control.
 
 ```text
@@ -377,6 +420,8 @@ Revealed session encounters [cards, day only]
 | 完了 | Done |
 
 ### S09 QR exchange
+
+**Mockup:** [images/s09-qr-exchange.png](images/s09-qr-exchange.png)
 
 **Purpose and entry:** Exchange cards together without Bluetooth. Reach from S06, S08, S23 or S25 when signed in and discovery is on.
 
@@ -414,6 +459,8 @@ Confirmed exchanges appear immediately.
 | iOSの設定を開く | Open iOS Settings |
 
 ### S10 Favorites
+
+**Mockups:** [images/s10-favorites.png](images/s10-favorites.png) (相手 segment), [images/s10-favorites-saved-links.png](images/s10-favorites-saved-links.png) (保存したリンク segment)
 
 **Purpose and entry:** Revisit favorite encounters and saved individual links. Reach from the favorites filter on S06.
 
@@ -507,6 +554,8 @@ Contact detail [optional, one value]
 | 発見をオンにしている間は必須項目を空にできません | Required fields cannot be empty while discovery is on |
 
 ### S13 Links list
+
+**Mockup:** [images/s13-links-list.png](images/s13-links-list.png)
 
 **Purpose and entry:** Manage the owner's link cards. Reach from S11, S17 or missing-link guidance on S16/S24.
 
@@ -611,6 +660,8 @@ Preview card · Identity warning
 | 元のページやコピー済みのURLは削除されません | The original page and copied URLs are not removed |
 
 ### S16 Discovery and matching
+
+**Mockup:** [images/s16-discovery-matching.png](images/s16-discovery-matching.png)
 
 **Purpose and entry:** Control discovery and the conditions for compatible-only fields. Reach from the Settings list, feed status or S24/prerequisite guidance.
 
