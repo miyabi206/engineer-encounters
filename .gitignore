@@ -1,0 +1,6 @@
+.DS_Store
+.build/
+.swiftpm/
+DerivedData/
+/ios/EngineerEncounters.xcodeproj/
+/ios/Config/Local.xcconfig
