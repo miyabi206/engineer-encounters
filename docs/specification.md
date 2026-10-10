@@ -1,355 +1,389 @@
-# Specification — Engineer StreetPass
+# Specification — Engineer Encounters
 
-**Version:** 0.2  
-**Status:** Draft  
-**Platforms:** iOS first, Android later  
-**Language:** Japanese, English
-**Name:** Engineer StreetPass
+**Version:** 0.3\
+**Status:** Draft requirements; product decisions recorded in `decisions.md`\
+**Date:** 2026-10-10\
+**Related:** `decisions.md`, `design.md` v0.3, `ui.md` v0.1\
+**Platforms:** iOS first, Android later\
+**Languages:** Japanese, English
 
-## 1. Product Vision
+## 1. Product vision and principles
 
-Engineer StreetPass is an ambient networking application that transforms unexpected physical encounters into opportunities to discover knowledge, people, and careers.
+Engineer Encounters helps engineers discover the work of other engineers through physical encounters. Reading someone's work is valuable even when the two never talk.
 
-Users discover relevant technical works and people by carrying their smartphones during everyday activities.
+The public names are **Engineer Encounters** in English and **すれちがいエンジニア** in Japanese. The internal codename and repository name remain **Engineer StreetPass**. The word “StreetPass” must not appear in public-facing names, screens or store text.
 
-The application does not host portfolios. Instead, users share links to content they have already published elsewhere.
+The goal is a public App Store product built and operated by its owner alone, part-time, on an individual Apple developer account. Japanese UI comes first; the product supports Japanese and English.
 
-**Mission:** Discover people, projects, and opportunities you weren't looking for.
+### Principles
 
-### Core Principles
+- Serendipitous discovery of technical work.
+- Minimal user effort, with a clear statement of what discovery can promise.
+- User-controlled visibility, enforced by the server.
+- Privacy by design and no obligation to communicate.
+- Independent ownership of external content; originals stay on their platforms.
 
-- Serendipitous discovery
-- Minimal user effort
-- User-controlled visibility
-- Privacy by design
-- No obligation to communicate
-- Independent ownership of external content
+There is no AI anywhere in the product. Link readers fill in previews automatically from the original sources.
 
-## 2. Target Users
+Version 1 is free, with no ads and no purchases. Ads and a paid no-ads plan come only after the whole app is complete.
 
-Primary users:
+## 2. Target users
 
-- Engineering students
-- Software engineers
-- Open-source contributors
-- Technical writers
-- Researchers
+The initial audience is engineering students and software developers. Other users include open-source contributors, technical writers, researchers, startup founders and engineering community organizers.
 
-Secondary users:
+Users must be 18 or older at launch. They declare this at sign-up, and the App Store minimum age is set to 18+. The age may be lowered to 16+ later, once moderation has a track record.
 
-- Recruiters
-- Startup founders
-- Research laboratories
-- Engineering community organizers
+Recruiters and career features are outside v1.
 
-The initial target is engineering students and software developers.
+## 3. Purposes
 
-## 3. Connection Modes
+Users select their purposes during onboarding and may enable both or change them later.
 
-Users select their purposes during onboarding. The app configures suitable initial settings.
+| Purpose | Value |
+|---|---|
+| Discovery | Discover technical works published by encountered engineers. |
+| Collaboration | Discover people interested in development projects, hackathons, research collaboration or open-source contributions. |
 
-Users may enable multiple modes and change their preferences later.
+Opportunity mode and career features are a later mode.
 
-### Discovery Mode
+## 4. Accounts and profile
 
-Discover technical works published by encountered users.
+### Accounts
 
-Supported sources include GitHub, Qiita, Zenn, personal websites, technical blogs, and research publications.
+- The release build requires Sign in with Apple.
+- Sign-up includes the 18+ declaration and acceptance of the terms and privacy policy.
+- GitHub is a linked identity used for verification, not a sign-in method.
+- Temporary anonymous accounts exist only in development builds and are compiled out of the release build. The friends test uses them.
 
-### Collaboration Mode
+A durable identity makes blocks, removals, the 18+ declaration and account deletion hold. An anonymous install can be reset by reinstalling.
 
-Discover people interested in development projects, hackathons, research collaborations, or open-source contributions.
+### Profile fields
 
-### Opportunity Mode
+| Field | Requirement |
+|---|---|
+| Display name | **DEFAULT:** up to 30 characters. |
+| Self-introduction | Written by the user. **DEFAULT:** up to 200 characters. |
+| Interests | **DEFAULT:** selected from a fixed curated list; no free-text interests in v1. |
+| Purposes | Discovery, Collaboration, or both. |
+| Links | **DEFAULT:** up to 10 per user. |
+| Contact detail | One optional detail, private by default. |
 
-Discover internship, employment, startup, and research opportunities.
+**DEFAULT:** no uploaded avatar in v1; the card uses an initial-letter avatar.
 
-Students and engineers may share professional profile links. Recruiters may share approved company or job-posting links.
+Discovery is the master switch for taking part in encounters and is off by default. Turning it on requires a display name, a self-introduction, at least one interest and at least one link of any kind.
 
-## 4. External Links
+Onboarding requests Bluetooth permission and explains what discovery promises, its limitations and the force-quit rule before turning discovery on.
 
-### 4.1 Link-Based Profiles
+## 5. Links
 
-Users register links rather than uploading portfolios.
+A link card is one shared link with its automatically filled title, source, tags and opening text, where available for that source. A link reader is the server component that reads one kind of source.
 
-A user profile may contain:
+### Supported sources
 
-- Display name
-- Optional avatar
-- Short biography
-- Technical interests
-- Connection purposes
-- External links
+| Source | Selection and reading | Automatically filled fields |
+|---|---|---|
+| GitHub repositories | Connect GitHub, then select from the user's own public repositories. Read through the official GitHub API. | Name, description, main language, first lines of the README. |
+| Qiita articles | Enter a Qiita username once, then select from the user's own articles. Read through the official Qiita API v2. | Title, tags, opening lines. |
+| Zenn articles | Enter a Zenn username once, then select from the user's own articles. Read through the official per-user RSS feed. | Title, opening lines. |
+| Other pages, such as portfolios and blogs | Fetch the page once and read only its title and Open Graph preview description. | Title, preview text. |
 
-### 4.2 External Link Data
+**UNVERIFIED:** whether Zenn's feed carries each article's opening text. If it does not, use the preview description of the article page for that field.
 
-Each link contains:
+### Reading and ownership
 
-- URL
-- Platform type
-- Optional custom title
-- Optional description
-- Interest tags
-- Visibility level
-- AI summarization permission
-- Display order
+- Do not scrape page bodies. Store only the title, source, tags and roughly the first 200 characters of opening text, with the source-specific metadata above.
+- The owner previews and can edit every automatically filled field before sharing, and can refresh it on demand.
+- Links open the original content on its platform. The app does not host portfolios, repositories, articles, documents or resumes.
+- External links can identify their owners even when an in-app nickname is used. Explain this before sharing identifiable links.
+- Removing a link removes in-app access; it does not delete the original or retract an external URL a reader has already copied.
+- Arbitrary-page reading must prevent server-side request forgery and treat fetched text as untrusted. The protections belong in `design.md`, **Fetching other pages**.
 
-### 4.3 Supported Links
+### Verification
 
-Initial support:
+- A GitHub link is verified by connecting the account.
+- Another link is verified when it sits under an address listed on that verified GitHub profile, including its website or social links.
+- A Qiita link is also verified when the Qiita account's linked GitHub ID matches the connected account.
+- All other links carry an unverified label and can be reported as impersonation.
 
-- GitHub profiles and repositories
-- Qiita profiles and articles
-- Zenn profiles and articles
-- Personal websites
-- Other HTTPS links
+Build the GitHub reader first; it alone is enough for the friends test. Qiita and Zenn follow, then other pages. All four readers are required before public release.
 
-Additional platforms may be supported without fundamentally changing the data model.
+## 6. Encounters
 
-### 4.4 No Portfolio Hosting
+### Definitions and confirmation
 
-The application does not provide:
+An encounter records physical co-presence under the rules below. Bluetooth encounters require at least 2 minutes within Bluetooth range, with the session exception described below.
 
-- Portfolio page builders
-- Repository hosting
-- Article publishing
-- Document uploads
-- Resume builders
+- An **ambient encounter** is recorded when neither user is in a session. The 2-minute threshold is mandatory. Shorter ambient contacts are discarded so a person walking past cannot collect a card.
+- A **session** is a time-boxed period started deliberately by the user. A **session encounter** is between two users who are both in a session; an exchange counts immediately.
+- A **QR encounter** is created when one user scans the other's QR code, without Bluetooth, and is confirmed immediately under the QR confirmation rule in `design.md`, **Confirmed encounter, security definition**.
 
-Links open the original content on its external platform.
+An **exchange** is one Bluetooth connection that swaps temporary tokens in both directions. Each phone keeps a **receipt**, which it uploads to the server. An uploaded receipt that has not been confirmed is a **candidate**. A Bluetooth encounter is confirmed only when both phones report it, their receipts match and the encounter rules are met. One-sided receipts remain candidates.
 
-Users remain responsible for managing and updating their original works.
+Confirmation must reject invalid, stale or replayed receipts. Session confirmation must use the server's own record that both users had active sessions. The protocol and confirmation details belong in `design.md`, **Bluetooth transport** and **Confirmed encounter, security definition**.
 
-### 4.5 Link Previews
+A confirmed Bluetooth encounter is evidence of a Bluetooth interaction, not cryptographic proof of physical distance: an attacker can relay an exchange. Signal strength is only a rough range indicator.
 
-The application may display titles, source platform, descriptions, and optional AI summaries.
+### The ladder
 
-Previews must not disclose information beyond the owner's visibility permissions.
+The ladder contains five rungs, ordered by user effort. All operate at the same time; the app never switches modes.
 
-## 5. StreetPass Discovery
+| Rung | Conditions | User effort | Product claim |
+|---|---|---|---|
+| 1 — Locked | Both phones locked, app in the background. | None. | Unproven; may not work at all. Never promised. |
+| 2 — Awake | At least one phone in use with another app in front. | None. | Unproven; measured separately from Locked. |
+| 3 — One open | At least one user has the app open. | One tap by one person. | The public promise, subject to the release gate. Expected to work through two independent paths: the open phone scanning and the open phone advertising. |
+| 4 — Both open | Both users have the app open. | One tap each. | Fastest. |
+| 5 — Manual | One user shows a QR code and the other scans it. | A few seconds together. | Always works; no Bluetooth. |
 
-### 5.1 Desired Experience
+Public wording promises rung 3 and describes rungs 1 and 2 as “may also work”. Use no beacons or other fixed hardware.
 
-When two compatible users pass near each other, the application attempts to recognize their encounter automatically, including when their devices are locked.
+Force-quitting the app stops discovery until it is reopened. Onboarding must explain this. Before the first unlock after a reboot, discovery does not work; this limitation is tested separately.
 
-Neither person should need to manually open the app during the encounter.
+**UNVERIFIED:** whether two backgrounded iPhones discover each other at all. Sources conflict, and only device tests can settle it. Platform evidence and its limitations are recorded in `decisions.md`, **Encounters**, and addressed in `design.md`, **Background lifecycle and storage**.
 
-### 5.2 Important Constraint
+### Sessions
 
-Automatic background discovery between two locked devices is a technical research objective.
+- A Start session button starts a session lasting 2 hours or until the user stops it.
+- A running session is shown as a Live Activity.
+- A one-tap control, as a widget or Control Center control, can start a session.
+- Two users who are both in a session see each other immediately after confirmation.
 
-Reliable detection cannot be guaranteed until real-device experiments demonstrate it.
+## 7. Reveal and notifications
 
-### 5.3 Encounter History
+A **revealed encounter** is a confirmed encounter the two users are now allowed to see. The **daily report** is the once-a-day reveal of that day's ambient encounters.
 
-An authorized encounter may display:
+- Ambient encounters become visible, with names, only when the daily report arrives.
+- The report defaults to 21:00 local time. Users can change its time and turn its notification on or off. Skip the report on days with no encounters.
+- A daily report notification may show names. Delay provides the protection: immediate ambient reveal would identify nearby strangers in real time.
+- Session encounters and QR encounters are revealed immediately.
+- The release build has no immediate ambient notifications.
+- Do not issue someone-is-nearby notifications or prompts of any kind. There is no weekly digest.
+- Development and internal builds have a demo switch for immediate ambient reveal and notification. The same switch is used in device tests and is compiled out of the release build.
 
-- Shared interests
-- Approved profile information
-- Shared external links
-- Optional AI summaries
-- Connection request action
+APNs delivers the daily report notification. Scheduling, time-zone handling and push-token lifecycle belong in `design.md`, **Daily report delivery**. Notification and session surfaces belong in `ui.md`, **Surfaces outside the app**.
 
-An encounter does not automatically establish a social connection.
+## 8. Matching and visibility
 
-## 6. Matching
+### Eligibility and compatibility
 
-The initial matching system uses user-defined rules rather than AI recommendations.
+- **Eligible:** a confirmed encounter, discovery on for both users, and no block in either direction.
+- **Compatible:** eligible, with overlapping purposes and the interest threshold of each side met.
+- **DEFAULT:** each user's interest threshold starts at 1 shared interest and is adjustable.
 
-Possible conditions:
+Matching never hides an encounter. It orders the feed and gates fields set to compatible only.
 
-- Enabled connection modes
-- Minimum number of shared interests
-- Preferred technology categories
-- Participant categories
-- Collaboration interests
-- Visibility permissions
+### Visibility levels
 
-Users can modify these conditions through Settings.
+Each profile field and link uses one of three levels:
 
-Matching eligibility and authorization to view individual fields are evaluated separately.
+| Level | Who can see it |
+|---|---|
+| Everyone eligible | Any eligible encountered user. |
+| Compatible only | Eligible users who also meet compatibility conditions. |
+| Private | No other user. |
 
-## 7. Privacy and Visibility
+Once discovery is on, the display name, self-introduction and interests default to everyone eligible. Links have no default level: the user must choose a level when adding each link. The optional contact detail defaults to private.
 
-### 7.1 Visibility Controls
+Current settings apply in both directions, including to past encounters, favorites and saved links. The server enforces authorization and never sends an unauthorized field to the app. Direct table access from the app is denied by default.
 
-Users determine the visibility of their profile fields and individual external links.
+`design.md`, **Matching and visibility**, must publish a truth table covering both discovery switches, blocks, purposes, interest thresholds and each visibility level.
 
-Supported levels:
+## 9. Privacy and safety
 
-1. All eligible encountered users
-2. Only compatible encountered users
-3. Mutual connections only
-4. Private
+### Data and retention
 
-Sensitive contact details are private by default.
+- Never request or store location in v1. The server never stores location.
+- Store an encounter's date, not its time. Times exist only inside unresolved candidates and are discarded on confirmation or dropping the candidate.
+- Drop unresolved candidates after 48 hours.
+- Delete encounters automatically after 30 days unless the viewing user marks them as favorites. A favorite is retained for that viewer and shows only what the other user currently allows.
+- An encounter deletion or block by either user removes the encounter for both, including favorites.
+- Users can save individual link cards. **DEFAULT:** saved links follow the same rules as favorites and disappear when the encounter is removed.
+- Account deletion is available inside the app and is immediate and permanent.
+- Bluetooth exchanges must not carry account IDs, names, GitHub handles, email addresses or links; only temporary tokens identify the participants.
 
-### 7.2 Discovery Controls
+The retention and deletion contract must also cover on-device diagnostics, on-device receipts, token batches, reports and push tokens. **DEFAULT:** development diagnostics are kept for 7 days; reports are kept until resolved, then for a period stated in the privacy policy. Unspecified retention periods remain open. Details belong in `design.md`, **Retention and deletion contract**.
 
-Users may:
+### Moderation
 
-- Enable or disable background discovery
-- Pause discovery temporarily
-- Configure matching conditions
-- Block other users
-- Delete encounter records
-- Delete their account
+- Block, report and account deletion are required in v1.
+- Hide a reported person from the reporter at once.
+- A profile reported by 3 different users is hidden from everyone until the operator reviews it, within 72 hours.
+- **DEFAULT:** report reasons are spam, harassment or inappropriate content, impersonation, and other.
+- The owner is the operator and publishes a moderation contact address.
+- Receipt uploads and encounter resolution must be rate-limited per account.
 
-### 7.3 Location Privacy
+### Sample encounter
 
-The application must not publicly disclose precise encounter locations or timestamps.
+New users see one clearly labelled sample encounter. It also gives App Review something to open. **DEFAULT:** the sample exists only on the device and can be dismissed.
 
-Temporary discovery identifiers should be used where technically feasible.
+## 10. Scope of v1
 
-Permanent personal identifiers must not be broadcast over Bluetooth.
+### Included
 
-### 7.4 External Link Privacy
+- Discovery and purpose selection.
+- Profiles and links with automatic filling and owner editing.
+- Three visibility levels and server-enforced matching and authorization.
+- Encounter feed grouped by day, with session and QR actions and a favorites filter; favorite encounters and saved links.
+- Daily report, sessions and QR exchange.
+- Block, report and in-app account deletion.
+- A clearly labelled sample encounter.
 
-A shared external link may identify its owner even if the in-app display name is anonymous.
+### Excluded
 
-Users must be informed about this before sharing personal websites or identifiable profiles.
+- Opportunity mode, recruiters and career features.
+- Connection requests and the mutual connections visibility level.
+- Weekly digest and immediate ambient notifications in the release build.
+- Private messaging, organization verification and recruiting dashboards.
+- Semantic recommendations, an iPad-specific interface and Android.
 
-## 8. AI Summaries
+### Later
 
-### 8.1 Model
+- Ads and a paid no-ads plan after the whole app is complete. Ad SDK data collection must then be included in App Store privacy labels, and that step makes the owner a trader under EU rules.
+- A possible opt-in background boost where on-device location wakes the app, with nothing sent to the server and the feature off by default. Revisit it only after Bluetooth-only results for rungs 1 and 2.
+- A career mode.
+- Android, reusing the backend and Bluetooth protocol.
 
-Gemini 3.1 Flash-Lite through the Google Gemini Developer API.
+The interface uses standard iOS components, light and dark modes, and Dynamic Type, with Discover, Profile and Settings tabs. It retains the concept's teal accent and card layout. Screen definitions, navigation, bilingual labels and external surfaces belong in `ui.md`, **Navigation**, **The 26 screens** and **Surfaces outside the app**.
 
-The initial implementation may use the Google AI Studio free tier, subject to provider limits and data-processing terms.
+## 11. Supported devices
 
-### 8.2 Purpose
+The initial app is native iOS, using Swift and SwiftUI. Minimum iOS is 26.0; builds use Xcode 27.0 and Swift 6.4. Legacy support is not a project requirement.
 
-Provide short explanations of linked technical works.
+Development and radio tests use the owner's iPhone 15 and iPad (10th generation), plus a second recent iPhone borrowed before the matrix. The iPad is an experimental peer; an iPhone-with-iPad result does not establish iPhone-with-iPhone behaviour. There is no iPad-specific interface in v1.
 
-Examples:
+| Build kind | Distribution | Development features |
+|---|---|---|
+| Development | Run from the owner's Mac. | Temporary anonymous sign-in, the demo switch and diagnostics. |
+| Internal | TestFlight distribution to the owner's own testers. | The demo switch and diagnostics. |
+| Release | App Store distribution. | Anonymous sign-in, the demo switch and diagnostics are all compiled out. |
 
-- What a GitHub project does
-- Technologies used
-- Key implementation features
-- What readers might learn from an article
+Core Bluetooth provides discovery; it is the only Apple framework that works in the background between strangers without pairing and permits a later Android implementation of the same protocol.
 
-AI summaries must not be used to judge the personal worth or professional competence of a creator.
+Implementation uses SwiftData with a replaceable receipt queue, CryptoKit and the Keychain, camera QR scanning, Supabase's free-plan Auth, PostgreSQL, Edge Functions and Cron, and APNs. Architecture, backend languages, storage, token handling, repository structure and development tools belong in `design.md`, **Stack, tools and workflow**, following `decisions.md`, **Stack, tools and workflow**.
 
-### 8.3 AI Privacy Policy
+## 12. Release path and gates
 
-**Gemini must never receive information beyond what an ordinary authorized user is allowed to access.**
+Each stage gates the next. Device radio tests and battery measurements are performed by the owner.
 
-For the free-tier MVP, a stricter policy applies:
+| Stage | Required work and gate |
+|---|---|
+| 1 — Toolchain check | Prove that `swift test` and `xcodebuild` run in the implementing agent's sandbox on this Mac. This is **UNVERIFIED** until the first implementation unit. |
+| 2 — Bluetooth engine | Build the engine inside the real app with diagnostics. Run a one-day check of rungs 3 and 4 on real devices, with made-up identities, no backend and logs kept on the devices. |
+| 3 — Basic functions | Build the basic functions, then complete the 160-trial matrix with a borrowed second iPhone. |
+| 4 — Friends test | Test with 3 to 5 friends in a small room or cafe using the free Apple account, cable installs from the owner's Mac, temporary anonymous sign-in and sessions for immediate results. View the daily report inside the app without a notification. The GitHub reader alone is sufficient. |
+| 5 — Developer Program | Join the Apple Developer Program; add and verify Sign in with Apple, push notifications and TestFlight. |
+| 6 — Event | Test at one real event with 20 or more people through TestFlight. |
+| 7 — Review and Japan release | Obtain one professional review of the privacy policy and terms in Japanese and English, then release publicly in Japan. All link readers must be complete. |
+| 8 — Other storefronts | Expand in waves under the regional conditions below, with worldwide availability as the goal. |
 
-- Process only explicitly approved public content.
-- Require the owner's consent for AI processing.
-- Do not process private or restricted profiles.
-- Do not process encounter histories, messages, locations, or contact details.
-- Let the owner preview the exact content submitted for summarization.
-- Let the owner approve, edit, or reject summaries.
+### Device matrix and battery gate
 
-Giving another user permission to view a link does not automatically authorize sending its contents to Gemini.
+- Test rungs 1 to 4 on two pairs: iPhone with iPad and iPhone with iPhone. Run 20 stationary trials for each rung and pair, for 160 trials total.
+- Record 10-second and 30-second passes for information only.
+- Measure completion time of the two-way token exchange and whether both phones confirm two minutes of continued presence.
+- Rung 3 must confirm an encounter within 5 minutes in at least 90 percent of trials.
+- Rungs 1 and 2 have no pass mark; their results determine only how they are described.
+- Discovery must add at most 5 percentage points of battery use over 8 hours compared with discovery off.
+- If rung 3 fails, stop and rethink: only the QR rung would remain.
+- Twenty trials cannot distinguish 90 percent from 80 percent with confidence. The outcome is a go or no-go signal, not a measured reliability rate.
 
-### 8.4 Summary Storage
+Run detached from the debugger. Record iOS and build versions, reset state between trials, bound pending connection lifetimes, and record discovery, exchange completion and confirmation times separately. Test the first-unlock-after-reboot limitation separately. Radio procedures belong in `design.md`, **Test plan**.
 
-Only the generated summary, relevant metadata, and authorization records need to be stored.
+The simulator has no Bluetooth. Automated encounter-logic tests use a fake behind the Bluetooth interface for the 2-minute rule, token rotation and both-phones-report rule. Implementation units have terminal checks for Swift packages, simulator builds, backend functions and the local database; commands and tooling belong in `design.md`, **Stack, tools and workflow**.
 
-The original article or repository remains on its external platform.
+### Distribution and operational limits
 
-Temporary source content should not be retained unnecessarily.
+- **FACT:** free Apple accounts cannot distribute through TestFlight or the App Store; builds expire after about a week and push notifications are unavailable.
+- **UNVERIFIED:** whether Sign in with Apple is available on a free account. Older sources report a device cap of about 3, but the current cap is unconfirmed.
+- If the free account's device cap is reached during the friends test, a friend's phone can be signed using that friend's own free Apple ID.
+- **FACT:** Supabase can pause a low-activity free-plan project over a 7-day period; paid projects are not paused. A quiet week after release could take the app offline until the owner restores it manually.
+- **FACT:** Supabase labels manual identity linking and Supabase Cron as beta. Their integration and the free-plan backend are specified in `design.md`, **Stack, tools and workflow**.
 
-### 8.5 AI Availability
+### Public release requirements
 
-The core app must work without Gemini.
+The owner is responsible for:
 
-If summarization is unavailable or disabled, display the link and its manually supplied description.
+- Privacy policy and terms in Japanese and English, with public URLs for these and support.
+- App Store privacy labels and the Bluetooth purpose string.
+- In-app account deletion and a published moderation contact.
+- An App Review demonstration using the sample encounter and review notes.
+- A data-flow description covering Supabase and its hosting region for the Japanese privacy-law assessment.
+- Trademark registry searches in J-PlatPat and USPTO for both public names before public release. **FACT:** a web search found no existing app, service or trademark using either name; the registries were not searched.
 
-## 9. Notifications
+Japan is the first storefront. Other storefronts follow in waves. EU and UK release requires a privacy-law check and a trader decision. China mainland is excluded until the government-filing question is answered. These legal questions remain open and must not be presented as settled.
 
-Users can configure:
+## 13. Success metrics
 
-- Immediate notifications when technically available
-- Daily digest
-- Weekly digest
-- No notifications
+Technical measures:
 
-Notification conditions may include shared interests, connection modes, and connection requests.
+- Encounter confirmation success and latency, reported separately by rung and device pair.
+- Discovery, exchange completion and confirmation times.
+- False-positive and duplicate encounters.
+- Additional battery use with discovery enabled.
 
-Exact encounter locations and timestamps must not appear in notifications.
+Product measures:
 
-## 10. MVP Features
+- Relevant links discovered and original-link opening rate.
+- Favorite encounters and saved links.
+- Useful discoveries reported by users.
 
-### P0 — Technical Research
+The objective is meaningful discovery, not maximizing the number of encounters. Technical acceptance uses the gates in **Release path and gates**; product targets remain open.
 
-- Core Bluetooth discovery
-- Foreground encounters
-- Background encounters
-- Locked-device experiments
-- Encounter logging
-- Reliability and battery measurements
+## 14. Defaults chosen during drafting
 
-### P1 — Core Application
+**DEFAULT** items fill gaps and are not confirmed owner decisions. Technical starting values may change after the one-day check and the matrix.
 
-- User authentication
-- Purpose selection
-- Technical interest selection
-- External link registration
-- Link-level visibility
-- Profile visibility
-- Encounter history
-- Rule-based matching
-- External link opening
-- Notification preferences
+| Area | Drafting default |
+|---|---|
+| Display name | Up to 30 characters. |
+| Self-introduction | Up to 200 characters. |
+| Interests | Fixed curated list; no free-text interests in v1. |
+| Avatar | Initial-letter avatar; no uploaded avatar in v1. |
+| Links | Up to 10 per user. |
+| Interest threshold | 1 shared interest by default, adjustable by each user. |
+| Reports | Reasons: spam, harassment or inappropriate content, impersonation, other. |
+| Sample encounter | On-device only and dismissible. |
+| Saved link | Same retention and current-visibility rules as a favorite; disappears if the encounter is removed. |
+| Feed card | Display name, shared interests, first visible link card, a verified or unverified label per link, encounter kind (ambient, session or QR), and day. Never time or place. Layout belongs in `ui.md`, **The 26 screens**. |
+| Temporary tokens | Random, server-issued in batches, valid for 15-minute windows and the only identifiers exchanged. Details belong in `design.md`, **Bluetooth transport**. |
+| Presence confirmation | Keep the connection and read again after two minutes, or exchange again with the same peer at least two minutes after the first exchange. The one-day check determines background feasibility; details belong in `design.md`, **Bluetooth transport**. |
+| Diagnostics | Development-build diagnostics kept for 7 days. |
+| Moderation report retention | Kept until resolved, then for a period the privacy policy will state. |
 
-### P2 — Extensions
+Discovery off, the 21:00 daily report, profile visibility and private contact details are specified product defaults, rather than gaps filled during drafting. Links require an explicit visibility choice.
 
-- Gemini summaries
-- Saved external links
-- Connection requests
-- Reporting and blocking
+## 15. Open items
 
-### Future
+- Trademark registry searches for **すれちがいエンジニア** and **Engineer Encounters**.
+- **UNVERIFIED:** whether two backgrounded iPhones discover each other at all.
+- **UNVERIFIED:** whether Zenn's feed includes the opening text of an article.
+- **UNVERIFIED:** whether `swift test` and `xcodebuild` run inside the implementing agent's sandbox.
+- **UNVERIFIED:** whether Sign in with Apple is available on a free Apple account, and its current device cap.
+- Whether a foreign developer needs a government filing number for China mainland distribution; sources conflict.
+- Whether a solo developer with a free, ad-free app counts as a trader under EU rules.
+- The exact retention period for resolved moderation reports.
+- Retention periods and deletion triggers not yet specified for on-device receipts, token batches, push tokens and internal-build diagnostics. Define the complete contract in `design.md`, **Retention and deletion contract**.
+- Time-zone handling for the daily report, to be defined in `design.md`, **Daily report delivery**.
+- Connection timeouts, teardown and the background presence-confirmation approach, to be settled in `design.md`, **Bluetooth transport**, and the device checks.
+- How to classify and reveal an exchange when only one user is in a session. The glossary defines ambient encounters as neither user in a session and session encounters as both.
+- Whether the glossary's matching-receipts definition of a confirmed encounter is limited to Bluetooth. The separate QR rule confirms an encounter from the scanning phone's uploaded one-time code.
+- Product success targets; no numerical targets are specified.
 
-- Android application
-- Private messaging
-- Organization verification
-- Recruiting dashboards
-- Semantic recommendations
-- Event-specific discovery features
+The full source list and evidence markings are in `decisions.md`, **Verified sources**, **Encounters**, **Build, test and release path**, and **Stack, tools and workflow**.
 
-## 11. Supported Devices
+## 16. Changes from v0.2
 
-### Initial Platform
-
-Native iOS application using Swift and SwiftUI.
-
-The minimum supported operating-system version will be chosen for currently supported iPhone hardware and modern SwiftUI APIs.
-
-Legacy support is not a project requirement.
-
-### Development Test Devices
-
-- iPhone 15
-- iPad 10th generation
-
-The iPad is used as a development and experimental peer device.
-
-Successful iPhone-to-iPad tests do not prove identical performance between two iPhones.
-
-Additional iPhone-to-iPhone verification will be required before guaranteeing the intended phone-to-phone experience.
-
-## 12. Success Metrics
-
-Technical:
-
-- Encounter detection success rate
-- Detection latency
-- False-positive encounters
-- Duplicate encounters
-- Battery consumption
-
-Product:
-
-- Relevant links discovered
-- External link opening rate
-- Saved links
-- Useful discoveries reported by users
-- Connection requests
-- Successful voluntary connections
-
-**The main objective is meaningful discovery, not maximizing the number of encounters.**
+- Adopt the Japanese and English public names and keep the codename internal.
+- Set launch age to 18+, Japanese UI first, free operation without ads or purchases, and a Japan-first rollout.
+- Require Sign in with Apple for release; use GitHub only as a linked verification identity.
+- Define profile requirements, discovery prerequisites and labelled drafting limits.
+- Replace the previous content-processing feature with editable, automatically filled link cards from four source readers.
+- Promise the One open rung, measure the two background rungs separately, require two minutes for ambient encounters and both phones' reports for Bluetooth confirmation.
+- Add 2-hour sessions, a Live Activity, a one-tap session control and QR exchange.
+- Reveal ambient encounters only at the daily report; remove the weekly digest and release-build immediate ambient notifications.
+- Reduce visibility to three levels and remove connection requests. Separate eligibility from compatibility; matching orders the feed and gates compatible-only fields.
+- Apply current settings to past encounters, favorites and saved links, with server-only authorization.
+- Include favorites, saved links, block, report, immediate account deletion and the sample encounter in v1.
+- Define date-only records, 48-hour candidate expiry, 30-day encounter retention and mutual encounter removal.
+- Fix the minimum iOS version and build tools, distinguish three build kinds, and introduce staged device, friends, event, legal and regional release gates.
+- Move protocol, schema and tooling details to `design.md` and screen details to `ui.md`.
