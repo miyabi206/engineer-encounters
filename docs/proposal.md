@@ -1,3 +1,11 @@
+> **Superseded (2026-10-10).** This document and `proposal.pdf` are superseded by `decisions.md` v0.3 as the authoritative record, together with `specification.md` v0.3, `design.md` v0.3 and `ui.md` v0.1. Both are kept for history. Pages 3 to 5 of `proposal.pdf` remain the visual starting point for `ui.md`. Main differences:
+>
+> - Public names Engineer Encounters / すれちがいエンジニア; 18+ launch, Apple sign-in, free v1 and Japan-first release.
+> - Discovery and Collaboration only; three visibility levels; no connection requests. Editable source previews replace AI processing.
+> - A five-rung ladder promises One open; ambient encounters require two minutes, while sessions and QR encounters reveal immediately.
+> - A daily report, with immediate reveal for session and QR encounters, replaces the configurable notifications of the proposal.
+> - Favorites, saved links, reporting, blocking and account deletion are in v1, with defined retention and moderation rules. A 160-trial matrix and staged friends, event and legal gates replace the proposed pilot path.
+
 # Proposal - Engineer StreetPass
 
 **Version:** 0.1  
