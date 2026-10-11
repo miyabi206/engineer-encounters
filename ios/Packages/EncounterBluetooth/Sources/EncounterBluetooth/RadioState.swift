@@ -142,32 +142,27 @@ struct ReadSnapshots {
 }
 
 struct PeripheralLinks {
-    private enum State { case open, closed }
-    // Closed subscriptions retain their slot until unsubscribe/service removal.
-    // Bounding open and closed together avoids an unbounded tombstone table.
-    private var subscriptions: [PeerHandle: State] = [:]
+    // Only open logical links are tracked; unknown centrals cannot make requests.
+    private var subscriptions: Set<PeerHandle> = []
 
-    var openPeers: [PeerHandle] { subscriptions.compactMap { $0.value == .open ? $0.key : nil } }
+    var openPeers: [PeerHandle] { Array(subscriptions) }
     var count: Int { subscriptions.count }
-    func acceptsRequests(_ peer: PeerHandle) -> Bool { subscriptions[peer] == .open }
+    func acceptsRequests(_ peer: PeerHandle) -> Bool { subscriptions.contains(peer) }
 
-    // Repeated subscription callbacks cannot reopen a logically closed link.
     mutating func subscribe(_ peer: PeerHandle, backlogCount: Int = 0) -> Bool {
-        guard subscriptions[peer] == nil, count < RadioAdmission.peripheralLimit,
-              RadioAdmission.permits(.subscription, backlogCount: backlogCount, openLinkCount: openPeers.count)
+        guard !subscriptions.contains(peer),
+              RadioAdmission.permits(.subscription, backlogCount: backlogCount, openLinkCount: count)
         else { return false }
-        subscriptions[peer] = .open
+        subscriptions.insert(peer)
         return true
     }
 
     mutating func unsubscribe(_ peer: PeerHandle) -> Bool {
-        subscriptions.removeValue(forKey: peer) == .open
+        subscriptions.remove(peer) != nil
     }
 
     mutating func close(_ peer: PeerHandle) -> Bool {
-        guard subscriptions[peer] == .open else { return false }
-        subscriptions[peer] = .closed
-        return true
+        subscriptions.remove(peer) != nil
     }
 
     mutating func removeService() -> [PeerHandle] {

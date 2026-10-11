@@ -135,22 +135,38 @@ final class EventAdmissionTests: XCTestCase {
         XCTAssertFalse(links.unsubscribe(peer))
     }
 
-    func testOpenAndClosedPeripheralStateStayBoundedWithoutReopeningClosedLinks() {
+    func testLogicalCloseFreesAllSixteenSlotsWhileCentralsStaySubscribed() {
         let peers = (0..<16).map { _ in PeerHandle() }, refused = PeerHandle()
         var links = PeripheralLinks()
-        for peer in peers { XCTAssertTrue(links.subscribe(peer)) }
+        var backlog = EventBacklog()
+        for peer in peers {
+            XCTAssertTrue(links.subscribe(peer, backlogCount: backlog.count))
+            backlog.append(.connected(.init(peer: peer, role: .peripheral)))
+        }
         XCTAssertEqual(links.openPeers.count, 16)
         XCTAssertFalse(links.subscribe(refused))
         for peer in peers {
-            XCTAssertTrue(links.close(peer))
-            XCTAssertFalse(links.subscribe(peer))
+            let closed = links.close(peer)
+            XCTAssertTrue(closed)
+            if closed { backlog.append(.disconnected(.init(peer: peer, role: .peripheral))) }
         }
         XCTAssertEqual(links.openPeers.count, 0)
-        XCTAssertEqual(links.count, 16)
-        XCTAssertFalse(links.subscribe(refused))
-        XCTAssertFalse(links.unsubscribe(peers[0]))
-        XCTAssertTrue(links.subscribe(refused))
-        XCTAssertEqual(links.count, 16)
+        XCTAssertEqual(links.count, 0)
+        XCTAssertTrue(links.subscribe(refused, backlogCount: backlog.count))
+        backlog.append(.connected(.init(peer: refused, role: .peripheral)))
+        for peer in peers {
+            XCTAssertFalse(links.acceptsRequests(peer)) // Both ATT callbacks refuse unknown centrals.
+            let closed = links.close(peer), unsubscribed = links.unsubscribe(peer)
+            XCTAssertFalse(closed)
+            XCTAssertFalse(unsubscribed)
+            if closed || unsubscribed { backlog.append(.disconnected(.init(peer: peer, role: .peripheral))) }
+        }
+        for peer in peers { XCTAssertEqual(backlog.next(), .connected(.init(peer: peer, role: .peripheral))) }
+        for peer in peers { XCTAssertEqual(backlog.next(), .disconnected(.init(peer: peer, role: .peripheral))) }
+        XCTAssertEqual(backlog.next(), .connected(.init(peer: refused, role: .peripheral)))
+        XCTAssertNil(backlog.next())
+        XCTAssertTrue(links.acceptsRequests(refused))
+        XCTAssertEqual(links.count, 1)
         XCTAssertEqual(links.removeService(), [refused])
         XCTAssertEqual(links.count, 0)
     }
@@ -389,18 +405,19 @@ final class LinkLifecycleTests: XCTestCase {
         XCTAssertFalse(links.close(peer))
     }
 
-    func testPeripheralLogicalCloseRejectsRequestsUntilUnsubscribeAndSubscribe() {
+    func testPeripheralLogicalCloseRejectsRequestsUntilNewSubscriptionIsAdmitted() {
         let peer = PeerHandle()
         var links = PeripheralLinks()
         XCTAssertTrue(links.subscribe(peer))
         XCTAssertTrue(links.close(peer))
         XCTAssertFalse(links.acceptsRequests(peer))
         XCTAssertFalse(links.close(peer))
-        XCTAssertFalse(links.subscribe(peer))
+        XCTAssertEqual(links.count, 0)
+        XCTAssertFalse(links.subscribe(peer, backlogCount: 256))
         XCTAssertFalse(links.acceptsRequests(peer))
-        XCTAssertFalse(links.unsubscribe(peer))
-        XCTAssertTrue(links.subscribe(peer))
+        XCTAssertTrue(links.subscribe(peer, backlogCount: 255))
         XCTAssertTrue(links.acceptsRequests(peer))
+        XCTAssertFalse(links.subscribe(peer))
         XCTAssertTrue(links.unsubscribe(peer))
     }
 
@@ -414,7 +431,6 @@ final class LinkLifecycleTests: XCTestCase {
         _ = snapshots.answer(peer, request: .init(1), snapshot:
             .init(frame: Data([1, 2]), validUntil: now.addingTimeInterval(10)), now: now)
         if links.close(peer) { snapshots.drop(peer) }
-        _ = links.unsubscribe(peer)
         _ = links.subscribe(peer)
         XCTAssertNil(snapshots.continuation(peer, offset: 1, now: now))
     }
@@ -503,7 +519,7 @@ final class LinkLifecycleTests: XCTestCase {
         XCTAssertFalse(links.unsubscribe(peer)) // Late callback after removal.
         XCTAssertTrue(links.removeService().isEmpty)
         XCTAssertTrue(links.subscribe(peer))
-        XCTAssertTrue(links.subscribe(closed)) // Closed tombstones were reset too.
+        XCTAssertTrue(links.subscribe(closed))
         XCTAssertTrue(links.acceptsRequests(peer))
         XCTAssertEqual(Set(links.removeService()), Set([peer, closed]))
     }

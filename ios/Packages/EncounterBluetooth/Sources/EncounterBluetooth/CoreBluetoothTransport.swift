@@ -215,7 +215,6 @@ public final class CoreBluetoothTransport: NSObject, BluetoothTransport, @unchec
         for peer in peripheralLinks.removeService() {
             emit(.disconnected(.init(peer: peer, role: .peripheral)))
         }
-        // Include requests from logically closed links as well.
         for request in pendingReads.values {
             if respond { peripheralManager.respond(to: request, withResult: .readNotPermitted) }
         }
