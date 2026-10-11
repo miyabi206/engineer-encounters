@@ -1,11 +1,36 @@
 import Foundation
 import XCTest
+import Security
 import EncounterDomain
 import EncounterDomainTestSupport
-import EncounterStorage
+@testable import EncounterStorage
 
 @MainActor
 final class KeychainTokenBatchStoreTests: XCTestCase {
+    func testSystemKeychainDictionariesAreDeviceOnlyAndNeverSynchronize() {
+        let data = Data([1, 2, 3])
+        let query = SystemKeychainClient.itemQuery(service: "service", account: "account")
+        let read = SystemKeychainClient.readQuery(service: "service", account: "account")
+        let add = SystemKeychainClient.addAttributes(data, service: "service", account: "account")
+        let update = SystemKeychainClient.writeAttributes(data)
+        for dictionary in [query, read, add] {
+            XCTAssertEqual(dictionary[kSecClass as String] as? String, kSecClassGenericPassword as String)
+            XCTAssertEqual(dictionary[kSecAttrService as String] as? String, "service")
+            XCTAssertEqual(dictionary[kSecAttrAccount as String] as? String, "account")
+            XCTAssertEqual(dictionary[kSecAttrSynchronizable as String] as? Bool, false)
+        }
+        for dictionary in [add, update] {
+            XCTAssertEqual(dictionary[kSecValueData as String] as? Data, data)
+            XCTAssertEqual(dictionary[kSecAttrAccessible as String] as? String,
+                           kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String)
+            XCTAssertEqual(dictionary[kSecAttrSynchronizable as String] as? Bool, false)
+        }
+        XCTAssertEqual(read[kSecReturnData as String] as? Bool, true)
+        XCTAssertEqual(read[kSecMatchLimit as String] as? String, kSecMatchLimitOne as String)
+        XCTAssertNil(query[kSecValueData as String])
+        XCTAssertNil(update[kSecClass as String])
+    }
+
     func testMissingSaveReplaceAndIdempotentClear() async throws {
         let client = FakeKeychainClient()
         let store = KeychainTokenBatchStore(service: "test-service", account: "test-account", client: client)

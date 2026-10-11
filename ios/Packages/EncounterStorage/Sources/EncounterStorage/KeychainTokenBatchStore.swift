@@ -21,9 +21,7 @@ public struct SystemKeychainClient: KeychainClient {
     public init() {}
 
     public func read(service: String, account: String) async throws -> Data? {
-        var query = item(service: service, account: account)
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        let query = Self.readQuery(service: service, account: account)
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound { return nil }
@@ -33,14 +31,11 @@ public struct SystemKeychainClient: KeychainClient {
     }
 
     public func writeOrReplace(_ data: Data, service: String, account: String) async throws {
-        let query = item(service: service, account: account)
-        let attributes: [String: Any] = [
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        ]
+        let query = Self.itemQuery(service: service, account: account)
+        let attributes = Self.writeAttributes(data)
         var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         if status == errSecItemNotFound {
-            let newItem = query.merging(attributes) { _, replacement in replacement }
+            let newItem = Self.addAttributes(data, service: service, account: account)
             status = SecItemAdd(newItem as CFDictionary, nil)
             if status == errSecDuplicateItem {
                 status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
@@ -50,13 +45,30 @@ public struct SystemKeychainClient: KeychainClient {
     }
 
     public func delete(service: String, account: String) async throws {
-        let status = SecItemDelete(item(service: service, account: account) as CFDictionary)
+        let status = SecItemDelete(Self.itemQuery(service: service, account: account) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw TokenBatchStorageError.keychainStatus(status)
         }
     }
 
-    private func item(service: String, account: String) -> [String: Any] {
+    static func readQuery(service: String, account: String) -> [String: Any] {
+        var query = itemQuery(service: service, account: account)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        return query
+    }
+
+    static func writeAttributes(_ data: Data) -> [String: Any] {
+        [kSecValueData as String: data,
+         kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+         kSecAttrSynchronizable as String: false]
+    }
+
+    static func addAttributes(_ data: Data, service: String, account: String) -> [String: Any] {
+        itemQuery(service: service, account: account).merging(writeAttributes(data)) { _, replacement in replacement }
+    }
+
+    static func itemQuery(service: String, account: String) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
          kSecAttrService as String: service,
          kSecAttrAccount as String: account,
