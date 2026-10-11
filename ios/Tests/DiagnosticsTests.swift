@@ -435,9 +435,10 @@ final class DiagnosticsTests: XCTestCase {
         let demo = DemoSwitchSetting(defaults: defaults)
         let approach = PresenceApproachSetting(defaults: defaults)
         XCTAssertFalse(demo.isEnabled)
-        XCTAssertEqual(approach.value, .heldConnection)
+        XCTAssertEqual(approach.value, .secondExchange)
         demo.isEnabled = true
         approach.value = .secondExchange
+        XCTAssertEqual(defaults.string(forKey: "diagnostics.presenceApproach"), "secondExchange")
         XCTAssertTrue(DemoSwitchSetting(defaults: defaults).isEnabled)
         XCTAssertEqual(PresenceApproachSetting(defaults: defaults).value, .secondExchange)
         let fixture = try Fixture()
@@ -450,8 +451,18 @@ final class DiagnosticsTests: XCTestCase {
         XCTAssertEqual(trial.serverConfirmation, .unavailable)
         demo.isEnabled = false
         approach.value = .heldConnection
+        XCTAssertEqual(defaults.string(forKey: "diagnostics.presenceApproach"), "heldConnection")
         XCTAssertFalse(DemoSwitchSetting(defaults: defaults).isEnabled)
         XCTAssertEqual(PresenceApproachSetting(defaults: defaults).value, .heldConnection)
+    }
+
+    @MainActor
+    func testUnrecognisedPresenceApproachReadsSecondExchange() throws {
+        let suite = "EngineerEncounters.DiagnosticsTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("unknown", forKey: "diagnostics.presenceApproach")
+        XCTAssertEqual(PresenceApproachSetting(defaults: defaults).value, .secondExchange)
     }
 }
 

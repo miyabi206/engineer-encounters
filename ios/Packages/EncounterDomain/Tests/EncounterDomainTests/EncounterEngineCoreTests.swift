@@ -66,6 +66,19 @@ final class EncounterEngineCoreTests: XCTestCase {
         return receipt
     }
 
+    func testDefaultApproachUsesSecondExchange() throws {
+        var core = EncounterEngineCore()
+        _ = core.receive(.start, context: context())
+        _ = core.receive(.transport(.availabilityChanged(.available)), context: context())
+        let first = try completePeripheral(&core)
+        let key = BluetoothConnection(peer: peer(), role: .peripheral)
+        _ = core.receive(.transport(.disconnected(key)), context: context())
+        _ = core.receive(.transport(.connected(key)), context: context(120))
+        let frame = try offered(core.receive(.transport(.incomingRead(key.peer, .init(3))), context: context(120)))
+        XCTAssertEqual(frame.phase, .reconnectEvidence)
+        XCTAssertNotEqual(frame.nonce, first.exchangeNonce)
+    }
+
     func testObservedPeersDropTheOldestAt256WithoutRenewingDuplicateObservations() {
         var core = EncounterEngineCore()
         for index in 1...256 { _ = core.receive(.transport(.peerObserved(peer(index))), context: context()) }

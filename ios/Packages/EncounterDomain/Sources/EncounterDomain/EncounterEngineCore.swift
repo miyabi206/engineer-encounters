@@ -121,7 +121,7 @@ public struct EncounterEngineCore: Sendable {
     private let identitySource: @Sendable () -> UUID
 
     /// Inject secure randomness in production and repeatable sources in tests.
-    public init(approach: PresenceApproach = .heldConnection,
+    public init(approach: PresenceApproach = .secondExchange,
                 nonceSource: @escaping @Sendable () -> ExchangeNonce = { ExchangeNonce() },
                 identitySource: @escaping @Sendable () -> UUID = { UUID() }) {
         self.approach = approach; self.nonceSource = nonceSource; self.identitySource = identitySource

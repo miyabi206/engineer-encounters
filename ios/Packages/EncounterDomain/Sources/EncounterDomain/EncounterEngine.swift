@@ -42,7 +42,7 @@ public actor EncounterEngine {
 
     /// Session flags always come from the caller; this engine never chooses encounter kind.
     public init(transport: any BluetoothTransport, tokenProvider: TokenProvider, receiptQueue: any ReceiptQueue,
-                clock: any EncounterClock = SystemEncounterClock(), approach: PresenceApproach = .heldConnection,
+                clock: any EncounterClock = SystemEncounterClock(), approach: PresenceApproach = .secondExchange,
                 sessionFlag: @escaping @Sendable () async -> Bool,
                 nonceSource: @escaping @Sendable () -> ExchangeNonce = { ExchangeNonce() },
                 identitySource: @escaping @Sendable () -> UUID = { UUID() }) {
