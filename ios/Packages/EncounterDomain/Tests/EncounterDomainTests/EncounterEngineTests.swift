@@ -7,8 +7,7 @@ import EncounterDomainTestSupport
 final class EncounterEngineTests: XCTestCase {
     private func evidence(_ phone: FakeEncounterPhone) async throws -> [EncounterReceipt] { try await phone.queue.pending() }
     private func startSingle(_ rig: PairedPhonesRig) async throws {
-        // The second endpoint starts discovery last; dropping its observation leaves only first as central.
-        await rig.link.dropNext(.observation)
+        await rig.link.setObservations(to: .second, enabled: false)
         try await rig.start()
     }
     private func connectCount(_ commands: [BluetoothCommand]) -> Int {
@@ -270,7 +269,7 @@ final class EncounterEngineTests: XCTestCase {
         let queue = ControlledReceiptQueue()
         await queue.setWrites(held: true)
         let rig = try await PairedPhonesRig.make(secondQueue: queue)
-        await rig.link.dropNext(.observation)
+        await rig.link.setObservations(to: .second, enabled: false)
         await rig.first.engine.start(); await rig.second.engine.start()
         await queue.waitForWrite()
         let before = await rig.second.transport.commands()

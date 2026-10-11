@@ -63,12 +63,15 @@ public struct EncounterEngineCore: Sendable {
     private struct Attempt: Sendable {
         let connection: BluetoothConnection
         let approach: PresenceApproach
+        let createdAt: TimeInterval
+        var mayRetry = false
         var stage: Stage
         var connected: Bool
         var deadline: TimeInterval?
         var operation: BluetoothRequestID?
         var offered: ExchangeFrame?
         var offeredUntil: Date?
+        var readWindow: TokenWindow?
         var pair: ReceiptTokenPair?
         var first: EncounterReceipt?
         var firstCompletedAt: TimeInterval?
@@ -82,7 +85,10 @@ public struct EncounterEngineCore: Sendable {
         let original: EncounterReceipt?
     }
     private var attempts: [BluetoothConnection: Attempt] = [:]
-    private var closing: Set<BluetoothConnection> = []
+    private var closing: [BluetoothConnection: TimeInterval] = [:]
+    // A queued observation retains one retry; an automatic retry retains none.
+    private var pendingPeers: [PeerHandle: Bool] = [:]
+    private static let pendingPeerLimit = 256
     private var saves: [UInt64: Save] = [:]
     private var backoff: [PeerHandle: TimeInterval] = [:]
     private var observed: Set<PeerHandle> = []
@@ -106,7 +112,7 @@ public struct EncounterEngineCore: Sendable {
     /// Includes incoming connections and outgoing pending connects in the four-slot limit.
     public var activeConnectionCount: Int {
         let active = Set(attempts.values.filter { $0.connected || $0.stage == .connecting }.map(\.connection))
-        return active.union(closing).count
+        return active.union(closing.keys).count
     }
 
     /// Reduces one ordered input; supplied monotonic time must never run backwards.
@@ -125,8 +131,9 @@ public struct EncounterEngineCore: Sendable {
             if discovering { effects.append(.event(.discoveryChanged(false))) }
             discovering = false
             observed.removeAll()
+            pendingPeers.removeAll(); backoff.removeAll()
             if isReset(input) {
-                backoff.removeAll(); consumedNonces.removeAll()
+                consumedNonces.removeAll()
                 effects.append(.queue(nil, .removeAll))
             }
         case .selectApproach(let selected): approach = selected
@@ -143,13 +150,20 @@ public struct EncounterEngineCore: Sendable {
                 if attempt.approach == .heldConnection {
                     beginRead(&attempt, context, effects: &effects)
                     attempts[key] = attempt
-                } else if !closing.contains(key), activeConnectionCount < EncounterProtocol.activeConnectionLimit {
+                } else if closing[key] == nil, activeConnectionCount < EncounterProtocol.activeConnectionLimit {
                     attempt.stage = .connecting
                     attempt.deadline = context.time.monotonic + EncounterProtocol.connectTimeout
                     attempt.retryAt = nil
                     attempts[key] = attempt
                     effects.append(.transport(.connect(key.peer)))
                 }
+            }
+            for peer in pendingPeers.keys.sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
+                let key = BluetoothConnection(peer: peer, role: .central)
+                guard attempts[key] == nil, closing[key] == nil, backoff[peer] == nil,
+                      activeConnectionCount < EncounterProtocol.activeConnectionLimit else { continue }
+                let mayRetry = pendingPeers.removeValue(forKey: peer)!
+                start(peer, mayRetry: mayRetry, context, effects: &effects)
             }
         }
         return EncounterEngineOutput(effects: effects, wakeUpDeadline: nextDeadline(context))
@@ -187,11 +201,15 @@ public struct EncounterEngineCore: Sendable {
         }
     }
     private mutating func expire(_ context: EncounterEngineContext, effects: inout [EncounterEngineEffect]) {
+        closing = closing.filter { $0.value > context.time.monotonic }
         for key in sortedKeys() {
             guard let attempt = attempts[key] else { continue }
             if let firstAt = attempt.firstCompletedAt,
                context.time.monotonic >= firstAt + EncounterProtocol.presenceAttemptLimit {
                 end(key, reason: .expired, effects: &effects)
+            } else if key.role == .peripheral, attempt.firstCompletedAt == nil,
+                      context.time.monotonic >= attempt.createdAt + EncounterProtocol.connectTimeout + 2 * EncounterProtocol.operationTimeout {
+                end(key, reason: .operationTimeout, effects: &effects)
             } else if let deadline = attempt.deadline, context.time.monotonic >= deadline {
                 end(key, reason: attempt.stage == .connecting ? .connectTimeout : .operationTimeout, effects: &effects)
             }
@@ -206,6 +224,9 @@ public struct EncounterEngineCore: Sendable {
         } else { dates.append(context.time.monotonic + EncounterProtocol.duplicateAttemptBackoff) }
         for attempt in attempts.values {
             if let deadline = attempt.deadline { dates.append(deadline) }
+            if attempt.connection.role == .peripheral && attempt.firstCompletedAt == nil {
+                dates.append(attempt.createdAt + EncounterProtocol.connectTimeout + 2 * EncounterProtocol.operationTimeout)
+            }
             if let firstAt = attempt.firstCompletedAt {
                 dates.append(firstAt + EncounterProtocol.presenceAttemptLimit)
                 if attempt.connection.role == .central && attempt.stage == .waiting {
@@ -215,6 +236,10 @@ public struct EncounterEngineCore: Sendable {
                 }
             }
         }
+        dates.append(contentsOf: closing.values)
+        for peer in pendingPeers.keys {
+            if let deadline = backoff[peer], deadline > context.time.monotonic { dates.append(deadline) }
+        }
         return dates.min()
     }
     private mutating func handle(_ event: BluetoothEvent, _ context: EncounterEngineContext,
@@ -222,17 +247,17 @@ public struct EncounterEngineCore: Sendable {
         switch event {
         case .availabilityChanged(let value):
             radio = value; effects.append(.event(.radioAvailability(value)))
+            if value != .available { closing.removeAll() }
         case .peerObserved(let peer):
             if observed.insert(peer).inserted { effects.append(.event(.peerFirstObserved(peer))) }
             let key = BluetoothConnection(peer: peer, role: .central)
-            guard canParticipate(context), attempts[key] == nil, !closing.contains(key), backoff[peer] == nil,
-                  activeConnectionCount < EncounterProtocol.activeConnectionLimit else { return }
-            attempts[key] = Attempt(connection: key, approach: approach, stage: .connecting, connected: false,
-                                    deadline: context.time.monotonic + EncounterProtocol.connectTimeout)
-            backoff[peer] = context.time.monotonic + EncounterProtocol.duplicateAttemptBackoff
-            effects.append(.transport(.connect(peer)))
+            guard running else { return }
+            if attempts[key] != nil { attempts[key]?.mayRetry = true; return }
+            remember(peer, mayRetry: true)
         case .connected(let key):
-            guard canParticipate(context), !closing.contains(key) else { requestDisconnect(key, effects: &effects); return }
+            // A new incoming link supersedes a missing teardown callback for the old one.
+            if key.role == .peripheral { closing.removeValue(forKey: key) }
+            guard canParticipate(context), closing[key] == nil else { requestDisconnect(key, effects: &effects); return }
             if key.role == .central {
                 guard var attempt = attempts[key], attempt.stage == .connecting else {
                     requestDisconnect(key, effects: &effects); return
@@ -241,21 +266,24 @@ public struct EncounterEngineCore: Sendable {
                 beginRead(&attempt, context, effects: &effects)
                 attempts[key] = attempt
             } else if var attempt = attempts[key] {
-                if attempt.approach == .secondExchange && attempt.stage == .waiting && !attempt.connected {
-                    guard activeConnectionCount < EncounterProtocol.activeConnectionLimit else {
+                if attempt.approach == .secondExchange && attempt.first != nil {
+                    guard attempt.connected || activeConnectionCount < EncounterProtocol.activeConnectionLimit else {
                         requestDisconnect(key, effects: &effects); return
                     }
                     attempt.connected = true; attempt.stage = .ready
+                    attempt.offered = nil; attempt.offeredUntil = nil
                     attempt.deadline = context.time.monotonic + EncounterProtocol.operationTimeout
                     attempts[key] = attempt
+                } else if attempt.connected {
+                    end(key, reason: .disconnected, disconnect: false, effects: &effects)
+                    createPeripheral(key, context)
                 }
             } else if activeConnectionCount < EncounterProtocol.activeConnectionLimit {
-                attempts[key] = Attempt(connection: key, approach: approach, stage: .ready, connected: true,
-                                        deadline: context.time.monotonic + EncounterProtocol.operationTimeout)
+                createPeripheral(key, context)
             } else { requestDisconnect(key, effects: &effects) }
         case .connectFailed(let peer):
             let key = BluetoothConnection(peer: peer, role: .central)
-            closing.remove(key)
+            closing.removeValue(forKey: key)
             if var failed = attempts[key], failed.stage == .connecting {
                 failed.connected = false; failed.stage = .ready; attempts[key] = failed
                 end(key, reason: .failed, effects: &effects)
@@ -269,6 +297,11 @@ public struct EncounterEngineCore: Sendable {
                     (attempt.approach == .heldConnection ? frame.nonce == attempt.first?.exchangeNonce :
                         frame.nonce != attempt.first?.exchangeNonce && !consumedNonces.contains(frame.nonce))) else {
                 end(key, reason: .invalidFrame, effects: &effects); return
+            }
+            if phase(attempt) != .initialExchange && attempt.readWindow != ownWindow {
+                beginRead(&attempt, context, effects: &effects)
+                attempts[key] = attempt
+                return
             }
             attempt.offered = frame
             attempt.pair = ReceiptTokenPair(ownToken: ownWindow.token, peerToken: frame.token, observedAt: context.time.wall)
@@ -301,7 +334,7 @@ public struct EncounterEngineCore: Sendable {
                   let frame = attempt.offered, let pair = attempt.pair else { return }
             persist(attempt, frame: frame, pair: pair, request: nil, context, effects: &effects)
         case .disconnected(let key):
-            closing.remove(key)
+            closing.removeValue(forKey: key)
             guard var attempt = attempts[key] else { return }
             if attempt.approach == .secondExchange && attempt.stage == .waiting {
                 attempt.connected = false; attempts[key] = attempt
@@ -314,7 +347,7 @@ public struct EncounterEngineCore: Sendable {
         case .incomingRead(let peer, let id):
             let key = BluetoothConnection(peer: peer, role: .peripheral)
             guard canParticipate(context), let ownWindow = window(context), var attempt = attempts[key], attempt.connected,
-                  attempt.stage == .ready || (attempt.stage == .waiting && attempt.approach == .heldConnection) else {
+                  attempt.stage == .ready || attempt.stage == .waiting else {
                 effects.append(.transport(.answerRead(peer, id, nil))); return
             }
             let currentPhase = phase(attempt)
@@ -326,12 +359,24 @@ public struct EncounterEngineCore: Sendable {
             effects.append(.transport(.answerRead(peer, id, .init(frame: frame.encoded(), validUntil: ownWindow.validUntil))))
         case .incomingWrite(let peer, let id, let data):
             let key = BluetoothConnection(peer: peer, role: .peripheral)
-            guard canParticipate(context), let attempt = attempts[key], attempt.connected, attempt.stage == .ready,
-                  let offered = attempt.offered, let until = attempt.offeredUntil, context.time.wall < until,
+            guard canParticipate(context), let ownWindow = window(context),
+                  let attempt = attempts[key], attempt.connected, attempt.stage == .ready,
+                  let offered = attempt.offered, let until = attempt.offeredUntil,
                   let frame = try? ExchangeFrame.decode(data), frame.nonce == offered.nonce, frame.phase == offered.phase,
                   (frame.phase == .reconnectEvidence ? frame.priorNonce == attempt.first?.exchangeNonce : frame.priorNonce == nil) else {
                 effects.append(.transport(.answerWrite(peer, id, success: false)))
                 if attempts[key] != nil { end(key, reason: .invalidFrame, effects: &effects) }
+                return
+            }
+            if context.time.wall >= until || offered.token != ownWindow.token {
+                effects.append(.transport(.answerWrite(peer, id, success: false)))
+                if phase(attempt) == .initialExchange {
+                    end(key, reason: .invalidFrame, effects: &effects)
+                } else {
+                    var waiting = attempt
+                    waiting.stage = .waiting; waiting.deadline = nil; waiting.offered = nil
+                    attempts[key] = waiting
+                }
                 return
             }
             if let firstAt = attempt.firstCompletedAt,
@@ -356,10 +401,29 @@ public struct EncounterEngineCore: Sendable {
         guard attempt.first != nil else { return .initialExchange }
         return attempt.approach == .heldConnection ? .heldConnectionCheckpoint : .reconnectEvidence
     }
+    private mutating func remember(_ peer: PeerHandle, mayRetry: Bool) {
+        if let existing = pendingPeers[peer] { pendingPeers[peer] = existing || mayRetry }
+        else if pendingPeers.count < Self.pendingPeerLimit { pendingPeers[peer] = mayRetry }
+    }
+    private mutating func start(_ peer: PeerHandle, mayRetry: Bool, _ context: EncounterEngineContext,
+                                effects: inout [EncounterEngineEffect]) {
+        let key = BluetoothConnection(peer: peer, role: .central)
+        attempts[key] = Attempt(connection: key, approach: approach, createdAt: context.time.monotonic,
+                                mayRetry: mayRetry, stage: .connecting, connected: false,
+                                deadline: context.time.monotonic + EncounterProtocol.connectTimeout)
+        backoff[peer] = context.time.monotonic + EncounterProtocol.duplicateAttemptBackoff
+        effects.append(.transport(.connect(peer)))
+    }
+    private mutating func createPeripheral(_ key: BluetoothConnection, _ context: EncounterEngineContext) {
+        attempts[key] = Attempt(connection: key, approach: approach, createdAt: context.time.monotonic,
+                                stage: .ready, connected: true,
+                                deadline: context.time.monotonic + EncounterProtocol.operationTimeout)
+    }
     private mutating func beginRead(_ attempt: inout Attempt, _ context: EncounterEngineContext,
                                     effects: inout [EncounterEngineEffect]) {
         let id = BluetoothRequestID(nextID())
         attempt.stage = .reading; attempt.operation = id; attempt.offered = nil; attempt.retryAt = nil
+        attempt.readWindow = window(context)
         attempt.deadline = context.time.monotonic + EncounterProtocol.operationTimeout
         effects.append(.transport(.read(attempt.connection.peer, id)))
     }
@@ -427,21 +491,32 @@ public struct EncounterEngineCore: Sendable {
             }
         }
     }
-    private mutating func end(_ key: BluetoothConnection, reason: EncounterAttemptEndReason,
+    private mutating func end(_ key: BluetoothConnection, reason: EncounterAttemptEndReason, disconnect: Bool = true,
                               effects: inout [EncounterEngineEffect]) {
         guard let attempt = attempts.removeValue(forKey: key) else { return }
-        if attempt.connected || attempt.stage == .connecting { requestDisconnect(key, effects: &effects) }
+        if disconnect && (attempt.connected || attempt.stage == .connecting) { requestDisconnect(key, effects: &effects) }
         if case .saving(let id) = attempt.stage, let request = saves[id]?.incomingRequest {
             effects.append(.transport(.answerWrite(key.peer, request, success: false)))
         }
         if let receipt = attempt.first { finalize(receipt, preserve: false, effects: &effects) }
         // Use the termination input's time, recorded by expire/receive, rather than a clock read.
-        if key.role == .central { backoff[key.peer] = currentMonotonic + EncounterProtocol.duplicateAttemptBackoff }
+        if key.role == .central && reason != .stopped && reason != .reset {
+            backoff[key.peer] = currentMonotonic + EncounterProtocol.duplicateAttemptBackoff
+            switch reason {
+            case .connectTimeout, .operationTimeout, .failed, .invalidFrame, .disconnected, .storageFailure:
+                if attempt.mayRetry { remember(key.peer, mayRetry: false) }
+            default: break
+            }
+        }
         effects.append(.event(.attemptEnded(role: key.role, reason: reason)))
     }
     private var currentMonotonic: TimeInterval = 0
     private mutating func requestDisconnect(_ key: BluetoothConnection, effects: inout [EncounterEngineEffect]) {
-        if closing.insert(key).inserted { effects.append(.transport(.disconnect(key))) }
+        if radio != .available { effects.append(.transport(.disconnect(key))); return }
+        if closing[key] == nil {
+            closing[key] = currentMonotonic + EncounterProtocol.connectTimeout
+            effects.append(.transport(.disconnect(key)))
+        }
     }
     private func finalize(_ original: EncounterReceipt, preserve: Bool, effects: inout [EncounterEngineEffect]) {
         if preserve || original.hasQualifyingAmbientEvidence || original.sessionFlag {

@@ -69,10 +69,13 @@ public struct PairedPhonesRig: Sendable {
     }
     /// Starts both actor runtimes and completes all immediately deliverable fake operations.
     public func start() async throws { await first.engine.start(); await second.engine.start(); try await settle() }
-    /// Advances both continuous clocks; refresh models a background callback arriving late.
-    public func advance(by seconds: TimeInterval) async throws {
-        await first.clock.advance(by: seconds); await second.clock.advance(by: seconds)
-        await first.engine.refresh(); await second.engine.refresh()
+    /// Advances both clocks; optional refresh models a background callback arriving late.
+    public func advance(by seconds: TimeInterval, refreshing: Bool = true) async throws {
+        // Both phones' time advances before either can dispatch a new radio operation.
+        await first.clock.advance(by: seconds, deliverWakeUps: false)
+        await second.clock.advance(by: seconds, deliverWakeUps: false)
+        await first.clock.advance(by: 0); await second.clock.advance(by: 0)
+        if refreshing { await first.engine.refresh(); await second.engine.refresh() }
         try await settle()
     }
     /// Advances one phone only to test independent elapsed-time requirements.
@@ -91,10 +94,10 @@ public struct PairedPhonesRig: Sendable {
             let handledFirst = await first.engine.processedTransportEventCount
             let handledSecond = await second.engine.processedTransportEventCount
             if emittedFirst == handledFirst && emittedSecond == handledSecond {
-                await first.engine.refresh(); await second.engine.refresh()
+                let idleFirst = await first.engine.isIdle, idleSecond = await second.engine.isIdle
                 let finalFirst = await link.emittedCount(for: .first)
                 let finalSecond = await link.emittedCount(for: .second)
-                if finalFirst == handledFirst && finalSecond == handledSecond { return }
+                if idleFirst && idleSecond && finalFirst == handledFirst && finalSecond == handledSecond { return }
             }
             await Task.yield()
         }

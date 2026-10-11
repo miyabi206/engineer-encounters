@@ -89,14 +89,15 @@ public struct TokenProvider: Sendable {
     }
 
     /// Returns the validity bound for immutable Bluetooth read snapshots.
+    /// Pruning is best effort; failed maintenance cannot hide a successfully loaded current window.
     public func window(at wallTime: Date) async throws -> TokenWindow? {
         guard let batch = try await store.load() else { return nil }
         let retained = batch.windows.filter { $0.validUntil > wallTime }
         if retained.count != batch.windows.count {
             if retained.isEmpty {
-                try await store.clear()
+                try? await store.clear()
             } else {
-                try await store.save(TokenBatch(windows: retained))
+                try? await store.save(TokenBatch(windows: retained))
             }
         }
         return retained.first { $0.contains(wallTime) }

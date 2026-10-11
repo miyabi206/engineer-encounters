@@ -58,6 +58,8 @@ public enum BluetoothEvent: Sendable, Equatable {
 }
 
 /// Hides every Core Bluetooth call behind commands and one ordered event stream.
+/// Every disconnect command must be answered by exactly one disconnected event.
+/// A connected event with role peripheral precedes any incoming read or write from that central.
 public protocol BluetoothTransport: Sendable {
     /// A single engine consumes this ordered stream for the transport's lifetime.
     var events: AsyncStream<BluetoothEvent> { get }

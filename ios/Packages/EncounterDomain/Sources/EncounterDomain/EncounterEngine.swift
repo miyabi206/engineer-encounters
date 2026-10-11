@@ -2,7 +2,7 @@ import Foundation
 
 /// Thin serialized I/O shell; all exchange and deadline policy lives in EncounterEngineCore.
 public actor EncounterEngine {
-    /// Supplies privacy-safe diagnostics in the order the core produced them.
+    /// Supplies privacy-safe diagnostics in order, retaining the newest 256 unconsumed events.
     public nonisolated let events: AsyncStream<EncounterEngineEvent>
     private let continuation: AsyncStream<EncounterEngineEvent>.Continuation
     private let transport: any BluetoothTransport
@@ -15,16 +15,28 @@ public actor EncounterEngine {
     private var wakeTask: Task<Void, Never>?
     private var wakeGeneration: UInt64 = 0
     private var wakeDeadline: TimeInterval?
+    private var cachedWindow: TokenWindow?
+    private var recoveredReceipts = false
+    private var transportFinished = false
     private struct Pending {
         let input: EncounterEngineInput
         let completion: CheckedContinuation<Void, Never>
         let isTransport: Bool
+        let reloadToken: Bool
     }
     private var pending: [Pending] = []
     private var draining = false
 
     /// Counts fully handled delegate events, allowing deterministic fake delivery fences.
     public private(set) var processedTransportEventCount: UInt64 = 0
+
+    /// A delivery fence also waits for already-due runtime wake-ups, without triggering one.
+    public var isIdle: Bool {
+        get async {
+            let time = await clock.now()
+            return !draining && pending.isEmpty && (wakeDeadline.map { $0 > time.monotonic } ?? true)
+        }
+    }
 
     /// Session flags always come from the caller; this engine never chooses encounter kind.
     public init(transport: any BluetoothTransport, tokenProvider: TokenProvider, receiptQueue: any ReceiptQueue,
@@ -35,7 +47,7 @@ public actor EncounterEngine {
         self.transport = transport; tokens = tokenProvider; queue = receiptQueue; self.clock = clock
         self.sessionFlag = sessionFlag
         core = EncounterEngineCore(approach: approach, nonceSource: nonceSource, identitySource: identitySource)
-        let stream = AsyncStream<EncounterEngineEvent>.makeStream()
+        let stream = AsyncStream<EncounterEngineEvent>.makeStream(bufferingPolicy: .bufferingNewest(256))
         events = stream.stream; continuation = stream.continuation
     }
 
@@ -43,6 +55,7 @@ public actor EncounterEngine {
 
     /// Enables participation only while the radio and a valid token are available.
     public func start() async {
+        guard !transportFinished else { return }
         if eventTask == nil {
             let stream = transport.events
             eventTask = Task { [weak self] in
@@ -50,6 +63,7 @@ public actor EncounterEngine {
                     guard !Task.isCancelled else { break }
                     await self?.submit(.transport(event), isTransport: true)
                 }
+                if !Task.isCancelled { await self?.transportEnded() }
             }
         }
         await submit(.start)
@@ -61,30 +75,63 @@ public actor EncounterEngine {
     /// Changes only attempts begun after this selection is processed.
     public func selectPresenceApproach(_ approach: PresenceApproach) async { await submit(.selectApproach(approach)) }
     /// Re-evaluates tokens and every deadline after foregrounding or replenishment.
-    public func refresh() async { await submit(.wakeUp) }
+    public func refresh() async { await submit(.wakeUp, reloadToken: true) }
 
-    private func submit(_ input: EncounterEngineInput, isTransport: Bool = false) async {
+    private func transportEnded() async {
+        transportFinished = true
+        await submit(.transport(.availabilityChanged(.unavailable)))
+        await submit(.stop)
+    }
+    private func submit(_ input: EncounterEngineInput, isTransport: Bool = false, reloadToken: Bool = false) async {
         await withCheckedContinuation { completion in
-            pending.append(Pending(input: input, completion: completion, isTransport: isTransport))
+            pending.append(Pending(input: input, completion: completion, isTransport: isTransport, reloadToken: reloadToken))
             if !draining {
                 draining = true
                 Task { await self.drain() }
             }
         }
     }
-    private func context() async -> EncounterEngineContext {
+    private func context(reloadToken: Bool = false) async -> EncounterEngineContext {
         let time = await clock.now()
-        let token = try? await tokens.window(at: time.wall)
+        if cachedWindow?.contains(time.wall) != true { cachedWindow = nil }
+        if reloadToken || cachedWindow == nil {
+            do { cachedWindow = try await tokens.window(at: time.wall) }
+            catch { /* A valid cached window survives a transient store read failure. */ }
+        }
         let flag = await sessionFlag()
-        return EncounterEngineContext(time: time, tokenWindow: token, sessionFlag: flag)
+        return EncounterEngineContext(time: time, tokenWindow: cachedWindow, sessionFlag: flag)
+    }
+    private func recoverReceipts() async -> Bool {
+        guard !recoveredReceipts else { return true }
+        do {
+            for var receipt in try await queue.pending() where !receipt.isFinalEvidence {
+                if receipt.sessionFlag || receipt.hasQualifyingAmbientEvidence {
+                    receipt.isFinalEvidence = true
+                    try await queue.update(receipt)
+                } else { try await queue.acknowledge(receipt.id) }
+            }
+            recoveredReceipts = true
+            return true
+        } catch {
+            continuation.yield(.receiptStorageFailed)
+            return false
+        }
     }
     private func drain() async {
         while !pending.isEmpty {
             let next = pending.removeFirst()
-            let context = await context()
+            if case .start = next.input, !(await recoverReceipts()) {
+                next.completion.resume()
+                continue
+            }
+            let context = await context(reloadToken: next.reloadToken)
             let output = core.receive(next.input, context: context)
             let deadline = await apply(output)
             schedule(deadline)
+            switch next.input {
+            case .stop, .reset: cachedWindow = nil
+            default: break
+            }
             if next.isTransport { processedTransportEventCount &+= 1 }
             next.completion.resume()
         }

@@ -103,7 +103,7 @@ final class TokenProviderTests: XCTestCase {
         XCTAssertEqual(batch, try EncounterSamples.batch())
     }
 
-    func testStoreLoadSaveClearAndFailurePropagation() async throws {
+    func testStoreOperationsAndFailedPruningDoNotHideCurrentWindow() async throws {
         let store = InMemoryTokenBatchStore()
         let batch = try EncounterSamples.batch(count: 2)
         try await store.save(batch)
@@ -115,11 +115,14 @@ final class TokenProviderTests: XCTestCase {
         for operation in FailingStore.Operation.allCases {
             let failing = FailingStore(batch: batch, operation: operation)
             let time = operation == .clear ? batch.windows.last!.validUntil : batch.windows[1].validFrom
-            do {
-                _ = try await TokenProvider(store: failing).token(at: time)
-                XCTFail("Expected \(operation) storage failure")
-            } catch {
-                XCTAssertEqual(error as? FailingStore.Operation, operation)
+            if operation == .load {
+                do {
+                    _ = try await TokenProvider(store: failing).window(at: time)
+                    XCTFail("Expected load storage failure")
+                } catch { XCTAssertEqual(error as? FailingStore.Operation, operation) }
+            } else {
+                let window = try await TokenProvider(store: failing).window(at: time)
+                XCTAssertEqual(window, operation == .save ? batch.windows[1] : nil)
             }
         }
     }

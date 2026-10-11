@@ -76,6 +76,8 @@ public actor FakeBluetoothLink {
     private var held: [FakeBluetoothDelivery] = []
     private var sequence: UInt64 = 0
     private var autoConnect = true
+    private var silentPeripheralDisconnects = false
+    private var suppressedObservations: Set<FakePhoneID> = []
     public init() {}
     fileprivate func attach(_ phone: FakePhoneID, continuation: AsyncStream<BluetoothEvent>.Continuation,
                             clock: ManualEncounterClock) {
@@ -84,6 +86,14 @@ public actor FakeBluetoothLink {
     }
     /// Disables connection callbacks to simulate pending connects and arbitrary peers.
     public func setAutomaticConnections(_ enabled: Bool) { autoConnect = enabled }
+    /// Models peripherals that cannot evict a central and never learn it disconnected.
+    public func setSilentPeripheralDisconnects(_ enabled: Bool = true) { silentPeripheralDisconnects = enabled }
+    /// Selects the observing central explicitly, independent of discovery startup ordering.
+    public func setObservations(to phone: FakePhoneID, enabled: Bool) {
+        if enabled { suppressedObservations.remove(phone) } else { suppressedObservations.insert(phone) }
+    }
+    /// Ends the adapter stream, as when the transport is permanently torn down.
+    public func finishEvents(on phone: FakePhoneID) { endpoints[phone]?.continuation.finish() }
     /// New matching deliveries remain held until explicitly released.
     public func delay(_ kinds: Set<FakeDeliveryKind>) { delayedKinds = kinds }
     /// Drops the next count deliveries of the selected kind.
@@ -150,6 +160,7 @@ public actor FakeBluetoothLink {
             guard target == peer, connections.contains(phone) else { send(.writeFailed(target, request), to: phone); return }
             send(.incomingWrite(phone.peerHandle, request, frame), to: phone.other)
         case .disconnect(let connection):
+            if silentPeripheralDisconnects && connection.role == .peripheral { return }
             guard connection.peer == peer else { send(.disconnected(connection), to: phone); return }
             let central = connection.role == .central ? phone : phone.other
             if connections.contains(central) { disconnect(central: central) }
@@ -168,11 +179,14 @@ public actor FakeBluetoothLink {
     private func disconnect(central: FakePhoneID) {
         guard connections.remove(central) != nil else { return }
         send(.disconnected(.init(peer: central.other.peerHandle, role: .central)), to: central)
-        send(.disconnected(.init(peer: central.peerHandle, role: .peripheral)), to: central.other)
+        if !silentPeripheralDisconnects {
+            send(.disconnected(.init(peer: central.peerHandle, role: .peripheral)), to: central.other)
+        }
     }
     private func send(_ event: BluetoothEvent, to phone: FakePhoneID, validUntil: Date? = nil,
                       snapshotPhone: FakePhoneID? = nil) {
         let kind = FakeDeliveryKind(event)
+        if kind == .observation && suppressedObservations.contains(phone) { return }
         if kind == .writeAcknowledgement && withheldAcknowledgements.contains(phone) { return }
         if drops[kind, default: 0] > 0 { drops[kind, default: 0] -= 1; return }
         if delayedKinds.contains(kind) {
@@ -182,7 +196,7 @@ public actor FakeBluetoothLink {
     }
     private func emit(_ event: BluetoothEvent, to phone: FakePhoneID) {
         guard var endpoint = endpoints[phone] else { return }
+        if case .terminated = endpoint.continuation.yield(event) { return }
         endpoint.count &+= 1; endpoints[phone] = endpoint
-        endpoint.continuation.yield(event)
     }
 }
