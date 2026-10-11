@@ -37,6 +37,8 @@ for package in EncounterDomain EncounterBluetooth EncounterStorage EncounterBack
 done
 
 # Match project.yml exclusions anchored to $(SRCROOT)/App, regardless of checkout ancestors.
+# App/Development includes temporary account Auth construction and both DevelopmentDiagnostics
+# and DevelopmentAccount string tables; neither source nor table ships in Internal/Release.
 # Collect arguments individually, preserving the package include paths above.
 case "$configuration" in
     Development) set -- "$@" -D DEVELOPMENT_BUILD ;;
@@ -53,17 +55,19 @@ xcrun swiftc -emit-module -module-name EngineerEncounters -parse-as-library -ena
     -emit-module-path "$output/EngineerEncounters.swiftmodule" "$@" \
     || fail "type-check app" "$?"
 
-if [ "$configuration" = Development ]; then
-    set --
-    for package in EncounterDomain EncounterBluetooth EncounterStorage EncounterBackend EncounterUI; do
-        set -- "$@" -I "ios/Packages/$package/.build/out/Products/Debug-iphonesimulator"
-    done
-    for source in $(find ios/Tests -type f -name '*.swift' | sort); do
-        set -- "$@" "$source"
-    done
-    xcrun swiftc -typecheck -module-name EngineerEncountersTests -parse-as-library -enable-testing \
-        -swift-version 6 -warnings-as-errors -D DEVELOPMENT_BUILD -sdk "$sdk" -target "$triple" \
-        -I "$output" -F "$platform/Developer/Library/Frameworks" -I "$platform/Developer/usr/lib" \
-        "$@" || fail "type-check app tests" "$?"
-fi
+set --
+case "$configuration" in
+    Development) set -- "$@" -D DEVELOPMENT_BUILD ;;
+    Internal) set -- "$@" -D INTERNAL_BUILD ;;
+esac
+for package in EncounterDomain EncounterBluetooth EncounterStorage EncounterBackend EncounterUI; do
+    set -- "$@" -I "ios/Packages/$package/.build/out/Products/Debug-iphonesimulator"
+done
+for source in $(find ios/Tests -type f -name '*.swift' | sort); do
+    set -- "$@" "$source"
+done
+xcrun swiftc -typecheck -module-name EngineerEncountersTests -parse-as-library -enable-testing \
+    -swift-version 6 -warnings-as-errors -sdk "$sdk" -target "$triple" \
+    -I "$output" -F "$platform/Developer/Library/Frameworks" -I "$platform/Developer/usr/lib" \
+    "$@" || fail "type-check app tests" "$?"
 echo "Type-check passed: $configuration"

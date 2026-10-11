@@ -1,3 +1,11 @@
 // Copy to Local.xcconfig for local signing and bundle identifier overrides.
 DEVELOPMENT_TEAM = YOUR_TEAM_ID
 APP_BUNDLE_IDENTIFIER = io.github.your-account.EngineerEncounters
+
+// Optional backend; empty values leave it unavailable. Use a public client key only.
+// The empty expansion separates the slashes so xcconfig does not truncate the URL.
+BACKEND_URL = https:/$()/YOUR_BACKEND_HOST
+BACKEND_PUBLIC_KEY = YOUR_PUBLIC_CLIENT_KEY
+// For a phone and local Supabase, use the Mac's LAN address rather than localhost:
+// BACKEND_URL = http:/$()/YOUR_MAC_LAN_ADDRESS:54321
+// Development permits local networking; Internal and Release have no ATS exceptions.

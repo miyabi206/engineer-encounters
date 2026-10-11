@@ -18,7 +18,7 @@ final class EncounterRuntimeTests: XCTestCase {
         let otherStore = InMemoryTokenBatchStore(batch: try TokenBatch(windows: [otherWindow]))
         let other = EncounterEngine(transport: otherTransport, tokenProvider: TokenProvider(store: otherStore),
             receiptQueue: InMemoryReceiptQueue(), clock: clock, sessionFlag: { false })
-        let runtime = EncounterRuntime(transportFactory: { transport }, queueOpener: { queue },
+        let runtime = EncounterRuntime(tokenIssuer: nil, sessionFlag: { false }, transportFactory: { transport }, queueOpener: { queue },
             tokenStore: ownStore, clock: clock)
         var exchanges = 0
         runtime.observeEvents { if case .exchangeCompleted(role: .central, nonceDigest: _) = $0 { exchanges += 1 } }
@@ -48,7 +48,7 @@ final class EncounterRuntimeTests: XCTestCase {
         let clock = ManualEncounterClock()
         let link = FakeBluetoothLink()
         var builds = 0
-        let runtime = EncounterRuntime(transportFactory: {
+        let runtime = EncounterRuntime(tokenIssuer: nil, sessionFlag: { false }, transportFactory: {
             builds += 1
             return await FakeBluetoothTransport(phone: .first, link: link, clock: clock)
         }, queueOpener: { queue }, tokenStore: InMemoryTokenBatchStore(), clock: clock)
@@ -66,7 +66,7 @@ final class EncounterRuntimeTests: XCTestCase {
         let queue = RecoverableReceiptQueue()
         try await queue.enqueue(EncounterSamples.receipt())
         await queue.setRetainOnClear(true)
-        let runtime = EncounterRuntime(queueOpener: { queue }, tokenStore: InMemoryTokenBatchStore())
+        let runtime = EncounterRuntime(tokenIssuer: nil, sessionFlag: { false }, queueOpener: { queue }, tokenStore: InMemoryTokenBatchStore())
         var confirmations = 0
         let rejected = await runtime.resetTrial { confirmations += 1 }
         XCTAssertFalse(rejected)
@@ -88,7 +88,7 @@ final class EncounterRuntimeTests: XCTestCase {
         let link = FakeBluetoothLink()
         var opens = 0
         var builds = 0
-        let runtime = EncounterRuntime(transportFactory: {
+        let runtime = EncounterRuntime(tokenIssuer: nil, sessionFlag: { false }, transportFactory: {
             builds += 1
             return await FakeBluetoothTransport(phone: .first, link: link, clock: clock)
         }, queueOpener: {
@@ -115,7 +115,7 @@ final class EncounterRuntimeTests: XCTestCase {
         let clock = ManualEncounterClock()
         let link = FakeBluetoothLink()
         var builds = 0
-        let runtime = EncounterRuntime(transportFactory: {
+        let runtime = EncounterRuntime(tokenIssuer: nil, sessionFlag: { false }, transportFactory: {
             builds += 1
             return await FakeBluetoothTransport(phone: .first, link: link, clock: clock)
         }, queueOpener: { queue }, tokenStore: InMemoryTokenBatchStore(batch: try EncounterSamples.batch()), clock: clock)
@@ -151,7 +151,7 @@ final class EncounterRuntimeTests: XCTestCase {
         let link = FakeBluetoothLink()
         let transport = await FakeBluetoothTransport(phone: .first, link: link, clock: clock)
         let queue = InMemoryReceiptQueue()
-        let runtime = EncounterRuntime(transportFactory: { transport }, queueOpener: { queue },
+        let runtime = EncounterRuntime(tokenIssuer: nil, sessionFlag: { false }, transportFactory: { transport }, queueOpener: { queue },
             tokenStore: InMemoryTokenBatchStore(batch: try EncounterSamples.batch()), clock: clock)
         runtime.observeEvents { recorder.record($0) }
         await runtime.start()
@@ -176,7 +176,7 @@ final class EncounterRuntimeTests: XCTestCase {
         let link = FakeBluetoothLink()
         let queue = InMemoryReceiptQueue()
         let store = InMemoryTokenBatchStore()
-        let runtime = EncounterRuntime(transportFactory: {
+        let runtime = EncounterRuntime(tokenIssuer: LocalTestTokenIssuer(store: store), sessionFlag: { false }, transportFactory: {
             await FakeBluetoothTransport(phone: .first, link: link, clock: clock)
         }, queueOpener: { queue }, tokenStore: store, clock: clock)
         var pauses = 0
@@ -197,7 +197,7 @@ final class EncounterRuntimeTests: XCTestCase {
         let link = FakeBluetoothLink()
         let queue = InMemoryReceiptQueue()
         let store = FailAfterFirstTokenSave()
-        let runtime = EncounterRuntime(transportFactory: {
+        let runtime = EncounterRuntime(tokenIssuer: LocalTestTokenIssuer(store: store), sessionFlag: { false }, transportFactory: {
             await FakeBluetoothTransport(phone: .first, link: link, clock: clock)
         }, queueOpener: { queue }, tokenStore: store, clock: clock)
         await runtime.start()

@@ -1,5 +1,6 @@
 import Combine
 import EncounterBluetooth
+import EncounterBackend
 import EncounterDomain
 import EncounterStorage
 import Foundation
@@ -24,38 +25,42 @@ final class EncounterRuntime: ObservableObject {
     private let transportFactory: @MainActor () async -> any BluetoothTransport
     private let queueOpener: @MainActor () async throws -> any ReceiptQueue
     private let clock: any EncounterClock
+    let tokenIssuer: (any TokenIssuer)?
+    private let sessionFlag: @Sendable () async -> Bool
+    private let uploadFactory: (@MainActor (any ReceiptQueue) -> ReceiptUploader)?
+    private let uploadScheduler: any ReceiptUploadScheduler
+    private var uploader: ReceiptUploader?
+    private var scheduledUpload: (any ReceiptUploadCancellation)?
+    private var uploadGeneration = UUID()
+    private var validForAccount = true
     private var engineRunning = false
     private var eventTask: Task<Void, Never>?
     private var operationTask: Task<Void, Never>?
     private var participationOn = false
     private var presenceApproach: PresenceApproach
     private var eventObservers: [UUID: @MainActor (EncounterEngineEvent) -> Void] = [:]
-    #if DEVELOPMENT_BUILD
-    private lazy var issuer = LocalTestTokenIssuer(store: tokenStore)
     private var tokenTopUpInFlight = false
-    #endif
 
-    init(approach: PresenceApproach = .secondExchange,
+    init(tokenIssuer: (any TokenIssuer)?, sessionFlag: @escaping @Sendable () async -> Bool,
+         approach: PresenceApproach = .secondExchange,
          transportFactory: @escaping @MainActor () async -> any BluetoothTransport = { CoreBluetoothTransport() },
          queueOpener: @escaping @MainActor () async throws -> any ReceiptQueue = { try await EncounterRuntime.openDefaultQueue() },
-         tokenStore: (any TokenBatchStore)? = nil,
-         clock: any EncounterClock = SystemEncounterClock()) {
+         tokenStore: any TokenBatchStore,
+         clock: any EncounterClock = SystemEncounterClock(),
+         uploadFactory: (@MainActor (any ReceiptQueue) -> ReceiptUploader)? = nil,
+         uploadScheduler: (any ReceiptUploadScheduler)? = nil) {
         presenceApproach = approach
         self.transportFactory = transportFactory
         self.queueOpener = queueOpener
-        self.tokenStore = tokenStore ?? Self.defaultTokenStore()
+        self.tokenStore = tokenStore
         self.clock = clock
+        self.tokenIssuer = tokenIssuer
+        self.sessionFlag = sessionFlag
+        self.uploadFactory = uploadFactory
+        self.uploadScheduler = uploadScheduler ?? ClockReceiptUploadScheduler(clock: clock)
     }
 
-    private static func defaultTokenStore() -> any TokenBatchStore {
-        #if DEVELOPMENT_BUILD
-        KeychainTokenBatchStore(service: "EngineerEncounters.Development.LocalTestTokens")
-        #else
-        KeychainTokenBatchStore()
-        #endif
-    }
-
-    private static func openDefaultQueue() async throws -> any ReceiptQueue {
+    static func openDefaultQueue() async throws -> any ReceiptQueue {
         // Only the production opener shares a task: fakes stay isolated per test.
         if receiptQueueTask == nil {
             receiptQueueTask = Task { try await SwiftDataReceiptQueue.fileBacked() }
@@ -80,16 +85,18 @@ final class EncounterRuntime: ObservableObject {
     deinit { eventTask?.cancel() }
 
     func start() async {
+        guard validForAccount else { return }
         participationOn = true
         await serialize {
-            guard self.participationOn else { return }
+            guard self.participationOn, self.validForAccount else { return }
             await self.engine?.stop()
             self.engineRunning = false
             guard await self.prepare() else { return }
             await self.replenishTokens()
-            guard self.participationOn else { return }
+            guard self.participationOn, self.validForAccount else { return }
             self.engineRunning = true
             await self.engine?.start()
+            await self.uploadReceipts()
             await self.updateLocalSummary()
         }
     }
@@ -107,20 +114,42 @@ final class EncounterRuntime: ObservableObject {
 
     func refresh() async {
         await serialize {
-            guard self.participationOn else { return }
+            guard self.validForAccount else { return }
+            guard self.participationOn else {
+                await self.uploadReceipts()
+                await self.updateLocalSummary()
+                return
+            }
             if self.status.storageUnavailable || !self.engineRunning {
                 await self.engine?.stop()
                 self.engineRunning = false
                 guard await self.prepare() else { return }
                 await self.replenishTokens()
+                guard self.participationOn, self.validForAccount else { return }
                 self.engineRunning = true
                 await self.engine?.start()
             } else {
                 await self.replenishTokens()
                 await self.engine?.refresh()
             }
+            await self.uploadReceipts()
             await self.updateLocalSummary()
         }
+    }
+
+    /// Prevent queued event work or retry callbacks from touching a subsequent account's queue.
+    func suspendForAccountChange() {
+        validForAccount = false
+        participationOn = false
+        uploadGeneration = UUID()
+        scheduledUpload?.cancel()
+        scheduledUpload = nil
+        eventTask?.cancel()
+    }
+
+    func invalidateForAccountChange() async {
+        suspendForAccountChange()
+        await stop()
     }
 
     #if DEVELOPMENT_BUILD || INTERNAL_BUILD
@@ -133,7 +162,10 @@ final class EncounterRuntime: ObservableObject {
     #endif
 
     func refreshLocalSummary() async {
-        await serialize { await self.updateLocalSummary() }
+        await serialize {
+            guard self.validForAccount else { return }
+            await self.updateLocalSummary()
+        }
     }
 
     #if DEVELOPMENT_BUILD || INTERNAL_BUILD
@@ -141,7 +173,7 @@ final class EncounterRuntime: ObservableObject {
         // Serialize reset, verification and restart against other lifecycle actions.
         var success = false
         await serialize {
-            guard await self.prepareQueue(), let queue = self.queue else { return }
+            guard self.validForAccount, await self.prepareQueue(), let queue = self.queue else { return }
             do {
                 self.engineRunning = false
                 if let engine = self.engine { await engine.reset() }
@@ -177,7 +209,7 @@ final class EncounterRuntime: ObservableObject {
     }
 
     private func prepare() async -> Bool {
-        guard await prepareQueue(), participationOn, let queue else { return false }
+        guard validForAccount, await prepareQueue(), participationOn, let queue else { return false }
         do {
             _ = try await queue.pending()
             status.storageUnavailable = false
@@ -188,9 +220,9 @@ final class EncounterRuntime: ObservableObject {
         if engine != nil { return true }
         // Do not create either Bluetooth manager until consent and durable storage are ready.
         let transport = await transportFactory()
-        guard participationOn else { return false }
+        guard participationOn, validForAccount else { return false }
         let engine = EncounterEngine(transport: transport, tokenProvider: TokenProvider(store: tokenStore),
-                                     receiptQueue: queue, clock: clock, approach: presenceApproach, sessionFlag: { false })
+                                     receiptQueue: queue, clock: clock, approach: presenceApproach, sessionFlag: sessionFlag)
         self.engine = engine
         eventTask = Task { [weak self, engine] in
             for await event in engine.events {
@@ -213,14 +245,15 @@ final class EncounterRuntime: ObservableObject {
     }
 
     private func replenishTokens() async {
-        #if DEVELOPMENT_BUILD
         // A failed Keychain read/write leaves token eligibility to the engine.
+        guard validForAccount, let tokenIssuer else { return }
         let time = await clock.now()
-        try? await issuer.replenish(at: time.wall)
-        #endif
+        guard validForAccount else { return }
+        try? await tokenIssuer.replenish(at: time.wall)
     }
 
-    private func receive(_ event: EncounterEngineEvent) {
+    func receive(_ event: EncounterEngineEvent) {
+        guard validForAccount else { return }
         for observer in eventObservers.values { observer(event) }
         switch event {
         case .radioAvailability(let availability): status.radioAvailability = availability
@@ -229,24 +262,29 @@ final class EncounterRuntime: ObservableObject {
             if enabled { status.pausedForLackOfToken = false }
         case .participationPausedForLackOfToken:
             status.pausedForLackOfToken = participationOn
-            #if DEVELOPMENT_BUILD
-            guard participationOn, !tokenTopUpInFlight else { return }
+            guard participationOn, let tokenIssuer, !tokenTopUpInFlight else {
+                Task {
+                    await self.serialize {
+                        guard self.validForAccount else { return }
+                        await self.updateTokenStatus()
+                    }
+                }
+                return
+            }
             tokenTopUpInFlight = true
             Task {
                 await self.serialize {
                     defer { self.tokenTopUpInFlight = false }
-                    guard self.participationOn, self.engineRunning else { return }
+                    guard self.validForAccount, self.participationOn, self.engineRunning else { return }
                     do {
                         let time = await self.clock.now()
-                        try await self.issuer.replenish(at: time.wall)
+                        guard self.validForAccount else { return }
+                        try await tokenIssuer.replenish(at: time.wall)
                         await self.engine?.refresh()
                     } catch { /* Retry is explicit after a failed top-up; never loop. */ }
                     await self.updateTokenStatus()
                 }
             }
-            #else
-            Task { await self.updateTokenStatus() }
-            #endif
         case .receiptStorageFailed:
             status.storageUnavailable = true
             Task {
@@ -259,9 +297,39 @@ final class EncounterRuntime: ObservableObject {
         case .exchangeCompleted, .evidenceReached:
             // Keep queue/Keychain reads off the event consumer's path so a
             // burst of measurements is recorded before reset/restart resumes.
-            Task { await self.refreshLocalSummary() }
+            Task {
+                await self.serialize {
+                    guard self.validForAccount else { return }
+                    await self.uploadReceipts()
+                    await self.updateLocalSummary()
+                }
+            }
         default: break
         }
+    }
+
+    private func uploadReceipts() async {
+        // The factory exists only for a signed-in runtime. Participation may be off.
+        guard validForAccount, let uploadFactory, await prepareQueue(), let queue else { return }
+        scheduledUpload?.cancel()
+        scheduledUpload = nil
+        let generation = UUID()
+        uploadGeneration = generation
+        if uploader == nil { uploader = uploadFactory(queue) }
+        do {
+            let time = await clock.now()
+            guard validForAccount, let uploader else { return }
+            let outcome = try await uploader.upload(at: time.wall)
+            guard validForAccount, generation == uploadGeneration, let next = outcome.nextAttemptAt else { return }
+            scheduledUpload = uploadScheduler.schedule(at: next) { [weak self] in
+                guard let self, self.validForAccount, generation == self.uploadGeneration else { return }
+                await self.serialize {
+                    guard self.validForAccount, generation == self.uploadGeneration else { return }
+                    await self.uploadReceipts()
+                    await self.updateLocalSummary()
+                }
+            }
+        } catch { /* Nonretryable failures wait for the next explicit trigger. Never log receipt material. */ }
     }
 
     private func updateLocalSummary() async {

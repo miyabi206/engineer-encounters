@@ -3,7 +3,7 @@ import EncounterDomain
 import Foundation
 
 /// Local test tokens never ship in Internal or Release artifacts.
-actor LocalTestTokenIssuer {
+actor LocalTestTokenIssuer: TokenIssuer {
     private let store: any TokenBatchStore
 
     init(store: any TokenBatchStore) { self.store = store }

@@ -33,11 +33,11 @@ for configuration in Development Internal Release; do
         strings -a "$resource" >> "$bundle_report"
     done < "$derived/$configuration-resources.txt"
 
-    for marker in DiagnosticsView TrialRecorder TrialLog DemoSwitchSetting LocalTestTokenIssuer DevelopmentDiagnosticsEntry LocalTestTokens; do
+    for marker in DiagnosticsView TrialRecorder TrialLog DemoSwitchSetting LocalTestTokenIssuer DevelopmentDiagnosticsEntry LocalTestTokens DevelopmentTemporaryAccountSignIn DevelopmentTemporaryAccountText; do
         case "$marker:$configuration" in
             # Require DiagnosticsView for Internal once the Settings list gives it a route to S22.
             DiagnosticsView:Internal) continue ;;
-            LocalTestTokenIssuer:Internal|DevelopmentDiagnosticsEntry:Internal|LocalTestTokens:Internal|*:Release) expected=absent ;;
+            LocalTestTokenIssuer:Internal|DevelopmentDiagnosticsEntry:Internal|LocalTestTokens:Internal|DevelopmentTemporaryAccountSignIn:Internal|DevelopmentTemporaryAccountText:Internal|*:Release) expected=absent ;;
             *) expected=present ;;
         esac
         if [ "$expected" = present ]; then
@@ -50,9 +50,9 @@ for configuration in Development Internal Release; do
             failed=1
         fi
     done
-    for marker in Diagnostics.strings DevelopmentDiagnostics.strings; do
+    for marker in Diagnostics.strings DevelopmentDiagnostics.strings DevelopmentAccount.strings; do
         case "$marker:$configuration" in
-            DevelopmentDiagnostics.strings:Internal|*:Release) expected=absent ;;
+            DevelopmentDiagnostics.strings:Internal|DevelopmentAccount.strings:Internal|*:Release) expected=absent ;;
             *) expected=present ;;
         esac
         if [ "$expected" = present ]; then
@@ -67,6 +67,23 @@ for configuration in Development Internal Release; do
             failed=1
         fi
     done
+    if [ "$configuration" = Development ]; then
+        if [ "$(plutil -extract NSAppTransportSecurity.NSAllowsLocalNetworking raw "$app/Info.plist")" != true ]; then
+            echo 'Development: missing local networking allowance' >&2
+            failed=1
+        fi
+        if ! plutil -extract NSLocalNetworkUsageDescription raw "$app/Info.plist" >/dev/null 2>&1; then
+            echo 'Development: missing local network description' >&2
+            failed=1
+        fi
+    else
+        for key in NSAppTransportSecurity NSLocalNetworkUsageDescription; do
+            if plutil -extract "$key" raw "$app/Info.plist" >/dev/null 2>&1; then
+                echo "$configuration: forbidden Info.plist key: $key" >&2
+                failed=1
+            fi
+        done
+    fi
 done
 if [ "$failed" -ne 0 ]; then exit 1; fi
 echo 'Release artifact check passed: Development markers present; Internal diagnostics only; Release markers absent'
