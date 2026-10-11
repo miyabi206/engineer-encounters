@@ -320,7 +320,8 @@ public struct EncounterEngineCore: Sendable {
                     attempts[key] = attempt
                 } else if attempt.connected {
                     end(key, reason: .disconnected, disconnect: false, effects: &effects)
-                    createPeripheral(key, context)
+                    if peripheralBackoff[key.peer] == nil { createPeripheral(key, context) }
+                    else { requestDisconnect(key, effects: &effects) }
                 }
             } else if activeConnectionCount < EncounterProtocol.activeConnectionLimit {
                 createPeripheral(key, context)
@@ -573,9 +574,11 @@ public struct EncounterEngineCore: Sendable {
             trim(&evidencePause, limit: Self.evidencePauseLimit)
         }
         if key.role == .peripheral && reason != .evidenceReached && attempt.first?.hasQualifyingAmbientEvidence != true {
-            peripheralBackoff[key.peer] = LedgerEntry(insertionSequence: nextID(),
-                expiresAt: currentMonotonic + Self.peripheralBackoffDuration)
-            trim(&peripheralBackoff, limit: Self.peripheralBackoffLimit)
+            let expiresAt = attempt.createdAt + Self.peripheralBackoffDuration
+            if expiresAt > currentMonotonic && expiresAt > (peripheralBackoff[key.peer]?.expiresAt ?? currentMonotonic) {
+                peripheralBackoff[key.peer] = LedgerEntry(insertionSequence: nextID(), expiresAt: expiresAt)
+                trim(&peripheralBackoff, limit: Self.peripheralBackoffLimit)
+            }
         }
         // Use the termination input's time, recorded by expire/receive, rather than a clock read.
         if key.role == .central && reason != .stopped && reason != .reset {

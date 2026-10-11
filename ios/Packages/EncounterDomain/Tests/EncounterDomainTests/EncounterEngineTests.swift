@@ -526,6 +526,39 @@ final class EncounterEngineTests: XCTestCase {
         XCTAssertEqual(waitsA, 0); XCTAssertEqual(waitsB, 0)
     }
 
+    func testCentralReturningAfterOwnResetCompletesFirstExchangeImmediatelyAfterALongAttempt() async throws {
+        for silentDisconnects in [false, true] {
+            let rig = try await PairedPhonesRig.make()
+            await rig.link.setSilentPeripheralDisconnects(silentDisconnects)
+            try await startSingle(rig); try await rig.advance(by: 60)
+            let before = try await evidence(rig.first); XCTAssertEqual(before.count, 1)
+            await rig.first.engine.reset(); try await rig.settle()
+            await rig.first.engine.start(); try await rig.settle()
+            let a = try await evidence(rig.first), b = try await evidence(rig.second)
+            XCTAssertEqual(a.count, 1); XCTAssertEqual(b.count, 1)
+            XCTAssertEqual(a.first?.exchangeNonce, b.first?.exchangeNonce)
+            XCTAssertNotEqual(a.first?.exchangeNonce, before.first?.exchangeNonce)
+            let commands = await rig.first.transport.commands()
+            XCTAssertEqual(connectCount(commands), 2)
+            let peripheralCommands = await rig.second.transport.commands()
+            XCTAssertEqual(successCount(peripheralCommands), 2)
+            let time = await rig.first.clock.now(); XCTAssertEqual(time.monotonic, 60)
+            try await rig.stop()
+            var recorded: [EncounterEngineEvent] = []
+            var stops = 0
+            for await event in rig.first.engine.events {
+                recorded.append(event)
+                if event == .discoveryChanged(false) {
+                    stops += 1
+                    if stops == 2 { break }
+                }
+            }
+            XCTAssertEqual(recorded.filter { if case .attemptEnded = $0 { true } else { false } }, [
+                .attemptEnded(role: .central, reason: .reset), .attemptEnded(role: .central, reason: .stopped)
+            ])
+        }
+    }
+
     func testChangingApproachAffectsOnlyNewAttempts() async throws {
         let rig = try await PairedPhonesRig.make()
         try await startSingle(rig)

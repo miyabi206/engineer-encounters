@@ -136,20 +136,41 @@ final class EncounterEngineCoreTests: XCTestCase {
         XCTAssertTrue(commands(expired).contains { if case .write = $0 { true } else { false } })
     }
 
-    func testReturningCentralIsRefusedUntilFiveSecondsAfterAnAttemptWithoutEvidence() throws {
+    func testReturningCentralIsRefusedUntilFiveSecondsFromAttemptStartWithoutEvidence() throws {
         for completedExchange in [false, true] {
             var core = started()
             let key = BluetoothConnection(peer: peer(), role: .peripheral)
             if completedExchange { _ = try completePeripheral(&core) }
             else { _ = core.receive(.transport(.connected(key)), context: context()) }
             _ = core.receive(.transport(.disconnected(key)), context: context(1))
-            let early = core.receive(.transport(.connected(key)), context: context(5.999))
+            let early = core.receive(.transport(.connected(key)), context: context(4.999))
             XCTAssertTrue(commands(early).contains(.disconnect(key)))
-            let read = core.receive(.transport(.incomingRead(key.peer, .init(10))), context: context(5.999))
+            let read = core.receive(.transport(.incomingRead(key.peer, .init(10))), context: context(4.999))
             XCTAssertTrue(commands(read).contains(.answerRead(key.peer, .init(10), nil)))
-            _ = core.receive(.transport(.connected(key)), context: context(6))
-            let fresh = try offered(core.receive(.transport(.incomingRead(key.peer, .init(11))), context: context(6)))
+            let accepted = core.receive(.transport(.connected(key)), context: context(5))
+            XCTAssertFalse(commands(accepted).contains(.disconnect(key)))
+            let fresh = try offered(core.receive(.transport(.incomingRead(key.peer, .init(11))), context: context(5)))
             XCTAssertEqual(fresh.phase, .initialExchange)
+        }
+    }
+
+    func testReturningCentralIsAcceptedImmediatelyAfterAnAttemptLastingAtLeastFiveSeconds() throws {
+        for completedExchange in [false, true] {
+            for seconds in [5.0, 6] {
+                var core = started()
+                let key = BluetoothConnection(peer: peer(), role: .peripheral)
+                if completedExchange { _ = try completePeripheral(&core) }
+                else {
+                    _ = core.receive(.transport(.connected(key)), context: context())
+                    _ = try offered(core.receive(.transport(.incomingRead(key.peer, .init(1))), context: context(4)))
+                }
+                let disconnected = core.receive(.transport(.disconnected(key)), context: context(seconds))
+                XCTAssertTrue(ended(disconnected, .disconnected))
+                let accepted = core.receive(.transport(.connected(key)), context: context(seconds))
+                XCTAssertFalse(commands(accepted).contains(.disconnect(key)))
+                let fresh = try offered(core.receive(.transport(.incomingRead(key.peer, .init(10))), context: context(seconds)))
+                XCTAssertEqual(fresh.phase, .initialExchange)
+            }
         }
     }
 
@@ -534,6 +555,41 @@ final class EncounterEngineCoreTests: XCTestCase {
         let expired = core.receive(.transport(.incomingRead(key.peer, .init(20))), context: context(20))
         XCTAssertTrue(ended(expired, .operationTimeout))
         XCTAssertTrue(commands(expired).contains(.answerRead(key.peer, .init(20), nil)))
+    }
+
+    func testNewPeripheralLinkIsRefusedBeforeFiveSecondsFromStaleAttemptStart() throws {
+        for completedExchange in [false, true] {
+            var core = started()
+            let key = BluetoothConnection(peer: peer(), role: .peripheral)
+            if completedExchange { _ = try completePeripheral(&core) }
+            else { _ = core.receive(.transport(.connected(key)), context: context()) }
+            let early = core.receive(.transport(.connected(key)), context: context(4.999))
+            XCTAssertTrue(ended(early, .disconnected))
+            XCTAssertTrue(commands(early).contains(.disconnect(key)))
+            let read = core.receive(.transport(.incomingRead(key.peer, .init(10))), context: context(4.999))
+            XCTAssertTrue(commands(read).contains(.answerRead(key.peer, .init(10), nil)))
+            let accepted = core.receive(.transport(.connected(key)), context: context(5))
+            XCTAssertFalse(commands(accepted).contains(.disconnect(key)))
+            let fresh = try offered(core.receive(.transport(.incomingRead(key.peer, .init(11))), context: context(5)))
+            XCTAssertEqual(fresh.phase, .initialExchange)
+        }
+    }
+
+    func testNewPeripheralLinkReplacesAStaleAttemptAtFiveSecondsFromItsStart() throws {
+        for completedExchange in [false, true] {
+            var core = started()
+            let key = BluetoothConnection(peer: peer(), role: .peripheral)
+            if completedExchange { _ = try completePeripheral(&core) }
+            else {
+                _ = core.receive(.transport(.connected(key)), context: context())
+                _ = try offered(core.receive(.transport(.incomingRead(key.peer, .init(1))), context: context(4)))
+            }
+            let accepted = core.receive(.transport(.connected(key)), context: context(5))
+            XCTAssertTrue(ended(accepted, .disconnected))
+            XCTAssertFalse(commands(accepted).contains(.disconnect(key)))
+            let fresh = try offered(core.receive(.transport(.incomingRead(key.peer, .init(10))), context: context(5)))
+            XCTAssertEqual(fresh.phase, .initialExchange)
+        }
     }
 
     func testNewPeripheralLinkReplacesAStaleHeldAttemptWithoutDisconnectingTheNewLink() throws {
