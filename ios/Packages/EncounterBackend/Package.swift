@@ -12,7 +12,9 @@ let package = Package(
     ],
     targets: [
         .target(name: "EncounterBackend", dependencies: ["EncounterDomain"]),
-        .testTarget(name: "EncounterBackendTests", dependencies: ["EncounterBackend"])
+        .testTarget(name: "EncounterBackendTests", dependencies: [
+            "EncounterBackend", .product(name: "EncounterDomainTestSupport", package: "EncounterDomain")
+        ])
     ],
     swiftLanguageModes: [.v6]
 )

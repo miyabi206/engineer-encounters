@@ -71,3 +71,9 @@ func testManager(transport: any HTTPTransport, store: any SessionStore) -> Sessi
 
 struct RPCParameters: Encodable, Sendable { let display_name: String }
 struct RPCResult: Decodable, Sendable, Equatable { let saved: Bool }
+
+func serviceClient(_ transport: StubTransport) throws -> RemoteProcedureClient {
+    RemoteProcedureClient(configuration: testConfiguration(), transport: transport,
+                          sessions: testManager(transport: transport,
+                                                store: InMemorySessionStore(session: try testSession())))
+}
