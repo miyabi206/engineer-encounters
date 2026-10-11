@@ -64,6 +64,235 @@ final class WriteAssemblerTests: XCTestCase {
         XCTAssertEqual(try WriteAssembler.assemble([fragment(0, [1, 2])]), Data([1, 2]))
         XCTAssertThrowsError(try WriteAssembler.assemble([fragment(2, [3])]))
     }
+
+    func testOversizedBatchIsRejectedBeforeInspectingAnyFragment() {
+        var inspected = 0
+        XCTAssertThrowsError(try WriteAssembler.validateBatch(Array(0..<9)) { _ in
+            inspected += 1
+            return Data([1])
+        }) { XCTAssertEqual($0 as? WriteAssemblyError, .tooManyFragments) }
+        XCTAssertEqual(inspected, 0)
+        XCTAssertThrowsError(try WriteAssembler.assemble(Array(repeating: fragment(Int.max, []), count: 9))) {
+            XCTAssertEqual($0 as? WriteAssemblyError, .tooManyFragments)
+        }
+    }
+
+    func testEightFragmentsAreAcceptedAndEmptyValueRejectedBeforeSorting() throws {
+        XCTAssertEqual(try WriteAssembler.assemble((0..<8).reversed().map { fragment($0, [UInt8($0)]) }),
+                       Data(0..<8))
+        XCTAssertThrowsError(try WriteAssembler.assemble([
+            fragment(-1, [1]), fragment(Int.max, [])
+        ])) { XCTAssertEqual($0 as? WriteAssemblyError, .emptyValue) }
+        XCTAssertThrowsError(try WriteAssembler.assemble([fragment(0, [])])) {
+            XCTAssertEqual($0 as? WriteAssemblyError, .emptyValue)
+        }
+    }
+}
+
+final class EventAdmissionTests: XCTestCase {
+    func testBacklogKeepsArrivalOrderAndDropsOnlyObservationsAtLimit() {
+        var backlog = EventBacklog()
+        let observed = (0..<256).map { _ in BluetoothEvent.peerObserved(PeerHandle()) }
+        for event in observed { XCTAssertTrue(backlog.append(event)) }
+        XCTAssertEqual(backlog.count, 256)
+        XCTAssertFalse(backlog.append(.peerObserved(PeerHandle())))
+        let peer = PeerHandle(), id = BluetoothRequestID(1)
+        let connection = BluetoothConnection(peer: peer, role: .peripheral)
+        let admitted: [BluetoothEvent] = [
+            .connected(connection), .frameRead(peer, id, Data([1])), .readFailed(peer, id),
+            .writeAcknowledged(peer, id), .writeFailed(peer, id), .connectFailed(peer),
+            .disconnected(connection), .incomingRead(peer, id), .incomingWrite(peer, id, Data([2])),
+            .availabilityChanged(.unavailable), .restored([connection])
+        ]
+        for event in admitted { XCTAssertTrue(backlog.append(event)) }
+        XCTAssertEqual(backlog.count, 256 + admitted.count)
+        for event in observed + admitted { XCTAssertEqual(backlog.next(), event) }
+        XCTAssertNil(backlog.next())
+        XCTAssertEqual(backlog.count, 0)
+        XCTAssertTrue(backlog.append(.peerObserved(peer)))
+        XCTAssertEqual(backlog.next(), .peerObserved(peer))
+    }
+
+    func testSubscriptionAdmissionUsesBacklogAndOpenLinkCount() {
+        XCTAssertTrue(RadioAdmission.permits(.subscription, backlogCount: 255, openLinkCount: 15))
+        XCTAssertFalse(RadioAdmission.permits(.subscription, backlogCount: 256, openLinkCount: 0))
+        XCTAssertFalse(RadioAdmission.permits(.subscription, backlogCount: 0, openLinkCount: 16))
+        XCTAssertFalse(RadioAdmission.permits(.observation, backlogCount: 257))
+        XCTAssertTrue(RadioAdmission.permits(.admittedWork, backlogCount: 300, openLinkCount: 16))
+    }
+
+    func testRefusedCentralHasNoLifecycleUntilAdmittedLater() {
+        let peer = PeerHandle()
+        var links = PeripheralLinks()
+        XCTAssertFalse(links.subscribe(peer, backlogCount: 256))
+        XCTAssertEqual(links.count, 0)
+        XCTAssertFalse(links.acceptsRequests(peer))
+        XCTAssertFalse(links.unsubscribe(peer))
+        XCTAssertFalse(links.close(peer))
+        XCTAssertTrue(links.subscribe(peer, backlogCount: 255))
+        XCTAssertTrue(links.acceptsRequests(peer))
+        XCTAssertTrue(links.unsubscribe(peer))
+        XCTAssertFalse(links.unsubscribe(peer))
+    }
+
+    func testOpenAndClosedPeripheralStateStayBoundedWithoutReopeningClosedLinks() {
+        let peers = (0..<16).map { _ in PeerHandle() }, refused = PeerHandle()
+        var links = PeripheralLinks()
+        for peer in peers { XCTAssertTrue(links.subscribe(peer)) }
+        XCTAssertEqual(links.openPeers.count, 16)
+        XCTAssertFalse(links.subscribe(refused))
+        for peer in peers {
+            XCTAssertTrue(links.close(peer))
+            XCTAssertFalse(links.subscribe(peer))
+        }
+        XCTAssertEqual(links.openPeers.count, 0)
+        XCTAssertEqual(links.count, 16)
+        XCTAssertFalse(links.subscribe(refused))
+        XCTAssertFalse(links.unsubscribe(peers[0]))
+        XCTAssertTrue(links.subscribe(refused))
+        XCTAssertEqual(links.count, 16)
+        XCTAssertEqual(links.removeService(), [refused])
+        XCTAssertEqual(links.count, 0)
+    }
+
+    func testDroppedObservationDoesNotStartOrExtendThrottle() {
+        let peer = PeerHandle()
+        var registry = ObservationRegistry(capacity: 2)
+        XCTAssertNil(registry.observe(peer, now: 10, backlogCount: 256))
+        XCTAssertEqual(registry.observe(peer, now: 10.1, backlogCount: 255)?.shouldEmit, true)
+        XCTAssertNil(registry.observe(peer, now: 12.1, backlogCount: 256))
+        XCTAssertEqual(registry.observe(peer, now: 12.2, backlogCount: 255)?.shouldEmit, true)
+    }
+
+    func testCentralLinksAndCancellationsShareBoundedCapacity() {
+        XCTAssertTrue(RadioAdmission.canTrackCentral(links: 255, cancellations: 0))
+        XCTAssertTrue(RadioAdmission.canTrackCentral(links: 0, cancellations: 255))
+        XCTAssertFalse(RadioAdmission.canTrackCentral(links: 256, cancellations: 0))
+        XCTAssertFalse(RadioAdmission.canTrackCentral(links: 128, cancellations: 128))
+    }
+
+    func testStalledConsumerFloodAddsOnlyTwoRequestsAndOneEndingPerAdmittedLink() {
+        let peers = (0..<16).map { _ in PeerHandle() }
+        var links = PeripheralLinks(), reads = PeripheralRequests(), writes = PeripheralRequests()
+        var backlog = EventBacklog()
+        var expected: [BluetoothEvent] = []
+        for peer in peers {
+            XCTAssertTrue(links.subscribe(peer, backlogCount: backlog.count))
+            let event = BluetoothEvent.connected(.init(peer: peer, role: .peripheral))
+            backlog.append(event)
+            expected.append(event)
+        }
+        while backlog.count < 256 {
+            let event = BluetoothEvent.peerObserved(PeerHandle())
+            backlog.append(event)
+            expected.append(event)
+        }
+        for attempt in 0..<100 {
+            for peer in peers {
+                let id = BluetoothRequestID(UInt64(attempt))
+                if reads.begin(peer, request: id) {
+                    let event = BluetoothEvent.incomingRead(peer, id)
+                    backlog.append(event)
+                    expected.append(event)
+                }
+                if writes.begin(peer, request: id) {
+                    let event = BluetoothEvent.incomingWrite(peer, id, Data([1]))
+                    backlog.append(event)
+                    expected.append(event)
+                }
+            }
+        }
+        for peer in peers {
+            XCTAssertTrue(links.unsubscribe(peer))
+            reads.drop(peer)
+            writes.drop(peer)
+            let event = BluetoothEvent.disconnected(.init(peer: peer, role: .peripheral))
+            backlog.append(event)
+            expected.append(event)
+            XCTAssertFalse(links.subscribe(peer, backlogCount: backlog.count))
+            XCTAssertFalse(links.unsubscribe(peer))
+        }
+        XCTAssertEqual(backlog.count, 256 + 3 * 16)
+        for event in expected { XCTAssertEqual(backlog.next(), event) }
+        XCTAssertTrue(links.subscribe(peers[0], backlogCount: backlog.count))
+    }
+
+    func testPendingRequestsCannotBeSupersededOrGrowPastSixteenPeers() {
+        var requests = PeripheralRequests()
+        let peers = (0..<16).map { _ in PeerHandle() }, refused = PeerHandle()
+        for peer in peers { XCTAssertTrue(requests.begin(peer, request: .init(1))) }
+        XCTAssertEqual(requests.count, 16)
+        XCTAssertFalse(requests.begin(peers[0], request: .init(2)))
+        XCTAssertFalse(requests.begin(refused, request: .init(1)))
+        XCTAssertFalse(requests.finish(peers[0], request: .init(2)))
+        XCTAssertTrue(requests.finish(peers[0], request: .init(1)))
+        XCTAssertTrue(requests.begin(refused, request: .init(2)))
+        requests.drop(refused)
+        XCTAssertFalse(requests.contains(refused))
+    }
+
+    func testSnapshotsAndPendingReadsShareSixteenSlots() {
+        var snapshots = ReadSnapshots()
+        let peers = (0..<16).map { _ in PeerHandle() }, refused = PeerHandle()
+        let now = Date(timeIntervalSince1970: 10)
+        for peer in peers {
+            XCTAssertTrue(snapshots.begin(peer, request: .init(1)))
+            XCTAssertEqual(snapshots.answer(peer, request: .init(1), snapshot:
+                .init(frame: Data([1]), validUntil: now.addingTimeInterval(1)), now: now), Data([1]))
+        }
+        XCTAssertFalse(snapshots.begin(refused, request: .init(1)))
+        XCTAssertTrue(snapshots.begin(peers[0], request: .init(2)))
+        XCTAssertFalse(snapshots.begin(peers[0], request: .init(3)))
+        snapshots.drop(peers[0])
+        XCTAssertTrue(snapshots.begin(refused, request: .init(1)))
+    }
+}
+
+@MainActor
+final class EventDeliveryTests: XCTestCase {
+    func testStreamDrainsExactlyOneEventPerPullAndKeepsPreconsumerEvents() async {
+        let queue = DispatchQueue(label: "EventDeliveryTests")
+        let delivery = EventDelivery(queue: queue)
+        let stream = AsyncStream(unfolding: { await delivery.next() }, onCancel: { delivery.finish(cancelled: true) })
+        let events = (0..<256).map { _ in BluetoothEvent.peerObserved(PeerHandle()) }
+        queue.sync { for event in events { delivery.append(event) } }
+        XCTAssertEqual(queue.sync { delivery.count }, 256)
+        var iterator = stream.makeAsyncIterator()
+        for (index, event) in events.enumerated() {
+            let next = await iterator.next()
+            XCTAssertEqual(next, event)
+            XCTAssertEqual(queue.sync { delivery.count }, 255 - index)
+        }
+        delivery.finish()
+        let next = await iterator.next()
+        XCTAssertNil(next)
+    }
+
+    func testCancellationFinishesPendingConsumerPull() async {
+        let delivery = EventDelivery(queue: DispatchQueue(label: "EventDeliveryCancellationTests"))
+        let consumer = Task { await delivery.next() }
+        consumer.cancel()
+        let event = await consumer.value
+        XCTAssertNil(event)
+        let next = await delivery.next()
+        XCTAssertNil(next)
+    }
+
+    func testNormalFinishDrainsAdmittedEventsBeforeEnding() async {
+        let queue = DispatchQueue(label: "EventDeliveryFinishTests")
+        let delivery = EventDelivery(queue: queue)
+        let peer = PeerHandle()
+        let events: [BluetoothEvent] = [.connected(.init(peer: peer, role: .peripheral)),
+                                        .disconnected(.init(peer: peer, role: .peripheral))]
+        queue.sync { for event in events { delivery.append(event) } }
+        delivery.finish()
+        for event in events {
+            let next = await delivery.next()
+            XCTAssertEqual(next, event)
+        }
+        let next = await delivery.next()
+        XCTAssertNil(next)
+    }
 }
 
 final class ReadSnapshotTests: XCTestCase {

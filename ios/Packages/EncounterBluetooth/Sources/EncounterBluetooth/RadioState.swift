@@ -1,6 +1,72 @@
 import Foundation
 import EncounterDomain
 
+/// Admission is decided before recording any state for an untrusted peer.
+enum RadioAdmission {
+    static let eventLimit = 256
+    static let peripheralLimit = 16
+    static let centralLimit = 256
+    static let fragmentLimit = 8
+
+    enum EventKind { case observation, subscription, admittedWork }
+
+    static func permits(_ kind: EventKind, backlogCount: Int, openLinkCount: Int = 0) -> Bool {
+        switch kind {
+        case .observation: backlogCount < eventLimit
+        case .subscription: backlogCount < eventLimit && openLinkCount < peripheralLimit
+        case .admittedWork: true
+        }
+    }
+
+    static func canTrackCentral(links: Int, cancellations: Int) -> Bool {
+        links + cancellations < centralLimit
+    }
+}
+
+/// The stream pulls directly from this FIFO; AsyncStream has no second buffer.
+/// At the limit, peer-driven growth is only the admitted links' outstanding
+/// operations and terminal events: two requests and one ending per peripheral,
+/// and readiness, two operation results and one ending per central. Radio and
+/// restoration events, and outcomes of engine commands, remain unconditional.
+struct EventBacklog {
+    private var events: [BluetoothEvent] = []
+    var count: Int { events.count }
+
+    @discardableResult
+    mutating func append(_ event: BluetoothEvent) -> Bool {
+        let kind: RadioAdmission.EventKind
+        if case .peerObserved = event { kind = .observation } else { kind = .admittedWork }
+        guard RadioAdmission.permits(kind, backlogCount: count) else { return false }
+        events.append(event)
+        return true
+    }
+
+    mutating func next() -> BluetoothEvent? {
+        events.isEmpty ? nil : events.removeFirst()
+    }
+}
+
+/// One unanswered request of each kind per admitted peripheral link (16 total).
+struct PeripheralRequests {
+    private var requests: [PeerHandle: BluetoothRequestID] = [:]
+    var count: Int { requests.count }
+    func contains(_ peer: PeerHandle) -> Bool { requests[peer] != nil }
+
+    mutating func begin(_ peer: PeerHandle, request: BluetoothRequestID) -> Bool {
+        guard !contains(peer), count < RadioAdmission.peripheralLimit else { return false }
+        requests[peer] = request
+        return true
+    }
+
+    mutating func finish(_ peer: PeerHandle, request: BluetoothRequestID) -> Bool {
+        guard requests[peer] == request else { return false }
+        requests.removeValue(forKey: peer)
+        return true
+    }
+
+    mutating func drop(_ peer: PeerHandle) { requests.removeValue(forKey: peer) }
+}
+
 struct WriteFragment: Sendable {
     let characteristic: String
     let offset: Int
@@ -8,12 +74,22 @@ struct WriteFragment: Sendable {
 }
 
 enum WriteAssemblyError: Error, Equatable {
-    case wrongCharacteristic, missingValue, gap, overlap, overflow
+    case wrongCharacteristic, missingValue, emptyValue, tooManyFragments, gap, overlap, overflow
 }
 
 enum WriteAssembler {
+    // Check count first, then at most eight values, before mapping or sorting.
+    static func validateBatch<Element>(_ requests: [Element], value: (Element) -> Data?) throws {
+        guard requests.count <= RadioAdmission.fragmentLimit else { throw WriteAssemblyError.tooManyFragments }
+        for request in requests {
+            guard let bytes = value(request) else { throw WriteAssemblyError.missingValue }
+            guard !bytes.isEmpty else { throw WriteAssemblyError.emptyValue }
+        }
+    }
+
     // One callback is one atomic write; no bytes survive into another callback.
     static func assemble(_ fragments: [WriteFragment]) throws -> Data {
+        try validateBatch(fragments, value: { $0.value })
         var frame = Data()
         for fragment in fragments.sorted(by: { $0.offset < $1.offset }) {
             guard fragment.characteristic == EncounterProtocol.centralTokenCharacteristicUUID else {
@@ -32,18 +108,21 @@ enum WriteAssembler {
 }
 
 struct ReadSnapshots {
-    private var pending: [PeerHandle: BluetoothRequestID] = [:]
+    private var pending = PeripheralRequests()
+    // Pending requests and cached snapshots together contain at most 16 peers.
     private var snapshots: [PeerHandle: BluetoothReadSnapshot] = [:]
 
-    mutating func begin(_ peer: PeerHandle, request: BluetoothRequestID) {
+    @discardableResult
+    mutating func begin(_ peer: PeerHandle, request: BluetoothRequestID) -> Bool {
+        guard snapshots[peer] != nil || snapshots.count + pending.count < RadioAdmission.peripheralLimit,
+              pending.begin(peer, request: request) else { return false }
         snapshots.removeValue(forKey: peer)
-        pending[peer] = request
+        return true
     }
 
     mutating func answer(_ peer: PeerHandle, request: BluetoothRequestID,
                          snapshot: BluetoothReadSnapshot?, now: Date) -> Data? {
-        guard pending[peer] == request else { return nil }
-        pending.removeValue(forKey: peer)
+        guard pending.finish(peer, request: request) else { return nil }
         guard let snapshot, now < snapshot.validUntil,
               snapshot.frame.count <= EncounterProtocol.maximumFrameByteCount else { return nil }
         snapshots[peer] = snapshot
@@ -57,21 +136,26 @@ struct ReadSnapshots {
     }
 
     mutating func drop(_ peer: PeerHandle) {
-        pending.removeValue(forKey: peer)
+        pending.drop(peer)
         snapshots.removeValue(forKey: peer)
     }
 }
 
 struct PeripheralLinks {
     private enum State { case open, closed }
+    // Closed subscriptions retain their slot until unsubscribe/service removal.
+    // Bounding open and closed together avoids an unbounded tombstone table.
     private var subscriptions: [PeerHandle: State] = [:]
 
     var openPeers: [PeerHandle] { subscriptions.compactMap { $0.value == .open ? $0.key : nil } }
+    var count: Int { subscriptions.count }
     func acceptsRequests(_ peer: PeerHandle) -> Bool { subscriptions[peer] == .open }
 
     // Repeated subscription callbacks cannot reopen a logically closed link.
-    mutating func subscribe(_ peer: PeerHandle) -> Bool {
-        guard subscriptions[peer] == nil else { return false }
+    mutating func subscribe(_ peer: PeerHandle, backlogCount: Int = 0) -> Bool {
+        guard subscriptions[peer] == nil, count < RadioAdmission.peripheralLimit,
+              RadioAdmission.permits(.subscription, backlogCount: backlogCount, openLinkCount: openPeers.count)
+        else { return false }
         subscriptions[peer] = .open
         return true
     }
@@ -279,7 +363,9 @@ struct ObservationRegistry {
         self.capacity = capacity
     }
 
-    mutating func observe(_ peer: PeerHandle, now: TimeInterval) -> Observation? {
+    mutating func observe(_ peer: PeerHandle, now: TimeInterval, backlogCount: Int = 0) -> Observation? {
+        // A refused observation neither occupies a registry slot nor starts its throttle.
+        guard RadioAdmission.permits(.observation, backlogCount: backlogCount) else { return nil }
         var evicted: PeerHandle?
         if !order.contains(peer), order.count == capacity {
             // Keep recent observations so eviction cannot bypass the throttle.

@@ -5,7 +5,7 @@ import EncounterDomain
 /// Confines both radios to one queue and leaves exchange policy to the engine.
 public final class CoreBluetoothTransport: NSObject, BluetoothTransport, @unchecked Sendable {
     public let events: AsyncStream<BluetoothEvent>
-    private let continuation: AsyncStream<BluetoothEvent>.Continuation
+    private let eventDelivery: EventDelivery
     private let queue = DispatchQueue(label: "EncounterBluetooth.radio")
     private let serviceUUID = CBUUID(string: EncounterProtocol.serviceUUID)
     private let peripheralTokenUUID = CBUUID(string: EncounterProtocol.peripheralTokenCharacteristicUUID)
@@ -23,17 +23,21 @@ public final class CoreBluetoothTransport: NSObject, BluetoothTransport, @unchec
     private var publicationRearm: DispatchWorkItem?
     private var restoredCentral: [BluetoothConnection]?
     private var restoredPeripheral: [BluetoothConnection]?
+    // Registry and observation/throttle tables each contain at most 256 peers.
     private var registry: [PeerHandle: CBPeripheral] = [:]
-    private var observations = ObservationRegistry(capacity: 256)
+    private var observations = ObservationRegistry(capacity: RadioAdmission.centralLimit)
     private var centralLinks = CentralLinks()
     private var peripheralLinks = PeripheralLinks()
     private var snapshots = ReadSnapshots()
+    // Central links (including reducer states) plus cancellations: at most 256.
     private var links: [PeerHandle: CentralLink] = [:]
     // Keep canceled objects until their terminal callback, so a late callback
     // cannot be mistaken for a subsequent attempt on the same peripheral.
     private var cancellations: [PeerHandle: CBPeripheral] = [:]
+    // One pending read and write per admitted peripheral: at most 16 each.
     private var pendingReads: [BluetoothRequestID: CBATTRequest] = [:]
     private var pendingWrites: [BluetoothRequestID: CBATTRequest] = [:]
+    private var writeRequests = PeripheralRequests()
     private var nextRequest: UInt64 = 0
 
     private struct CentralLink {
@@ -48,9 +52,9 @@ public final class CoreBluetoothTransport: NSObject, BluetoothTransport, @unchec
     public init(centralRestorationIdentifier: String = "EncounterBluetooth.central.v1",
                 peripheralRestorationIdentifier: String = "EncounterBluetooth.peripheral.v1") {
         precondition(centralRestorationIdentifier != peripheralRestorationIdentifier)
-        let stream = AsyncStream<BluetoothEvent>.makeStream(bufferingPolicy: .unbounded)
-        events = stream.stream
-        continuation = stream.continuation
+        let delivery = EventDelivery(queue: queue)
+        eventDelivery = delivery
+        events = AsyncStream(unfolding: { await delivery.next() }, onCancel: { delivery.finish(cancelled: true) })
         super.init()
         queue.async { [self] in
             var centralOptions: [String: Any] = [:]
@@ -66,7 +70,7 @@ public final class CoreBluetoothTransport: NSObject, BluetoothTransport, @unchec
 
     deinit {
         publicationRearm?.cancel()
-        continuation.finish()
+        eventDelivery.finish()
     }
 
     /// Applies commands in the same serial order as the managers' callbacks.
@@ -80,7 +84,7 @@ public final class CoreBluetoothTransport: NSObject, BluetoothTransport, @unchec
     }
 
     private func checkQueue() { dispatchPrecondition(condition: .onQueue(queue)) }
-    private func emit(_ event: BluetoothEvent) { continuation.yield(event) }
+    private func emit(_ event: BluetoothEvent) { eventDelivery.append(event) }
     private func peer(_ identifier: UUID) -> PeerHandle { PeerHandle(id: identifier) }
     private func requestID() -> BluetoothRequestID {
         nextRequest &+= 1
@@ -105,7 +109,9 @@ public final class CoreBluetoothTransport: NSObject, BluetoothTransport, @unchec
                 _ = centralLinks.end(peer)
             }
             guard centralManager.state == .poweredOn, links[peer] == nil,
-                  cancellations[peer] == nil, let peripheral = registry[peer] else {
+                  cancellations[peer] == nil,
+                  RadioAdmission.canTrackCentral(links: links.count, cancellations: cancellations.count),
+                  let peripheral = registry[peer] else {
                 emit(.connectFailed(peer)); return
             }
             links[peer] = CentralLink(peripheral: peripheral)
@@ -150,6 +156,7 @@ public final class CoreBluetoothTransport: NSObject, BluetoothTransport, @unchec
         case .answerWrite(let peer, let id, let success):
             guard let request = pendingWrites[id], self.peer(request.central.identifier) == peer else { return }
             pendingWrites.removeValue(forKey: id)
+            _ = writeRequests.finish(peer, request: id)
             peripheralManager.respond(to: request, withResult:
                 success && peripheralLinks.acceptsRequests(peer) ? .success : .writeNotPermitted)
         }
@@ -218,6 +225,7 @@ public final class CoreBluetoothTransport: NSObject, BluetoothTransport, @unchec
         snapshots = ReadSnapshots()
         pendingReads.removeAll()
         pendingWrites.removeAll()
+        writeRequests = PeripheralRequests()
     }
 
     private func startScan() {
@@ -254,6 +262,7 @@ public final class CoreBluetoothTransport: NSObject, BluetoothTransport, @unchec
 
     private func dropPeripheralRequests(_ peer: PeerHandle, respond: Bool = true) {
         snapshots.drop(peer)
+        writeRequests.drop(peer)
         for (id, request) in pendingReads where self.peer(request.central.identifier) == peer {
             if respond { peripheralManager.respond(to: request, withResult: .readNotPermitted) }
             pendingReads.removeValue(forKey: id)
@@ -318,7 +327,8 @@ extension CoreBluetoothTransport: CBCentralManagerDelegate {
         checkQueue()
         guard discoveryRequested == true, central.state == .poweredOn else { return }
         let peer = peer(peripheral.identifier)
-        guard let observation = observations.observe(peer, now: ProcessInfo.processInfo.systemUptime) else { return }
+        guard let observation = observations.observe(peer, now: ProcessInfo.processInfo.systemUptime,
+                                                     backlogCount: eventDelivery.count) else { return }
         if let evicted = observation.evicted { registry.removeValue(forKey: evicted) }
         registry[peer] = peripheral
         if observation.shouldEmit { emit(.peerObserved(peer)) }
@@ -329,7 +339,10 @@ extension CoreBluetoothTransport: CBCentralManagerDelegate {
         let peer = peer(peripheral.identifier)
         guard let link = links[peer], link.peripheral === peripheral,
               centralLinks.state(peer) == .pending else {
-            if links[peer] == nil { cancellations[peer] = peripheral }
+            if links[peer] == nil,
+               cancellations[peer] != nil || RadioAdmission.canTrackCentral(links: links.count, cancellations: cancellations.count) {
+                cancellations[peer] = peripheral
+            }
             central.cancelPeripheralConnection(peripheral)
             return
         }
@@ -383,6 +396,10 @@ extension CoreBluetoothTransport: CBCentralManagerDelegate {
                 registry[peer] = peripheral
             }
             guard peripheral.state == .connected, links[peer] == nil else { continue }
+            guard RadioAdmission.canTrackCentral(links: links.count, cancellations: cancellations.count) else {
+                central.cancelPeripheralConnection(peripheral)
+                continue
+            }
             var link = CentralLink(peripheral: peripheral)
             let characteristics = peripheral.services?.first { $0.uuid == serviceUUID }?.characteristics ?? []
             link.readToken = characteristics.first { $0.uuid == peripheralTokenUUID }
@@ -519,7 +536,9 @@ extension CoreBluetoothTransport: CBPeripheralManagerDelegate {
               publication.published, discoveryRequested != false,
               service?.characteristics?.contains(where: { $0 === characteristic }) == true else { return }
         let peer = peer(central.identifier)
-        if peripheralLinks.subscribe(peer) { emit(.connected(.init(peer: peer, role: .peripheral))) }
+        if peripheralLinks.subscribe(peer, backlogCount: eventDelivery.count) {
+            emit(.connected(.init(peer: peer, role: .peripheral)))
+        }
     }
 
     public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral,
@@ -539,13 +558,11 @@ extension CoreBluetoothTransport: CBPeripheralManagerDelegate {
             peripheral.respond(to: request, withResult: .readNotPermitted); return
         }
         if request.offset == 0 {
-            // Superseding a read also refuses its pending offset-zero request.
-            for (id, old) in pendingReads where self.peer(old.central.identifier) == peer {
-                peripheral.respond(to: old, withResult: .unlikelyError)
-                pendingReads.removeValue(forKey: id)
-            }
             let id = requestID()
-            snapshots.begin(peer, request: id)
+            // Refuse another request until the engine answers the admitted one.
+            guard snapshots.begin(peer, request: id) else {
+                peripheral.respond(to: request, withResult: .unlikelyError); return
+            }
             pendingReads[id] = request
             emit(.incomingRead(peer, id))
         } else if let frame = snapshots.continuation(peer, offset: request.offset, now: Date()) {
@@ -557,8 +574,16 @@ extension CoreBluetoothTransport: CBPeripheralManagerDelegate {
     public func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveWrite requests: [CBATTRequest]) {
         checkQueue()
         guard let first = requests.first else { return }
+        do {
+            try WriteAssembler.validateBatch(requests, value: { $0.value })
+        } catch {
+            let result: CBATTError.Code = (error as? WriteAssemblyError) == .missingValue
+                ? .unlikelyError : .invalidAttributeValueLength
+            peripheral.respond(to: first, withResult: result); return
+        }
         let peer = peer(first.central.identifier)
-        guard peripheralLinks.acceptsRequests(peer), requests.allSatisfy({ $0.central.identifier == first.central.identifier }) else {
+        guard peripheralLinks.acceptsRequests(peer), !writeRequests.contains(peer),
+              requests.allSatisfy({ $0.central.identifier == first.central.identifier }) else {
             peripheral.respond(to: first, withResult: .writeNotPermitted); return
         }
         let fragments = requests.map {
@@ -567,13 +592,16 @@ extension CoreBluetoothTransport: CBPeripheralManagerDelegate {
         do {
             let frame = try WriteAssembler.assemble(fragments)
             let id = requestID()
+            guard writeRequests.begin(peer, request: id) else {
+                peripheral.respond(to: first, withResult: .writeNotPermitted); return
+            }
             pendingWrites[id] = first
             emit(.incomingWrite(peer, id, frame))
         } catch {
             let result: CBATTError.Code
             switch error as? WriteAssemblyError {
             case .gap, .overlap: result = .invalidOffset
-            case .overflow: result = .invalidAttributeValueLength
+            case .overflow, .emptyValue, .tooManyFragments: result = .invalidAttributeValueLength
             case .wrongCharacteristic: result = .writeNotPermitted
             default: result = .unlikelyError
             }
@@ -593,7 +621,9 @@ extension CoreBluetoothTransport: CBPeripheralManagerDelegate {
             for characteristic in service.characteristics ?? [] where characteristic.uuid == peripheralTokenUUID {
                 for central in (characteristic as? CBMutableCharacteristic)?.subscribedCentrals ?? [] {
                     let peer = peer(central.identifier)
-                    if peripheralLinks.subscribe(peer) { restored.append(.init(peer: peer, role: .peripheral)) }
+                    if peripheralLinks.subscribe(peer, backlogCount: eventDelivery.count) {
+                        restored.append(.init(peer: peer, role: .peripheral))
+                    }
                 }
             }
         }
