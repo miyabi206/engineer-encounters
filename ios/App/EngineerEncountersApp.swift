@@ -13,7 +13,13 @@ struct EngineerEncountersApp: App {
 
     var body: some Scene {
         WindowGroup {
-            WelcomeView()
+            NavigationStack {
+                #if DEVELOPMENT_BUILD
+                WelcomeView { DevelopmentDiagnosticsEntry(composition: composition) }
+                #else
+                WelcomeView()
+                #endif
+            }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .active {
                         Task { await composition.refresh() }

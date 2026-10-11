@@ -25,10 +25,10 @@ settings:
       EXCLUDED_SOURCE_FILE_NAMES: ""
     Internal:
       SWIFT_ACTIVE_COMPILATION_CONDITIONS: INTERNAL_BUILD
-      EXCLUDED_SOURCE_FILE_NAMES: "$(inherited) Development/* */Development/*"
+      EXCLUDED_SOURCE_FILE_NAMES: "$(inherited) Development/* */Development/* DevelopmentDiagnostics.strings"
     Release:
       SWIFT_ACTIVE_COMPILATION_CONDITIONS: ""
-      EXCLUDED_SOURCE_FILE_NAMES: "$(inherited) Development/* */Development/* Diagnostics/* */Diagnostics/*"
+      EXCLUDED_SOURCE_FILE_NAMES: "$(inherited) Development/* */Development/* Diagnostics/* */Diagnostics/* DevelopmentDiagnostics.strings Diagnostics.strings"
 packages:
   EncounterDomain:
     path: Packages/EncounterDomain
@@ -61,7 +61,9 @@ targets:
     type: bundle.unit-test
     platform: iOS
     sources:
-      - Tests
+      - path: Tests
+        excludes:
+          - "*.sh"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_IDENTIFIER).Tests
