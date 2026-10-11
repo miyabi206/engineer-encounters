@@ -19,6 +19,7 @@ public enum EncounterProtocol {
     public static let operationTimeout: TimeInterval = 5
     public static let activeConnectionLimit = 4
     public static let duplicateAttemptBackoff: TimeInterval = 10
+    public static let evidencePauseDuration: TimeInterval = 15 * 60
 }
 
 /// Rejects token or nonce bytes that do not have the required fixed length.

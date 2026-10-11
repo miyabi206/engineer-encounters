@@ -107,9 +107,11 @@ public struct EncounterEngineCore: Sendable {
     private var observed: [PeerHandle: UInt64] = [:]
     private var consumedNonces: [ExchangeNonce: LedgerEntry] = [:]
     private var peripheralBackoff: [PeerHandle: LedgerEntry] = [:]
+    private var evidencePause: [PeerHandle: LedgerEntry] = [:]
     private static let observedPeerLimit = 256
     private static let consumedNonceLimit = 4096
     private static let peripheralBackoffLimit = 256
+    private static let evidencePauseLimit = 256
     private static let peripheralBackoffDuration: TimeInterval = 5
     private var sequence: UInt64 = 0
     private var running = false
@@ -156,6 +158,7 @@ public struct EncounterEngineCore: Sendable {
             peripheralBackoff.removeAll()
             if isReset(input) {
                 consumedNonces.removeAll()
+                evidencePause.removeAll()
                 effects.append(.queue(nil, .removeAll))
             }
         case .selectApproach(let selected): approach = selected
@@ -182,7 +185,7 @@ public struct EncounterEngineCore: Sendable {
             }
             for (peer, pending) in pendingPeers.sorted(by: { $0.value.insertionSequence < $1.value.insertionSequence }) {
                 let key = BluetoothConnection(peer: peer, role: .central)
-                guard attempts[key] == nil, closing[key] == nil, backoff[peer] == nil,
+                guard attempts[key] == nil, closing[key] == nil, backoff[peer] == nil, evidencePause[peer] == nil,
                       activeConnectionCount < EncounterProtocol.activeConnectionLimit else { continue }
                 pendingPeers.removeValue(forKey: peer)
                 start(peer, pending: pending, context, effects: &effects)
@@ -227,6 +230,7 @@ public struct EncounterEngineCore: Sendable {
         pendingPeers = pendingPeers.filter { $0.value.lastObservedAt + Self.pendingPeerLifetime > context.time.monotonic }
         consumedNonces = consumedNonces.filter { $0.value.expiresAt > context.time.monotonic }
         peripheralBackoff = peripheralBackoff.filter { $0.value.expiresAt > context.time.monotonic }
+        evidencePause = evidencePause.filter { $0.value.expiresAt > context.time.monotonic }
         for key in sortedKeys() {
             guard let attempt = attempts[key] else { continue }
             if let firstAt = attempt.firstCompletedAt,
@@ -265,6 +269,7 @@ public struct EncounterEngineCore: Sendable {
         for (peer, pending) in pendingPeers {
             dates.append(pending.lastObservedAt + Self.pendingPeerLifetime)
             if let deadline = backoff[peer], deadline > context.time.monotonic { dates.append(deadline) }
+            if let deadline = evidencePause[peer]?.expiresAt, deadline > context.time.monotonic { dates.append(deadline) }
         }
         return dates.min()
     }
@@ -562,6 +567,11 @@ public struct EncounterEngineCore: Sendable {
             effects.append(.transport(.answerWrite(key.peer, request, success: false)))
         }
         if let receipt = attempt.first { finalize(receipt, preserve: false, effects: &effects) }
+        if reason == .evidenceReached {
+            evidencePause[key.peer] = LedgerEntry(insertionSequence: nextID(),
+                expiresAt: currentMonotonic + EncounterProtocol.evidencePauseDuration)
+            trim(&evidencePause, limit: Self.evidencePauseLimit)
+        }
         if key.role == .peripheral && reason != .evidenceReached && attempt.first?.hasQualifyingAmbientEvidence != true {
             peripheralBackoff[key.peer] = LedgerEntry(insertionSequence: nextID(),
                 expiresAt: currentMonotonic + Self.peripheralBackoffDuration)

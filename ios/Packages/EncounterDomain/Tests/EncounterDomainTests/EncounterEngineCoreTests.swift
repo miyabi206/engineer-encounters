@@ -54,15 +54,16 @@ final class EncounterEngineCoreTests: XCTestCase {
         _ = core.receive(.queueResult(id, success: true), context: context(token: token))
         return receipt
     }
-    private func completeCentral(_ core: inout EncounterEngineCore, token: TokenWindow? = nil) throws -> EncounterReceipt {
+    private func completeCentral(_ core: inout EncounterEngineCore, token: TokenWindow? = nil,
+                                 seconds: TimeInterval = 0) throws -> EncounterReceipt {
         let key = BluetoothConnection(peer: peer(), role: .central)
-        _ = core.receive(.transport(.peerObserved(key.peer)), context: context(token: token))
-        let read = try readID(core.receive(.transport(.connected(key)), context: context(token: token)))
+        _ = core.receive(.transport(.peerObserved(key.peer)), context: context(seconds, token: token))
+        let read = try readID(core.receive(.transport(.connected(key)), context: context(seconds, token: token)))
         let frame = try ExchangeFrame(phase: .initialExchange, token: EncounterSamples.token(seed: 999), nonce: EncounterSamples.nonce(seed: 1))
-        let write = core.receive(.transport(.frameRead(key.peer, read, frame.encoded())), context: context(token: token))
+        let write = core.receive(.transport(.frameRead(key.peer, read, frame.encoded())), context: context(seconds, token: token))
         let writeID = try XCTUnwrap(commands(write).compactMap { if case .write(_, let id, _) = $0 { id } else { nil } }.first)
-        let (id, receipt) = try save(core.receive(.transport(.writeAcknowledged(key.peer, writeID)), context: context(token: token)))
-        _ = core.receive(.queueResult(id, success: true), context: context(token: token))
+        let (id, receipt) = try save(core.receive(.transport(.writeAcknowledged(key.peer, writeID)), context: context(seconds, token: token)))
+        _ = core.receive(.queueResult(id, success: true), context: context(seconds, token: token))
         return receipt
     }
 
@@ -178,6 +179,144 @@ final class EncounterEngineCoreTests: XCTestCase {
         XCTAssertFalse(commands(connected).contains(.disconnect(key)))
         let fresh = try offered(core.receive(.transport(.incomingRead(key.peer, .init(5))), context: context(120)))
         XCTAssertEqual(fresh.phase, .initialExchange)
+    }
+
+    private func finishEvidence(_ core: inout EncounterEngineCore, first: EncounterReceipt,
+                                approach: PresenceApproach, peer peerHandle: PeerHandle? = nil,
+                                seconds: TimeInterval = 120, savedAt: TimeInterval = 123) throws {
+        let key = BluetoothConnection(peer: peerHandle ?? peer(), role: first.role)
+        let output: EncounterEngineOutput
+        if key.role == .peripheral {
+            if approach == .secondExchange {
+                _ = core.receive(.transport(.connected(key)), context: ledgerContext(seconds))
+            }
+            let frame = try offered(core.receive(.transport(.incomingRead(key.peer, .init(30))), context: ledgerContext(seconds)))
+            let write = try ExchangeFrame(phase: frame.phase, token: first.start.peerToken, nonce: frame.nonce,
+                priorNonce: approach == .secondExchange ? first.exchangeNonce : nil)
+            output = core.receive(.transport(.incomingWrite(key.peer, .init(31), write.encoded())), context: ledgerContext(seconds))
+        } else {
+            var ready = core.receive(.wakeUp, context: ledgerContext(seconds))
+            if approach == .secondExchange {
+                XCTAssertTrue(commands(ready).contains(.connect(key.peer)))
+                ready = core.receive(.transport(.connected(key)), context: ledgerContext(seconds))
+            }
+            let read = try readID(ready)
+            let frame = try ExchangeFrame(phase: approach == .heldConnection ? .heldConnectionCheckpoint : .reconnectEvidence,
+                token: first.start.peerToken,
+                nonce: approach == .heldConnection ? first.exchangeNonce : EncounterSamples.nonce(seed: 2))
+            let write = core.receive(.transport(.frameRead(key.peer, read, frame.encoded())), context: ledgerContext(seconds))
+            let request = try XCTUnwrap(commands(write).compactMap { if case .write(_, let id, _) = $0 { id } else { nil } }.first)
+            output = core.receive(.transport(.writeAcknowledged(key.peer, request)), context: ledgerContext(seconds))
+        }
+        let (id, receipt) = try save(output)
+        XCTAssertTrue(receipt.hasQualifyingAmbientEvidence)
+        XCTAssertTrue(ended(core.receive(.queueResult(id, success: true), context: ledgerContext(savedAt)), .evidenceReached))
+        _ = core.receive(.transport(.disconnected(key)), context: ledgerContext(savedAt))
+    }
+
+    private func reachEvidence(_ core: inout EncounterEngineCore, role: ExchangeRole,
+                               approach: PresenceApproach) throws {
+        let first = try role == .central ? completeCentral(&core) : completePeripheral(&core)
+        if approach == .secondExchange {
+            _ = core.receive(.transport(.disconnected(.init(peer: peer(), role: role))), context: ledgerContext(0))
+        }
+        try finishEvidence(&core, first: first, approach: approach)
+    }
+
+    func testCentralEvidencePausesNewOutgoingAttemptsUntilExactly15MinutesAfterEnd() throws {
+        for approach in [PresenceApproach.heldConnection, .secondExchange] {
+            var core = started(approach: approach)
+            try reachEvidence(&core, role: .central, approach: approach)
+            let early = core.receive(.transport(.peerObserved(peer())), context: ledgerContext(133))
+            XCTAssertFalse(commands(early).contains(.connect(peer())))
+            let pending = core.receive(.transport(.peerObserved(peer())), context: ledgerContext(1022))
+            XCTAssertFalse(commands(pending).contains(.connect(peer())))
+            XCTAssertEqual(pending.wakeUpDeadline, 1023)
+            let expired = core.receive(.wakeUp, context: ledgerContext(1023))
+            XCTAssertEqual(commands(expired), [.connect(peer())])
+            XCTAssertGreaterThan(try XCTUnwrap(expired.wakeUpDeadline), 1023)
+        }
+    }
+
+    func testPeripheralEvidencePausesOutgoingAttemptsToTheSameHandleUntilExactly15Minutes() throws {
+        for approach in [PresenceApproach.heldConnection, .secondExchange] {
+            var core = started(approach: approach)
+            try reachEvidence(&core, role: .peripheral, approach: approach)
+            XCTAssertFalse(commands(core.receive(.transport(.peerObserved(peer())), context: ledgerContext(133))).contains(.connect(peer())))
+            let pending = core.receive(.transport(.peerObserved(peer())), context: ledgerContext(1022))
+            XCTAssertFalse(commands(pending).contains(.connect(peer())))
+            XCTAssertEqual(pending.wakeUpDeadline, 1023)
+            XCTAssertEqual(commands(core.receive(.wakeUp, context: ledgerContext(1023))), [.connect(peer())])
+        }
+    }
+
+    func testEvidencePauseExpiryDoesNotDialAStalePendingPeer() throws {
+        var core = started()
+        try reachEvidence(&core, role: .central, approach: .heldConnection)
+        _ = core.receive(.transport(.peerObserved(peer())), context: ledgerContext(133))
+        XCTAssertFalse(commands(core.receive(.wakeUp, context: ledgerContext(1023))).contains(.connect(peer())))
+        XCTAssertEqual(commands(core.receive(.transport(.peerObserved(peer())), context: ledgerContext(1023))), [.connect(peer())])
+    }
+
+    func testResetClearsEvidencePauseForEitherRole() throws {
+        for role in [ExchangeRole.central, .peripheral] {
+            var core = started()
+            try reachEvidence(&core, role: role, approach: .heldConnection)
+            _ = core.receive(.reset, context: ledgerContext(124))
+            _ = core.receive(.start, context: ledgerContext(125))
+            XCTAssertEqual(commands(core.receive(.transport(.peerObserved(peer())), context: ledgerContext(125))), [.connect(peer())])
+        }
+    }
+
+    func testStopThenStartKeepsEvidencePauseForEitherRole() throws {
+        for role in [ExchangeRole.central, .peripheral] {
+            var core = started()
+            try reachEvidence(&core, role: role, approach: .heldConnection)
+            _ = core.receive(.stop, context: ledgerContext(124))
+            _ = core.receive(.start, context: ledgerContext(125))
+            XCTAssertFalse(commands(core.receive(.transport(.peerObserved(peer())), context: ledgerContext(125))).contains(.connect(peer())))
+            let pending = core.receive(.transport(.peerObserved(peer())), context: ledgerContext(1022))
+            XCTAssertEqual(pending.wakeUpDeadline, 1023)
+            XCTAssertEqual(commands(core.receive(.wakeUp, context: ledgerContext(1023))), [.connect(peer())])
+        }
+    }
+
+    func testEvidencePauseTableDropsOldestAbove256() throws {
+        var core = started(approach: .secondExchange)
+        var first: [EncounterReceipt] = []
+        for index in 1...257 {
+            first.append(try completePeripheral(&core, peer: peer(index)))
+            _ = core.receive(.transport(.disconnected(.init(peer: peer(index), role: .peripheral))), context: ledgerContext(0))
+        }
+        for index in 1...257 {
+            try finishEvidence(&core, first: first[index - 1], approach: .secondExchange,
+                               peer: peer(index), savedAt: 120)
+        }
+        for index in [2, 257] {
+            XCTAssertFalse(commands(core.receive(.transport(.peerObserved(peer(index))), context: ledgerContext(121))).contains(.connect(peer(index))))
+        }
+        XCTAssertEqual(commands(core.receive(.transport(.peerObserved(peer(1))), context: ledgerContext(121))), [.connect(peer(1))])
+    }
+
+    func testExistingCentralAttemptCompletesDespitePeripheralEvidencePausingTheSameHandle() throws {
+        for approach in [PresenceApproach.heldConnection, .secondExchange] {
+            var core = started(approach: approach)
+            let peripheral = try completePeripheral(&core)
+            if approach == .secondExchange {
+                _ = core.receive(.transport(.disconnected(.init(peer: peer(), role: .peripheral))), context: ledgerContext(0))
+            }
+            let central = try completeCentral(&core, seconds: 1)
+            if approach == .secondExchange {
+                _ = core.receive(.transport(.disconnected(.init(peer: peer(), role: .central))), context: ledgerContext(1))
+            }
+            try finishEvidence(&core, first: peripheral, approach: approach, savedAt: 120)
+            try finishEvidence(&core, first: central, approach: approach, seconds: 121, savedAt: 121)
+            XCTAssertFalse(commands(core.receive(.transport(.peerObserved(peer())), context: ledgerContext(131))).contains(.connect(peer())))
+            let renewed = core.receive(.transport(.peerObserved(peer())), context: ledgerContext(1020))
+            XCTAssertFalse(commands(renewed).contains(.connect(peer())))
+            XCTAssertEqual(renewed.wakeUpDeadline, 1021)
+            XCTAssertEqual(commands(core.receive(.wakeUp, context: ledgerContext(1021))), [.connect(peer())])
+        }
     }
 
     func testEveryRetryableCentralEndRetriesOnceWithoutAnotherObservation() throws {

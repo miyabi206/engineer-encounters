@@ -21,6 +21,7 @@ final class ExchangeFrameTests: XCTestCase {
         XCTAssertEqual(EncounterProtocol.operationTimeout, 5)
         XCTAssertEqual(EncounterProtocol.activeConnectionLimit, 4)
         XCTAssertEqual(EncounterProtocol.duplicateAttemptBackoff, 10)
+        XCTAssertEqual(EncounterProtocol.evidencePauseDuration, 900)
     }
 
     func testEveryValidLayoutAgainstIndependentWireBytes() throws {
