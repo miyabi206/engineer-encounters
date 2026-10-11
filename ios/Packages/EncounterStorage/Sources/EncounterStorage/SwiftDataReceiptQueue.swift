@@ -35,6 +35,7 @@ public enum ReceiptStorageError: Error, Equatable, Sendable {
     case encodingFailed
     case saveFailed
     case sequenceExhausted
+    case queueFull
 }
 
 /// Internal fault seam; hooks run synchronously on the queue's model executor.
@@ -44,8 +45,8 @@ struct ReceiptQueueWriteHooks: Sendable {
 }
 
 /// Serializes saved receipt writes and retains only identity/expiry after termination.
-/// Unlike the ephemeral queue, expired tombstones are deleted by removeExpired;
-/// identity reuse is permitted after that deletion. Unseen acknowledgements live for 48 hours.
+/// Expired rows are deleted by removeExpired and enqueue. Tombstones are also
+/// bounded by capacity, evicting the earliest expiry first. Unseen acknowledgements live for 48 hours.
 /// One process must open only one queue instance per store directory.
 public actor SwiftDataReceiptQueue: ModelActor, ReceiptQueue {
     public nonisolated let modelContainer: ModelContainer
@@ -53,11 +54,14 @@ public actor SwiftDataReceiptQueue: ModelActor, ReceiptQueue {
     private let directory: URL?
     private let storeURL: URL?
     private let now: @Sendable () -> Date
+    private let receiptLimit: Int
+    private let tombstoneLimit: Int
     private var writeHooks = ReceiptQueueWriteHooks()
 
     // Only the detached factories call this initializer, so SwiftData binds the
     // context and its serial executor to a background queue rather than the main queue.
-    private init(directory: URL?, now: @escaping @Sendable () -> Date) throws {
+    private init(directory: URL?, now: @escaping @Sendable () -> Date,
+                 receiptLimit: Int, tombstoneLimit: Int) throws {
         let schema = Schema([StoredReceipt.self, TerminalReceiptIdentity.self])
         let storeURL = directory?.appendingPathComponent("receipts.store")
         let container: ModelContainer
@@ -90,18 +94,23 @@ public actor SwiftDataReceiptQueue: ModelActor, ReceiptQueue {
         self.directory = directory
         self.storeURL = storeURL
         self.now = now
+        self.receiptLimit = max(0, min(receiptLimit, 4096))
+        self.tombstoneLimit = max(0, min(tombstoneLimit, 4096))
     }
 
     /// Creates an isolated ephemeral store off the main thread.
-    public static func inMemory(now: @escaping @Sendable () -> Date = { Date() }) async throws -> SwiftDataReceiptQueue {
+    public static func inMemory(now: @escaping @Sendable () -> Date = { Date() },
+                                receiptLimit: Int = 4096, tombstoneLimit: Int = 4096) async throws -> SwiftDataReceiptQueue {
         try await Task.detached {
-            try SwiftDataReceiptQueue(directory: nil, now: now)
+            try SwiftDataReceiptQueue(directory: nil, now: now,
+                                      receiptLimit: receiptLimit, tombstoneLimit: tombstoneLimit)
         }.value
     }
 
     /// Opens a protected, backup-excluded local store off the main thread.
     public static func fileBacked(directory: URL? = nil,
-                                  now: @escaping @Sendable () -> Date = { Date() }) async throws -> SwiftDataReceiptQueue {
+                                  now: @escaping @Sendable () -> Date = { Date() },
+                                  receiptLimit: Int = 4096, tombstoneLimit: Int = 4096) async throws -> SwiftDataReceiptQueue {
         try await Task.detached {
             do {
                 let location: URL
@@ -112,7 +121,8 @@ public actor SwiftDataReceiptQueue: ModelActor, ReceiptQueue {
                                                            appropriateFor: nil, create: true)
                         .appendingPathComponent("EncounterStorage", isDirectory: true)
                 }
-                return try SwiftDataReceiptQueue(directory: location, now: now)
+                return try SwiftDataReceiptQueue(directory: location, now: now,
+                                                 receiptLimit: receiptLimit, tombstoneLimit: tombstoneLimit)
             } catch {
                 throw ReceiptStorageError.unavailable
             }
@@ -154,7 +164,11 @@ public actor SwiftDataReceiptQueue: ModelActor, ReceiptQueue {
     }
 
     private func enqueueIsolated(_ receipt: EncounterReceipt) throws {
+        try removeExpiredIsolated(asOf: now())
         guard try stored(receipt.id) == nil, try terminal(receipt.id) == nil else { return }
+        guard try fetch(FetchDescriptor<StoredReceipt>()).count < receiptLimit else {
+            throw ReceiptStorageError.queueFull
+        }
         var descriptor = FetchDescriptor<StoredReceipt>(sortBy: [SortDescriptor(\.sequence, order: .reverse)])
         descriptor.fetchLimit = 1
         let last = try fetch(descriptor).first?.sequence ?? -1
@@ -166,7 +180,9 @@ public actor SwiftDataReceiptQueue: ModelActor, ReceiptQueue {
     }
 
     private func updateIsolated(_ receipt: EncounterReceipt) throws {
-        guard let row = try stored(receipt.id) else { throw ReceiptQueueError.missingIdentity(receipt.id) }
+        guard let row = try stored(receipt.id), row.expiry > now() else {
+            throw ReceiptQueueError.missingIdentity(receipt.id)
+        }
         let original = try decode(row)
         guard original.start == receipt.start, original.protocolVersion == receipt.protocolVersion,
               original.role == receipt.role, original.exchangeNonce == receipt.exchangeNonce,
@@ -178,10 +194,12 @@ public actor SwiftDataReceiptQueue: ModelActor, ReceiptQueue {
     }
 
     private func pendingIsolated() throws -> [EncounterReceipt] {
-        let rows = try fetch(FetchDescriptor<StoredReceipt>(sortBy: [SortDescriptor(\.sequence)]))
+        let time = now()
+        let rows = try fetch(FetchDescriptor<StoredReceipt>(predicate: #Predicate { $0.expiry > time },
+                                                           sortBy: [SortDescriptor(\.sequence)]))
         var receipts: [EncounterReceipt] = []
         for row in rows {
-            if let receipt = try? decode(row) {
+            if let receipt = try? decode(row), receipt.expiresAt > time {
                 receipts.append(receipt)
             }
         }
@@ -191,17 +209,25 @@ public actor SwiftDataReceiptQueue: ModelActor, ReceiptQueue {
 
     private func acknowledgeIsolated(_ identity: UUID) throws {
         guard try terminal(identity) == nil else { return }
-        let row = try stored(identity)
-        let expiry = row?.expiry ?? now().addingTimeInterval(EncounterProtocol.receiptLifetime)
+        let time = now()
+        let storedRow = try stored(identity)
+        let row = storedRow.flatMap { $0.expiry > time ? $0 : nil }
+        let expiry = row?.expiry ?? time.addingTimeInterval(EncounterProtocol.receiptLifetime)
+        let tombstone = TerminalReceiptIdentity(identity: identity, expiry: expiry)
+        let tombstones = (try fetch(FetchDescriptor<TerminalReceiptIdentity>()) + [tombstone])
+            .sorted { $0.expiry < $1.expiry }
+        let evicted = tombstones.prefix(max(0, tombstones.count - tombstoneLimit))
         try write {
             if let row { modelContext.delete(row) }
-            modelContext.insert(TerminalReceiptIdentity(identity: identity, expiry: expiry))
+            if !evicted.contains(where: { $0 === tombstone }) { modelContext.insert(tombstone) }
+            for old in evicted where old !== tombstone { modelContext.delete(old) }
         }
     }
 
     private func removeExpiredIsolated(asOf time: Date) throws {
         let receipts = try fetch(FetchDescriptor<StoredReceipt>(predicate: #Predicate { $0.expiry <= time }))
         let tombstones = try fetch(FetchDescriptor<TerminalReceiptIdentity>(predicate: #Predicate { $0.expiry <= time }))
+        guard !receipts.isEmpty || !tombstones.isEmpty else { return }
         // The receipt deadline has already passed, so its identity needs no further retention.
         try write {
             for row in receipts { modelContext.delete(row) }
