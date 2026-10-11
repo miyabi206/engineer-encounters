@@ -147,6 +147,87 @@ final class ServerTokenIssuerTests: XCTestCase {
         }
     }
 
+    func testUnalignedStoredCoverageOmitsCoveredUntil() async throws {
+        for offset in [-1.0, -0.5] {
+            let stored = try EncounterSamples.batch(start: testNow.addingTimeInterval(offset), count: 1)
+            let store = InMemoryTokenBatchStore(batch: stored)
+            let transport = StubTransport([.response(try batchResponse(TokenBatch(windows: [])))])
+            let issuer = ServerTokenIssuer(client: try serviceClient(transport), store: store)
+            try await issuer.replenish(at: testNow)
+            let requests = await transport.recorded()
+            XCTAssertEqual(try parameters(requests[0].httpBody), [:])
+            let saved = try await store.load()
+            XCTAssertEqual(saved, stored)
+        }
+    }
+
+    func testMergeReloadsStorageAfterTheNetworkCall() async throws {
+        let original = try EncounterSamples.batch(count: 1)
+        let replacement = try EncounterSamples.batch(start: testNow.addingTimeInterval(900), count: 2)
+        let returned = try EncounterSamples.batch(count: 4)
+        let store = InMemoryTokenBatchStore(batch: original)
+        let transport = StubTransport([.held(try batchResponse(returned))])
+        let issuer = ServerTokenIssuer(client: try serviceClient(transport), store: store)
+        let call = Task { try await issuer.replenish(at: testNow) }
+        await transport.waitForRequests(1)
+        try await store.save(replacement)
+        await transport.release()
+        try await call.value
+        let saved = try await store.load()
+        XCTAssertEqual(saved?.windows, [returned.windows[0]] + replacement.windows + [returned.windows[3]])
+    }
+
+    func testInvalidateDiscardsOldResultsAndAllowsANewIssuance() async throws {
+        let original = try EncounterSamples.batch(count: 1)
+        let stale = try EncounterSamples.batch(count: 4)
+        let replacement = try EncounterSamples.batch(start: testNow.addingTimeInterval(900), count: 4)
+        let store = InMemoryTokenBatchStore(batch: original)
+        let transport = StubTransport([.held(try batchResponse(stale)), .response(try batchResponse(replacement))])
+        let issuer = ServerTokenIssuer(client: try serviceClient(transport), store: store)
+        let oldCall = Task { try await issuer.replenish(at: testNow) }
+        await transport.waitForRequests(1)
+        await issuer.invalidate()
+        try await store.clear()
+        try await issuer.replenish(at: testNow)
+        await transport.release()
+        try await oldCall.value
+        let saved = try await store.load()
+        XCTAssertEqual(saved, replacement)
+        let requests = await transport.recorded()
+        XCTAssertEqual(requests.count, 2)
+    }
+
+    func testInvalidationWhileReloadIsSuspendedDoesNotSave() async throws {
+        let returned = try EncounterSamples.batch(count: 4)
+        let store = ReloadGateBatchStore()
+        let issuer = ServerTokenIssuer(client: try serviceClient(StubTransport([.response(try batchResponse(returned))])), store: store)
+        let call = Task { try await issuer.replenish(at: testNow) }
+        await store.waitForReload()
+        await issuer.invalidate()
+        await store.release()
+        try await call.value
+        let saves = await store.saveCount()
+        XCTAssertEqual(saves, 0)
+    }
+
+    func testInvalidationDrainsAnAlreadyStartedSaveBeforeCallerClearsStorage() async throws {
+        let returned = try EncounterSamples.batch(count: 4)
+        let store = SaveGateBatchStore()
+        let issuer = ServerTokenIssuer(client: try serviceClient(StubTransport([.response(try batchResponse(returned))])), store: store)
+        let call = Task { try await issuer.replenish(at: testNow) }
+        await store.waitForSave()
+        let invalidating = Task {
+            await issuer.invalidate()
+            try await store.clear()
+        }
+        for _ in 0..<20 { await Task.yield() }
+        await store.release()
+        try await invalidating.value
+        try await call.value
+        let saved = try await store.load()
+        XCTAssertNil(saved)
+    }
+
     private func batchResponse(_ batch: TokenBatch) throws -> HTTPResponse {
         HTTPResponse(data: try JSONEncoder().encode(TokenBatchTransfer(batchID: testUserID, batch: batch)), statusCode: 200)
     }
@@ -154,6 +235,53 @@ final class ServerTokenIssuerTests: XCTestCase {
     private func parameters(_ data: Data?) throws -> [String: Int] {
         try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(data)) as? [String: Int])
     }
+}
+
+private actor ReloadGateBatchStore: TokenBatchStore {
+    private var loads = 0
+    private var saves = 0
+    private var gate: CheckedContinuation<Void, Never>?
+    private var observer: CheckedContinuation<Void, Never>?
+    func load() async throws -> TokenBatch? {
+        loads += 1
+        if loads == 2 {
+            await withCheckedContinuation {
+                gate = $0
+                observer?.resume()
+                observer = nil
+            }
+        }
+        return nil
+    }
+    func save(_ batch: TokenBatch) async throws { saves += 1 }
+    func clear() async throws {}
+    func waitForReload() async {
+        if gate != nil { return }
+        await withCheckedContinuation { observer = $0 }
+    }
+    func release() { gate?.resume(); gate = nil }
+    func saveCount() -> Int { saves }
+}
+
+private actor SaveGateBatchStore: TokenBatchStore {
+    private var batch: TokenBatch?
+    private var gate: CheckedContinuation<Void, Never>?
+    private var observer: CheckedContinuation<Void, Never>?
+    func load() async throws -> TokenBatch? { batch }
+    func save(_ batch: TokenBatch) async throws {
+        await withCheckedContinuation {
+            gate = $0
+            observer?.resume()
+            observer = nil
+        }
+        self.batch = batch
+    }
+    func clear() async throws { batch = nil }
+    func waitForSave() async {
+        if gate != nil { return }
+        await withCheckedContinuation { observer = $0 }
+    }
+    func release() { gate?.resume(); gate = nil }
 }
 
 private actor FailingBatchStore: TokenBatchStore {

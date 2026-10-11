@@ -50,7 +50,7 @@ final class SessionTests: XCTestCase {
         XCTAssertEqual(request.url?.absoluteString, "https://backend.example/base/auth/v1/token?grant_type=refresh_token")
         XCTAssertEqual(request.httpMethod, "POST")
         XCTAssertEqual(request.value(forHTTPHeaderField: "apikey"), "public-key")
-        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer old-access")
+        XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
         XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "application/json")
         let body = try JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: String]
@@ -106,7 +106,7 @@ final class SessionTests: XCTestCase {
     }
 
     func testInvalidRefreshClearsStoredSession() async throws {
-        let transport = StubTransport([.response(jsonResponse(#"{"message":"private credential"}"#, status: 400))])
+        let transport = StubTransport([.response(jsonResponse(#"{"error":"invalid_grant"}"#, status: 400))])
         let store = InMemorySessionStore(session: try testSession(expiresIn: 0))
         let manager = testManager(transport: transport, store: store)
         do { _ = try await manager.session(); XCTFail("Invalid refresh must fail") }
@@ -146,5 +146,177 @@ final class SessionTests: XCTestCase {
             XCTAssertTrue(String(reflecting: value).contains("<redacted>"))
             XCTAssertEqual(Mirror(reflecting: value).children.count, 0)
         }
+    }
+
+    func testOnlyExplicitDeadRefreshCredentialsClearTheSession() async throws {
+        let deadCodes = ["refresh_token_not_found", "refresh_token_already_used", "session_not_found",
+                         "session_expired", "user_not_found", "user_banned"]
+        for status in [400, 401] {
+            let bodies = [#"{"error":"invalid_grant"}"#, #"{"error":"invalid_grant","error_code":7}"#,
+                          #"{"error":7,"error_code":"session_expired"}"#]
+                + deadCodes.map { "{\"error_code\":\"\($0)\"}" }
+            for body in bodies {
+                let store = InMemorySessionStore(session: try testSession())
+                let manager = testManager(transport: StubTransport([.response(jsonResponse(body, status: status))]), store: store)
+                do { _ = try await manager.refresh(); XCTFail("Dead refresh must fail") }
+                catch { XCTAssertEqual(error as? BackendError, .notAuthenticated) }
+                let saved = try await store.load()
+                XCTAssertNil(saved)
+            }
+        }
+    }
+
+    func testOtherAuthFailuresKeepTheSession() async throws {
+        let original = try testSession()
+        let cases = [
+            (400, "{}"), (401, "malformed"), (400, #"{"error":"invalid_request"}"#),
+            (401, #"{"error_code":"unknown"}"#), (400, #"{"message":"invalid_grant"}"#),
+            (403, #"{"error":"invalid_grant"}"#), (500, #"{"error_code":"session_expired"}"#)
+        ]
+        for (status, body) in cases {
+            let store = InMemorySessionStore(session: original)
+            let manager = testManager(transport: StubTransport([.response(jsonResponse(body, status: status))]), store: store)
+            do { _ = try await manager.refresh(); XCTFail("Auth failure must fail") }
+            catch { XCTAssertEqual(error as? BackendError, .httpFailure(statusCode: status)) }
+            let saved = try await store.load()
+            let current = try await manager.session()
+            XCTAssertEqual(saved, original)
+            XCTAssertEqual(current, original)
+        }
+        for (step, expected) in [(StubTransport.Step.failure, BackendError.transportFailure),
+                                 (.response(jsonResponse("{}")), .invalidResponse)] {
+            let store = InMemorySessionStore(session: original)
+            let manager = testManager(transport: StubTransport([step]), store: store)
+            do { _ = try await manager.refresh(); XCTFail("Refresh must fail") }
+            catch { XCTAssertEqual(error as? BackendError, expected) }
+            let saved = try await store.load()
+            XCTAssertEqual(saved, original)
+        }
+    }
+
+    func testFailedEstablishPreservesLoadedAndUnloadedPreviousSession() async throws {
+        let original = try testSession()
+        let auth = try AuthRequest(path: "provider/session", body: Data("{}".utf8))
+        for preload in [false, true] {
+            for step in [StubTransport.Step.failure, .response(jsonResponse("{}")),
+                         .response(jsonResponse(#"{"error":"invalid_grant"}"#, status: 400)),
+                         .response(jsonResponse("{}", status: 401))] {
+                let store = InMemorySessionStore(session: original)
+                let manager = testManager(transport: StubTransport([step]), store: store)
+                if preload { _ = try await manager.session() }
+                do { _ = try await manager.establish(using: auth); XCTFail("Establish must fail") }
+                catch { XCTAssertNotNil(error as? BackendError) }
+                let saved = try await store.load()
+                let current = try await manager.session()
+                XCTAssertEqual(saved, original)
+                XCTAssertEqual(current, original)
+            }
+        }
+    }
+
+    func testEstablishInvalidatesAnOlderRefreshEvenWhenEstablishFails() async throws {
+        let original = try testSession()
+        let otherID = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+        let auth = try AuthRequest(path: "provider/session", body: Data("{}".utf8))
+        for succeeds in [false, true] {
+            for oldAnswer in [authResponse(), jsonResponse(#"{"error":"invalid_grant"}"#, status: 400)] {
+                let answer = succeeds ? authResponse(access: "replacement", userID: otherID) : jsonResponse("{}", status: 400)
+                let transport = StubTransport([.held(oldAnswer), .response(answer)])
+                let store = InMemorySessionStore(session: original)
+                let manager = testManager(transport: transport, store: store)
+                let refreshing = Task { try await manager.refresh() }
+                await transport.waitForRequests(1)
+                var expected = original
+                do { expected = try await manager.establish(using: auth); XCTAssertTrue(succeeds) }
+                catch { XCTAssertFalse(succeeds); XCTAssertEqual(error as? BackendError, .httpFailure(statusCode: 400)) }
+                await transport.release()
+                do { _ = try await refreshing.value; XCTFail("Old refresh must be discarded") }
+                catch { XCTAssertEqual(error as? BackendError, .notAuthenticated) }
+                let saved = try await store.load()
+                let current = try await manager.session()
+                XCTAssertEqual(saved, expected)
+                XCTAssertEqual(current, expected)
+            }
+        }
+    }
+
+    func testAuthSessionsRemainUsableWhenSavingFails() async throws {
+        for establishes in [false, true] {
+            let store = ThrowingSessionStore(session: try testSession(), failure: .save)
+            let transport = StubTransport([.response(authResponse())])
+            let manager = testManager(transport: transport, store: store)
+            let obtained: BackendSession
+            if establishes {
+                obtained = try await manager.establish(using: AuthRequest(path: "provider/session", body: Data("{}".utf8)))
+            } else { obtained = try await manager.refresh() }
+            let current = try await manager.session()
+            XCTAssertEqual(current, obtained)
+            XCTAssertEqual(obtained.accessCredential, "new-access")
+            let requests = await transport.recorded()
+            XCTAssertEqual(requests.count, 1)
+        }
+    }
+
+    func testStoreLoadAndClearFailuresAreSanitizedAndClearStillErasesMemory() async throws {
+        let loadStore = ThrowingSessionStore(session: try testSession(), failure: .load)
+        let loadManager = testManager(transport: StubTransport([]), store: loadStore)
+        do { _ = try await loadManager.session(); XCTFail("Load must fail") }
+        catch { XCTAssertEqual(error as? BackendError, .storageFailure) }
+        // Establish does not depend on successfully loading the previous session.
+        let establishManager = testManager(transport: StubTransport([.response(authResponse())]), store: loadStore)
+        _ = try await establishManager.establish(using: AuthRequest(path: "provider/session", body: Data("{}".utf8)))
+        let current = try await establishManager.session()
+        XCTAssertEqual(current.accessCredential, "new-access")
+        for invalidRefresh in [false, true] {
+            let store = ThrowingSessionStore(session: try testSession(), failure: .clear)
+            let transport = StubTransport([.response(jsonResponse(#"{"error":"invalid_grant"}"#, status: 401))])
+            let manager = testManager(transport: transport, store: store)
+            _ = try await manager.session()
+            do {
+                if invalidRefresh { _ = try await manager.refresh() } else { try await manager.clear() }
+                XCTFail("Clear must fail")
+            } catch { XCTAssertEqual(error as? BackendError, .storageFailure) }
+            do { _ = try await manager.session(); XCTFail("Cleared memory must stay empty") }
+            catch { XCTAssertEqual(error as? BackendError, .notAuthenticated) }
+        }
+    }
+
+    func testRelativeExpiryTakesPrecedenceOverServerAbsoluteExpiry() async throws {
+        let auth = try AuthRequest(path: "provider/session", body: Data("{}".utf8))
+        for absolute in [1_700_000_000, 1_900_000_000] {
+            let response = jsonResponse("""
+            {"access_token":"access","refresh_token":"refresh","token_type":"bearer",
+             "expires_in":1234,"expires_at":\(absolute),"user":{"id":"\(testUserID.uuidString)"}}
+            """)
+            let manager = testManager(transport: StubTransport([.response(response)]), store: InMemorySessionStore())
+            let session = try await manager.establish(using: auth)
+            XCTAssertEqual(session.expiresAt, testNow.addingTimeInterval(1234))
+        }
+        let response = jsonResponse("""
+        {"access_token":"access","refresh_token":"refresh","token_type":"bearer",
+         "expires_in":0,"expires_at":1900000000,"user":{"id":"\(testUserID.uuidString)"}}
+        """)
+        let manager = testManager(transport: StubTransport([.response(response)]), store: InMemorySessionStore())
+        do { _ = try await manager.establish(using: auth); XCTFail("Invalid relative expiry must fail") }
+        catch { XCTAssertEqual(error as? BackendError, .invalidResponse) }
+    }
+}
+
+private actor ThrowingSessionStore: SessionStore {
+    enum Operation { case load, save, clear }
+    private var session: BackendSession?
+    private let failure: Operation
+    init(session: BackendSession, failure: Operation) { self.session = session; self.failure = failure }
+    func load() async throws -> BackendSession? {
+        if failure == .load { throw TestFailure.sensitive("private-store-error") }
+        return session
+    }
+    func save(_ session: BackendSession) async throws {
+        if failure == .save { throw TestFailure.sensitive("private-store-error") }
+        self.session = session
+    }
+    func clear() async throws {
+        if failure == .clear { throw TestFailure.sensitive("private-store-error") }
+        session = nil
     }
 }

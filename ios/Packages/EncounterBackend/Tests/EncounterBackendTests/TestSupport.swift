@@ -58,10 +58,11 @@ func jsonResponse(_ json: String, status: Int = 200) -> HTTPResponse {
     HTTPResponse(data: Data(json.utf8), statusCode: status)
 }
 
-func authResponse(access: String = "new-access", refresh: String = "new-refresh", expiresIn: Int = 3600) -> HTTPResponse {
+func authResponse(access: String = "new-access", refresh: String = "new-refresh", expiresIn: Int = 3600,
+                  userID: UUID = testUserID) -> HTTPResponse {
     jsonResponse("""
     {"access_token":"\(access)","refresh_token":"\(refresh)","token_type":"bearer",
-     "expires_in":\(expiresIn),"user":{"id":"\(testUserID.uuidString)"}}
+     "expires_in":\(expiresIn),"user":{"id":"\(userID.uuidString)"}}
     """)
 }
 

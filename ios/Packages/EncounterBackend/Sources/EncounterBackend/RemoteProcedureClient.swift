@@ -50,9 +50,16 @@ public actor RemoteProcedureClient: CustomStringConvertible, CustomDebugStringCo
             catch is CancellationError { throw CancellationError() }
             catch { throw BackendError.transportFailure }
             if (200..<300).contains(response.statusCode) { return response }
-            let error = BackendError.response(response)
+            let error: BackendError
+            switch response.statusCode {
+            case 408, 500..<600: error = .httpFailure(statusCode: response.statusCode)
+            case 429: error = .rateLimited
+            default: error = BackendError.response(response)
+            }
             if attempt == 0, response.statusCode == 401 || error == .notAuthenticated {
-                session = try await sessions.refresh(after: session)
+                let refreshed = try await sessions.refresh(after: session)
+                guard refreshed.userID == session.userID else { throw BackendError.notAuthenticated }
+                session = refreshed
             } else { throw error }
         }
         throw BackendError.notAuthenticated

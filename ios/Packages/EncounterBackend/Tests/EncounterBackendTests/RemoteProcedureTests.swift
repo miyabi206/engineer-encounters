@@ -51,6 +51,33 @@ final class RemoteProcedureTests: XCTestCase {
         XCTAssertEqual(requests.count, 3)
     }
 
+    func testUnauthorizedIsNotRetriedWithAnotherAccountsRefreshedSession() async throws {
+        let otherID = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+        let transport = StubTransport([
+            .response(jsonResponse("{}", status: 401)), .response(authResponse(userID: otherID))
+        ])
+        let client = try makeClient(transport)
+        do { try await client.call("procedure", parameters: RPCParameters(display_name: "Name")); XCTFail("Must fail") }
+        catch { XCTAssertEqual(error as? BackendError, .notAuthenticated) }
+        let requests = await transport.recorded()
+        XCTAssertEqual(requests.count, 2)
+    }
+
+    func testUnauthorizedCannotReplayUnderAnInterleavedEstablishedAccount() async throws {
+        let otherID = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+        let transport = StubTransport([.held(jsonResponse("{}", status: 401)), .response(authResponse(userID: otherID))])
+        let manager = testManager(transport: transport, store: InMemorySessionStore(session: try testSession()))
+        let client = RemoteProcedureClient(configuration: testConfiguration(), transport: transport, sessions: manager)
+        let rpc = Task { try await client.call("procedure", parameters: RPCParameters(display_name: "Name")) }
+        await transport.waitForRequests(1)
+        _ = try await manager.establish(using: AuthRequest(path: "provider/session", body: Data("{}".utf8)))
+        await transport.release()
+        do { try await rpc.value; XCTFail("Must not retry under another account") }
+        catch { XCTAssertEqual(error as? BackendError, .notAuthenticated) }
+        let requests = await transport.recorded()
+        XCTAssertEqual(requests.count, 2)
+    }
+
     func testEveryContractCodeAndFieldDetails() async throws {
         let mappings: [(String, BackendError)] = [
             ("not_authenticated", .notAuthenticated), ("account_not_ready", .accountNotReady),

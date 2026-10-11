@@ -34,7 +34,10 @@ public actor ReceiptUploader {
     private let client: RemoteProcedureClient
     private let queue: any ReceiptQueue
     private var schedule: ReceiptRetrySchedule
-    private var inFlight: Task<ReceiptUploadOutcome, any Error>?
+    private typealias Flight = (id: UUID, task: Task<ReceiptUploadOutcome, any Error>)
+    private var inFlight: Flight?
+    private var followUp: Flight?
+    private var checkedOrder: [UUID] = []
 
     public init(client: RemoteProcedureClient, queue: any ReceiptQueue,
                 schedule: ReceiptRetrySchedule = ReceiptRetrySchedule()) {
@@ -44,23 +47,55 @@ public actor ReceiptUploader {
     }
 
     public func upload(at now: Date) async throws -> ReceiptUploadOutcome {
-        if let inFlight { return try await inFlight.value }
-        let task = Task { try await self.uploadPending(at: now) }
-        inFlight = task
-        defer { inFlight = nil }
+        if let inFlight {
+            if let followUp { return try await followUp.task.value }
+            let id = UUID()
+            let task = Task {
+                _ = await inFlight.task.result
+                return try await self.performPass(at: now, id: id)
+            }
+            followUp = (id, task)
+            return try await task.value
+        }
+        let id = UUID()
+        let task = Task { try await self.performPass(at: now, id: id) }
+        inFlight = (id, task)
         return try await task.value
     }
 
+    private func performPass(at now: Date, id: UUID) async throws -> ReceiptUploadOutcome {
+        defer {
+            if inFlight?.id == id {
+                inFlight = followUp
+                followUp = nil
+            }
+        }
+        return try await uploadPending(at: now)
+    }
+
     private func uploadPending(at now: Date) async throws -> ReceiptUploadOutcome {
-        let receipts = Array(try await queue.pending().filter { $0.isFinalEvidence && $0.expiresAt > now }.prefix(50))
+        let eligible = try await queue.pending().filter { $0.isFinalEvidence && $0.expiresAt > now }
+        let eligibleIDs = Set(eligible.map(\.id))
+        checkedOrder.removeAll { !eligibleIDs.contains($0) }
+        let ranks = Dictionary(uniqueKeysWithValues: checkedOrder.enumerated().map { ($0.element, $0.offset) })
+        let newReceipts = Array(eligible.filter { $0.uploadStatus == .notYetUploaded }.prefix(50))
+        let candidates = eligible.enumerated().filter { $0.element.uploadStatus == .acceptedAsCandidate }.sorted {
+            let lhs = ranks[$0.element.id] ?? -1
+            let rhs = ranks[$1.element.id] ?? -1
+            return lhs == rhs ? $0.offset < $1.offset : lhs < rhs
+        }.prefix(50 - newReceipts.count).map(\.element)
+        let receipts = newReceipts + candidates
         guard !receipts.isEmpty else {
             schedule.reset()
             return ReceiptUploadOutcome(settledCount: 0, nextAttemptAt: nil, error: nil)
         }
+        let checkedIDs = Set(receipts.map(\.id))
+        checkedOrder.removeAll { checkedIDs.contains($0) }
+        checkedOrder.append(contentsOf: receipts.map(\.id))
         let statuses: [ReceiptStatusTransfer]
         do {
             statuses = try await client.call("submit_receipts", parameters: SubmitReceiptsParameters(receipts: receipts))
-        } catch let error as BackendError where error == .rateLimited || error == .transportFailure {
+        } catch let error as BackendError where Self.isRetryable(error) {
             return ReceiptUploadOutcome(settledCount: 0,
                                         nextAttemptAt: schedule.nextAttempt(after: now, madeProgress: false), error: error)
         }
@@ -85,5 +120,13 @@ public actor ReceiptUploader {
         let next = hasPending ? schedule.nextAttempt(after: now, madeProgress: madeProgress) : nil
         if !hasPending { schedule.reset() }
         return ReceiptUploadOutcome(settledCount: settled, nextAttemptAt: next, error: nil)
+    }
+
+    private static func isRetryable(_ error: BackendError) -> Bool {
+        switch error {
+        case .rateLimited, .transportFailure: return true
+        case .httpFailure(let status): return status == 408 || status == 429 || (500..<600).contains(status)
+        default: return false
+        }
     }
 }

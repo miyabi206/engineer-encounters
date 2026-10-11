@@ -93,14 +93,10 @@ public actor SessionManager: CustomStringConvertible, CustomDebugStringConvertib
         self.now = now
     }
 
-    /// Sends a provider-neutral Auth request and persists the returned session.
+    /// Sends a provider-neutral Auth request and keeps the returned session with best-effort persistence.
     public func establish(using auth: AuthRequest) async throws -> BackendSession {
         invalidate()
         let epoch = generation
-        cached = nil
-        loaded = true
-        try await persist(nil)
-        guard epoch == generation else { throw BackendError.notAuthenticated }
         let session = try await Self.fetch(auth, configuration: configuration, transport: transport, now: now, bearer: nil)
         return try await commit(session, epoch: epoch)
     }
@@ -128,7 +124,7 @@ public actor SessionManager: CustomStringConvertible, CustomDebugStringConvertib
         let id = UUID()
         let task = Task {
             let result = try await Self.fetch(auth, configuration: configuration, transport: transport,
-                                              now: now, bearer: current.accessCredential)
+                                              now: now, bearer: nil, isRefresh: true)
             return try await self.commit(result, epoch: epoch)
         }
         let flight = (id: id, task: task)
@@ -192,10 +188,11 @@ public actor SessionManager: CustomStringConvertible, CustomDebugStringConvertib
 
     private func commit(_ session: BackendSession, epoch: UUID) async throws -> BackendSession {
         guard epoch == generation else { throw BackendError.notAuthenticated }
-        try await persist(session)
-        guard epoch == generation else { throw BackendError.notAuthenticated }
         cached = session
         loaded = true
+        // Auth success remains usable when device persistence is unavailable.
+        try? await persist(session)
+        guard epoch == generation else { throw BackendError.notAuthenticated }
         return session
     }
 
@@ -214,7 +211,7 @@ public actor SessionManager: CustomStringConvertible, CustomDebugStringConvertib
 
     private static func fetch(_ auth: AuthRequest, configuration: BackendConfiguration,
                               transport: any HTTPTransport, now: @Sendable () -> Date,
-                              bearer: String?) async throws -> BackendSession {
+                              bearer: String?, isRefresh: Bool = false) async throws -> BackendSession {
         var components = URLComponents(url: configuration.endpoint("auth/v1/" + auth.path), resolvingAgainstBaseURL: false)!
         if !auth.queryItems.isEmpty { components.queryItems = auth.queryItems }
         guard let url = components.url else { throw BackendError.invalidRequest }
@@ -230,7 +227,24 @@ public actor SessionManager: CustomStringConvertible, CustomDebugStringConvertib
         catch is CancellationError { throw CancellationError() }
         catch { throw BackendError.transportFailure }
         guard (200..<300).contains(response.statusCode) else {
-            if response.statusCode == 400 || response.statusCode == 401 { throw BackendError.notAuthenticated }
+            if isRefresh, response.statusCode == 400 || response.statusCode == 401 {
+                struct Failure: Decodable {
+                    let error: String?
+                    let error_code: String?
+                    enum CodingKeys: String, CodingKey { case error, error_code }
+                    init(from decoder: any Decoder) throws {
+                        let fields = try decoder.container(keyedBy: CodingKeys.self)
+                        error = try? fields.decode(String.self, forKey: .error)
+                        error_code = try? fields.decode(String.self, forKey: .error_code)
+                    }
+                }
+                let deadCodes: Set<String> = ["refresh_token_not_found", "refresh_token_already_used",
+                                              "session_not_found", "session_expired", "user_not_found", "user_banned"]
+                if let failure = try? JSONDecoder().decode(Failure.self, from: response.data),
+                   failure.error == "invalid_grant" || failure.error_code.map(deadCodes.contains) == true {
+                    throw BackendError.notAuthenticated
+                }
+            }
             throw BackendError.httpFailure(statusCode: response.statusCode)
         }
         struct AuthResponse: Decodable {
@@ -246,10 +260,11 @@ public actor SessionManager: CustomStringConvertible, CustomDebugStringConvertib
             let value = try JSONDecoder().decode(AuthResponse.self, from: response.data)
             guard value.token_type.lowercased() == "bearer" else { throw BackendError.invalidResponse }
             let expiry: Date
-            if let seconds = value.expires_at {
-                expiry = try WireSeconds(unixSeconds: seconds).date
-            } else if let seconds = value.expires_in, seconds > 0, seconds < 9_007_199_254_740_992 {
+            if let seconds = value.expires_in {
+                guard seconds > 0, seconds < 9_007_199_254_740_992 else { throw BackendError.invalidResponse }
                 expiry = now().addingTimeInterval(TimeInterval(seconds))
+            } else if let seconds = value.expires_at {
+                expiry = try WireSeconds(unixSeconds: seconds).date
             } else { throw BackendError.invalidResponse }
             guard expiry > now() else { throw BackendError.invalidResponse }
             return try BackendSession(accessCredential: value.access_token, refreshCredential: value.refresh_token,

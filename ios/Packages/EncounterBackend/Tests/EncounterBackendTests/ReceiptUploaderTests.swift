@@ -246,6 +246,108 @@ final class ReceiptUploaderTests: XCTestCase {
         XCTAssertEqual(high.nextAttempt(after: testNow, madeProgress: false), testNow.addingTimeInterval(12))
     }
 
+    func testNewReceiptsLeadHeldCandidatesAndCandidatesRotateByLastCheck() async throws {
+        let queue = InMemoryReceiptQueue(wallTime: { testNow })
+        let candidates = (1...61).map { index in
+            var receipt = finalReceipt(index)
+            receipt.uploadStatus = .acceptedAsCandidate
+            return receipt
+        }
+        for receipt in candidates { try await queue.enqueue(receipt) }
+        let fresh = [finalReceipt(62), finalReceipt(63)]
+        for receipt in fresh { try await queue.enqueue(receipt) }
+        let transport = StubTransport([.response(jsonResponse("[]")), .response(jsonResponse("[]"))])
+        let uploader = try makeUploader(transport, queue: queue)
+        _ = try await uploader.upload(at: testNow)
+        _ = try await uploader.upload(at: testNow)
+        let requests = await transport.recorded()
+        XCTAssertEqual(try receiptIDs(requests[0].httpBody), fresh.map(\.id) + candidates.prefix(48).map(\.id))
+        XCTAssertEqual(try receiptIDs(requests[1].httpBody),
+                       fresh.map(\.id) + candidates.suffix(13).map(\.id) + candidates.prefix(35).map(\.id))
+    }
+
+    func testNewReceiptBatchUsesAllFiftyPlacesBeforeAnyCandidates() async throws {
+        let queue = InMemoryReceiptQueue(wallTime: { testNow })
+        var held = finalReceipt(1)
+        held.uploadStatus = .acceptedAsCandidate
+        try await queue.enqueue(held)
+        let fresh = (2...61).map { finalReceipt($0) }
+        for receipt in fresh { try await queue.enqueue(receipt) }
+        let transport = StubTransport([.response(jsonResponse("[]"))])
+        _ = try await makeUploader(transport, queue: queue).upload(at: testNow)
+        let requests = await transport.recorded()
+        XCTAssertEqual(try receiptIDs(requests[0].httpBody), fresh.prefix(50).map(\.id))
+    }
+
+    func testTimeoutBareRateLimitAndEveryServerErrorKeepQueueAndShareRetrySchedule() async throws {
+        let queue = InMemoryReceiptQueue(wallTime: { testNow })
+        var candidate = finalReceipt(1)
+        candidate.uploadStatus = .acceptedAsCandidate
+        try await queue.enqueue(candidate)
+        try await queue.enqueue(finalReceipt(2))
+        let before = try await queue.pending()
+        let codes = [408, 429] + Array(500..<600)
+        // A misleading error body must not turn a server failure into a refresh.
+        let transport = StubTransport(codes.map {
+            .response(jsonResponse(#"{"message":"not_authenticated"}"#, status: $0))
+        })
+        let uploader = try makeUploader(transport, queue: queue)
+        var schedule = ReceiptRetrySchedule(random: { 0.5 })
+        for code in codes {
+            let outcome = try await uploader.upload(at: testNow)
+            XCTAssertEqual(outcome.error, code == 429 ? .rateLimited : .httpFailure(statusCode: code))
+            XCTAssertEqual(outcome.settledCount, 0)
+            XCTAssertEqual(outcome.nextAttemptAt, schedule.nextAttempt(after: testNow, madeProgress: false))
+            let after = try await queue.pending()
+            XCTAssertEqual(after, before)
+        }
+        let requests = await transport.recorded()
+        XCTAssertEqual(requests.count, codes.count)
+        XCTAssertTrue(requests.allSatisfy { $0.url?.lastPathComponent == "submit_receipts" })
+    }
+
+    func testCallsDuringFlightShareOneFollowUpAndReceiveItsOutcome() async throws {
+        for firstFails in [false, true] {
+            let queue = InMemoryReceiptQueue(wallTime: { testNow })
+            let receipt = finalReceipt(1)
+            try await queue.enqueue(receipt)
+            let initial = firstFails ? jsonResponse("{}", status: 503) : jsonResponse("[]")
+            let transport = StubTransport([
+                .held(initial), .held(try statusResponse([.init(id: receipt.id, status: .resolved)]))
+            ])
+            let uploader = try makeUploader(transport, queue: queue)
+            let first = Task { try await uploader.upload(at: testNow) }
+            await transport.waitForRequests(1)
+            // Newly enqueued evidence must be picked up by the follow-up pass.
+            let added = finalReceipt(2)
+            try await queue.enqueue(added)
+            let followers = (0..<8).map { _ in Task { try await uploader.upload(at: testNow.addingTimeInterval(1)) } }
+            for _ in 0..<20 { await Task.yield() }
+            await transport.release()
+            await transport.waitForRequests(2)
+            let firstOutcome = try await first.value
+            XCTAssertEqual(firstOutcome.settledCount, 0)
+            XCTAssertEqual(firstOutcome.error, firstFails ? .httpFailure(statusCode: 503) : nil)
+            let requests = await transport.recorded()
+            XCTAssertEqual(try receiptIDs(requests[1].httpBody), [receipt.id, added.id])
+            await transport.release()
+            for follower in followers {
+                let outcome = try await follower.value
+                XCTAssertEqual(outcome.settledCount, 1)
+                XCTAssertNil(outcome.error)
+                XCTAssertEqual(outcome.nextAttemptAt, testNow.addingTimeInterval(6))
+            }
+            let finalRequests = await transport.recorded()
+            XCTAssertEqual(finalRequests.count, 2)
+        }
+    }
+
+    private func receiptIDs(_ body: Data?) throws -> [UUID] {
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(body)) as? [String: Any])
+        let rows = try XCTUnwrap(root["receipts"] as? [[String: Any]])
+        return try rows.map { try XCTUnwrap(($0["id"] as? String).flatMap(UUID.init(uuidString:))) }
+    }
+
     private func finalReceipt(_ index: Int, observedAt: Date = testNow) -> EncounterReceipt {
         var receipt = EncounterSamples.receipt(index, observedAt: observedAt)
         receipt.isFinalEvidence = true
