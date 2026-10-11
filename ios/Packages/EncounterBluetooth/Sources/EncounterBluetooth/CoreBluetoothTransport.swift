@@ -19,9 +19,9 @@ public final class CoreBluetoothTransport: NSObject, BluetoothTransport, @unchec
     // nil leaves system-restored discovery alone until an engine command arrives.
     private var discoveryRequested: Bool?
     private var service: CBMutableService?
-    private var publicationPending = false
-    private var servicePublished = false
-    private var advertisingPending = false
+    private var publication = Publication()
+    private var restoredCentral: [BluetoothConnection]?
+    private var restoredPeripheral: [BluetoothConnection]?
     private var registry: [PeerHandle: CBPeripheral] = [:]
     private var observations = ObservationRegistry(capacity: 256)
     private var centralLinks = CentralLinks()
@@ -37,7 +37,6 @@ public final class CoreBluetoothTransport: NSObject, BluetoothTransport, @unchec
 
     private struct CentralLink {
         let peripheral: CBPeripheral
-        var ready = false
         var readToken: CBCharacteristic?
         var writeToken: CBCharacteristic?
         var readRequest: BluetoothRequestID?
@@ -89,11 +88,18 @@ public final class CoreBluetoothTransport: NSObject, BluetoothTransport, @unchec
         switch command {
         case .startDiscovery:
             discoveryRequested = true
+            applyPublication(publication.request(true))
+            updateAvailability()
             applyDiscovery()
         case .stopDiscovery:
             discoveryRequested = false
+            applyPublication(publication.request(false))
             applyDiscovery()
         case .connect(let peer):
+            if cancellations[peer]?.state == .disconnected {
+                cancellations.removeValue(forKey: peer)
+                _ = centralLinks.end(peer)
+            }
             guard centralManager.state == .poweredOn, links[peer] == nil,
                   cancellations[peer] == nil, let peripheral = registry[peer] else {
                 emit(.connectFailed(peer)); return
@@ -103,7 +109,7 @@ public final class CoreBluetoothTransport: NSObject, BluetoothTransport, @unchec
             peripheral.delegate = self
             centralManager.connect(peripheral)
         case .read(let peer, let id):
-            guard var link = links[peer], link.ready, link.readRequest == nil,
+            guard var link = links[peer], centralLinks.state(peer) == .ready, link.readRequest == nil,
                   let characteristic = link.readToken, centralManager.state == .poweredOn else {
                 emit(.readFailed(peer, id)); return
             }
@@ -111,7 +117,7 @@ public final class CoreBluetoothTransport: NSObject, BluetoothTransport, @unchec
             links[peer] = link
             link.peripheral.readValue(for: characteristic)
         case .write(let peer, let id, let frame):
-            guard var link = links[peer], link.ready, link.writeRequest == nil,
+            guard var link = links[peer], centralLinks.state(peer) == .ready, link.writeRequest == nil,
                   let characteristic = link.writeToken, centralManager.state == .poweredOn,
                   frame.count <= EncounterProtocol.maximumFrameByteCount else {
                 emit(.writeFailed(peer, id)); return
@@ -121,8 +127,8 @@ public final class CoreBluetoothTransport: NSObject, BluetoothTransport, @unchec
             link.peripheral.writeValue(frame, for: characteristic, type: .withResponse)
         case .disconnect(let connection):
             if connection.role == .central {
-                cancelLink(connection.peer)
                 emit(centralLinks.disconnect(connection.peer))
+                cancelLink(connection.peer)
                 restartScan()
             } else if peripheralLinks.close(connection.peer) {
                 dropPeripheralRequests(connection.peer)
@@ -148,37 +154,52 @@ public final class CoreBluetoothTransport: NSObject, BluetoothTransport, @unchec
     private func applyDiscovery() {
         if discoveryRequested == false {
             if centralManager.state == .poweredOn { centralManager.stopScan() }
-            if peripheralManager.state == .poweredOn {
+        } else if discoveryRequested == true, centralManager.state == .poweredOn, !centralManager.isScanning {
+            startScan()
+        }
+    }
+
+    private func applyPublication(_ actions: [Publication.Action]) {
+        for action in actions {
+            switch action {
+            case .remove:
+                removePeripheralLinks()
+                peripheralManager.removeAllServices()
+                service = nil
+            case .add:
+                let service = CBMutableService(type: serviceUUID, primary: true)
+                service.characteristics = [
+                    CBMutableCharacteristic(type: peripheralTokenUUID, properties: [.read, .notify],
+                                            value: nil, permissions: [.readable]),
+                    CBMutableCharacteristic(type: centralTokenUUID, properties: [.write],
+                                            value: nil, permissions: [.writeable])
+                ]
+                self.service = service
+                peripheralManager.add(service)
+            case .startAdvertising:
+                peripheralManager.startAdvertising([CBAdvertisementDataServiceUUIDsKey: [serviceUUID]])
+            case .stopAdvertising:
                 peripheralManager.stopAdvertising()
-                advertisingPending = false
-                // An in-flight add is removed in didAdd rather than added twice.
-                if let service, servicePublished {
-                    peripheralManager.remove(service)
-                    self.service = nil
-                    servicePublished = false
-                }
+            case .unavailable:
+                updateAvailability()
             }
-            return
         }
-        guard discoveryRequested == true else { return }
-        if centralManager.state == .poweredOn, !centralManager.isScanning { startScan() }
-        guard peripheralManager.state == .poweredOn else { return }
-        if service == nil {
-            let service = CBMutableService(type: serviceUUID, primary: true)
-            service.characteristics = [
-                CBMutableCharacteristic(type: peripheralTokenUUID, properties: [.read, .notify],
-                                        value: nil, permissions: [.readable]),
-                CBMutableCharacteristic(type: centralTokenUUID, properties: [.write],
-                                        value: nil, permissions: [.writeable])
-            ]
-            self.service = service
-            publicationPending = true
-            peripheralManager.add(service)
+    }
+
+    private func removePeripheralLinks(respond: Bool = true) {
+        for peer in peripheralLinks.removeService() {
+            emit(.disconnected(.init(peer: peer, role: .peripheral)))
         }
-        if servicePublished, !advertisingPending, !peripheralManager.isAdvertising {
-            advertisingPending = true
-            peripheralManager.startAdvertising([CBAdvertisementDataServiceUUIDsKey: [serviceUUID]])
+        // Include requests from logically closed links as well.
+        for request in pendingReads.values {
+            if respond { peripheralManager.respond(to: request, withResult: .readNotPermitted) }
         }
+        for request in pendingWrites.values {
+            if respond { peripheralManager.respond(to: request, withResult: .writeNotPermitted) }
+        }
+        snapshots = ReadSnapshots()
+        pendingReads.removeAll()
+        pendingWrites.removeAll()
     }
 
     private func startScan() {
@@ -209,8 +230,7 @@ public final class CoreBluetoothTransport: NSObject, BluetoothTransport, @unchec
     private func failConnect(_ peer: PeerHandle) {
         guard links[peer] != nil else { return }
         cancelLink(peer)
-        _ = centralLinks.end(peer)
-        emit(.connectFailed(peer))
+        if let event = centralLinks.end(peer) { emit(event) }
         restartScan()
     }
 
@@ -227,27 +247,26 @@ public final class CoreBluetoothTransport: NSObject, BluetoothTransport, @unchec
     }
 
     private func updateAvailability() {
+        radio.peripheral = publication.unavailable ? .unavailable : managerState(peripheralManager.state)
         guard let availability = radio.update() else { return }
         emit(.availabilityChanged(availability))
         if availability != .available {
-            // Managers may drop connections without issuing terminal callbacks.
-            for (peer, link) in links {
-                failOperations(peer, link)
-                if centralLinks.end(peer) { emit(.disconnected(.init(peer: peer, role: .central))) }
+            // Preserve restoration until that manager can process the engine's close.
+            if centralManager.state != .unknown || restoredCentral == nil { endCentralLinks() }
+            if peripheralManager.state != .unknown || restoredPeripheral == nil {
+                removePeripheralLinks(respond: peripheralManager.state == .poweredOn)
             }
-            links.removeAll()
-            centralLinks = CentralLinks()
-            cancellations.removeAll()
-            registry.removeAll()
-            for peer in peripheralLinks.openPeers {
-                dropPeripheralRequests(peer, respond: peripheralManager.state == .poweredOn)
-                emit(.disconnected(.init(peer: peer, role: .peripheral)))
-            }
-            peripheralLinks = PeripheralLinks()
-            snapshots = ReadSnapshots()
-            pendingReads.removeAll()
-            pendingWrites.removeAll()
         }
+    }
+
+    private func endCentralLinks() {
+        for peer in Array(links.keys) {
+            cancelLink(peer)
+            if let event = centralLinks.end(peer) { emit(event) }
+        }
+        centralLinks = CentralLinks()
+        if centralManager.state != .poweredOn { cancellations.removeAll() }
+        registry.removeAll()
     }
 
     private func managerState(_ state: CBManagerState) -> ManagerRadioState {
@@ -265,7 +284,14 @@ extension CoreBluetoothTransport: CBCentralManagerDelegate {
     public func centralManagerDidUpdateState(_ central: CBCentralManager) {
         checkQueue()
         radio.central = managerState(central.state)
+        if central.state == .poweredOn, let restored = restoredCentral {
+            restoredCentral = nil
+            emit(.restored(restored.filter { links[$0.peer] != nil }))
+        }
         updateAvailability()
+        if central.state != .poweredOn, !(central.state == .unknown && restoredCentral != nil) {
+            endCentralLinks()
+        }
         applyDiscovery()
     }
 
@@ -283,7 +309,12 @@ extension CoreBluetoothTransport: CBCentralManagerDelegate {
     public func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         checkQueue()
         let peer = peer(peripheral.identifier)
-        guard let link = links[peer], link.peripheral === peripheral, !link.ready else { return }
+        guard let link = links[peer], link.peripheral === peripheral,
+              centralLinks.state(peer) == .pending else {
+            if links[peer] == nil { cancellations[peer] = peripheral }
+            central.cancelPeripheralConnection(peripheral)
+            return
+        }
         peripheral.delegate = self
         peripheral.discoverServices([serviceUUID])
     }
@@ -294,13 +325,13 @@ extension CoreBluetoothTransport: CBCentralManagerDelegate {
         let peer = peer(peripheral.identifier)
         if cancellations[peer] === peripheral {
             cancellations.removeValue(forKey: peer)
+            _ = centralLinks.end(peer)
             return
         }
         guard let link = links[peer], link.peripheral === peripheral else { return }
         links.removeValue(forKey: peer)
         failOperations(peer, link)
-        _ = centralLinks.end(peer)
-        emit(.connectFailed(peer))
+        if let event = centralLinks.end(peer) { emit(event) }
         restartScan()
     }
 
@@ -310,14 +341,14 @@ extension CoreBluetoothTransport: CBCentralManagerDelegate {
         let peer = peer(peripheral.identifier)
         if cancellations[peer] === peripheral {
             cancellations.removeValue(forKey: peer)
+            _ = centralLinks.end(peer)
             restartScan()
             return
         }
         guard let link = links[peer], link.peripheral === peripheral else { return }
         links.removeValue(forKey: peer)
         failOperations(peer, link)
-        if !link.ready { emit(.connectFailed(peer)) }
-        if centralLinks.end(peer) { emit(.disconnected(.init(peer: peer, role: .central))) }
+        if let event = centralLinks.end(peer) { emit(event) }
         restartScan()
     }
 
@@ -334,15 +365,15 @@ extension CoreBluetoothTransport: CBCentralManagerDelegate {
                 registry[peer] = peripheral
             }
             guard peripheral.state == .connected, links[peer] == nil else { continue }
-            var link = CentralLink(peripheral: peripheral, ready: true)
+            var link = CentralLink(peripheral: peripheral)
             let characteristics = peripheral.services?.first { $0.uuid == serviceUUID }?.characteristics ?? []
             link.readToken = characteristics.first { $0.uuid == peripheralTokenUUID }
             link.writeToken = characteristics.first { $0.uuid == centralTokenUUID }
             links[peer] = link
-            centralLinks.begin(peer)
+            centralLinks.begin(peer, ready: true)
             restored.append(.init(peer: peer, role: .central))
         }
-        emit(.restored(restored))
+        restoredCentral = restored
     }
     #endif
 }
@@ -351,7 +382,7 @@ extension CoreBluetoothTransport: CBPeripheralDelegate {
     public func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: (any Error)?) {
         checkQueue()
         let peer = peer(peripheral.identifier)
-        guard let link = links[peer], link.peripheral === peripheral, !link.ready else { return }
+        guard let link = links[peer], link.peripheral === peripheral, centralLinks.state(peer) == .pending else { return }
         guard error == nil, let service = peripheral.services?.first(where: { $0.uuid == serviceUUID }) else {
             failConnect(peer); return
         }
@@ -362,7 +393,7 @@ extension CoreBluetoothTransport: CBPeripheralDelegate {
                            error: (any Error)?) {
         checkQueue()
         let peer = peer(peripheral.identifier)
-        guard var link = links[peer], link.peripheral === peripheral, !link.ready else { return }
+        guard var link = links[peer], link.peripheral === peripheral, centralLinks.state(peer) == .pending else { return }
         guard error == nil, service.uuid == serviceUUID,
               let read = service.characteristics?.first(where: { $0.uuid == peripheralTokenUUID }),
               let write = service.characteristics?.first(where: { $0.uuid == centralTokenUUID }),
@@ -379,19 +410,16 @@ extension CoreBluetoothTransport: CBPeripheralDelegate {
                            error: (any Error)?) {
         checkQueue()
         let peer = peer(peripheral.identifier)
-        guard var link = links[peer], link.peripheral === peripheral, link.readToken === characteristic else { return }
+        guard let link = links[peer], link.peripheral === peripheral, link.readToken === characteristic else { return }
         guard error == nil, characteristic.isNotifying else {
-            if link.ready {
+            if centralLinks.state(peer) == .ready {
                 cancelLink(peer)
-                if centralLinks.end(peer) { emit(.disconnected(.init(peer: peer, role: .central))) }
+                if let event = centralLinks.end(peer) { emit(event) }
                 restartScan()
             } else { failConnect(peer) }
             return
         }
-        guard !link.ready else { return }
-        link.ready = true
-        links[peer] = link
-        emit(.connected(.init(peer: peer, role: .central)))
+        if let event = centralLinks.ready(peer) { emit(event) }
     }
 
     public func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic,
@@ -423,9 +451,9 @@ extension CoreBluetoothTransport: CBPeripheralDelegate {
         guard invalidatedServices.contains(where: { $0.uuid == serviceUUID }) else { return }
         let peer = peer(peripheral.identifier)
         guard let link = links[peer], link.peripheral === peripheral else { return }
-        if link.ready {
+        if centralLinks.state(peer) == .ready {
             cancelLink(peer)
-            if centralLinks.end(peer) { emit(.disconnected(.init(peer: peer, role: .central))) }
+            if let event = centralLinks.end(peer) { emit(event) }
             restartScan()
         } else { failConnect(peer) }
     }
@@ -434,42 +462,44 @@ extension CoreBluetoothTransport: CBPeripheralDelegate {
 extension CoreBluetoothTransport: CBPeripheralManagerDelegate {
     public func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
         checkQueue()
-        radio.peripheral = managerState(peripheral.state)
-        if peripheral.state != .poweredOn {
-            service = nil
-            publicationPending = false
-            servicePublished = false
-            advertisingPending = false
+        let state: Publication.Radio
+        switch peripheral.state {
+        case .poweredOn: state = .poweredOn
+        case .poweredOff: state = .poweredOff
+        default: state = .databaseCleared
         }
+        let awaitingRestoration = peripheral.state == .unknown && restoredPeripheral != nil
+        let actions = awaitingRestoration ? [] : publication.update(state, isAdvertising: peripheral.isAdvertising)
+        if peripheral.state == .poweredOn, let restored = restoredPeripheral {
+            restoredPeripheral = nil
+            emit(.restored(restored.filter { peripheralLinks.acceptsRequests($0.peer) }))
+        }
+        if state == .databaseCleared, !awaitingRestoration { service = nil }
         updateAvailability()
+        if peripheral.state != .poweredOn, !awaitingRestoration {
+            removePeripheralLinks(respond: false)
+        }
+        applyPublication(actions)
         applyDiscovery()
     }
 
     public func peripheralManager(_ peripheral: CBPeripheralManager, didAdd service: CBService,
                                   error: (any Error)?) {
         checkQueue()
-        guard self.service === service, publicationPending else { return }
-        publicationPending = false
-        guard error == nil else { self.service = nil; servicePublished = false; return }
-        servicePublished = true
-        if discoveryRequested == true { applyDiscovery() }
-        else {
-            if let mutable = service as? CBMutableService { peripheral.remove(mutable) }
-            self.service = nil
-            servicePublished = false
-        }
+        applyPublication(publication.didAdd(matchesUUID: service.uuid == serviceUUID, success: error == nil))
     }
 
     public func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: (any Error)?) {
         checkQueue()
-        advertisingPending = false
-        if discoveryRequested == false { peripheral.stopAdvertising() }
+        applyPublication(publication.didStartAdvertising(success: error == nil))
     }
 
     public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral,
                                   didSubscribeTo characteristic: CBCharacteristic) {
         checkQueue()
-        guard characteristic.uuid == peripheralTokenUUID else { return }
+        guard peripheral.state == .poweredOn, characteristic.uuid == peripheralTokenUUID,
+              publication.published, discoveryRequested != false,
+              service?.characteristics?.contains(where: { $0 === characteristic }) == true else { return }
         let peer = peer(central.identifier)
         if peripheralLinks.subscribe(peer) { emit(.connected(.init(peer: peer, role: .peripheral))) }
     }
@@ -477,7 +507,8 @@ extension CoreBluetoothTransport: CBPeripheralManagerDelegate {
     public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral,
                                   didUnsubscribeFrom characteristic: CBCharacteristic) {
         checkQueue()
-        guard characteristic.uuid == peripheralTokenUUID else { return }
+        guard characteristic.uuid == peripheralTokenUUID,
+              service?.characteristics?.contains(where: { $0 === characteristic }) == true else { return }
         let peer = peer(central.identifier)
         dropPeripheralRequests(peer)
         if peripheralLinks.unsubscribe(peer) { emit(.disconnected(.init(peer: peer, role: .peripheral))) }
@@ -540,8 +571,7 @@ extension CoreBluetoothTransport: CBPeripheralManagerDelegate {
         for service in dict[CBPeripheralManagerRestoredStateServicesKey] as? [CBMutableService] ?? [] {
             guard service.uuid == serviceUUID else { continue }
             self.service = service
-            publicationPending = false
-            servicePublished = true
+            publication.restorePublished()
             for characteristic in service.characteristics ?? [] where characteristic.uuid == peripheralTokenUUID {
                 for central in (characteristic as? CBMutableCharacteristic)?.subscribedCentrals ?? [] {
                     let peer = peer(central.identifier)
@@ -549,7 +579,7 @@ extension CoreBluetoothTransport: CBPeripheralManagerDelegate {
                 }
             }
         }
-        emit(.restored(restored))
+        restoredPeripheral = restored
     }
     #endif
 }

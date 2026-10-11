@@ -52,7 +52,7 @@ struct ReadSnapshots {
 
     func continuation(_ peer: PeerHandle, offset: Int, now: Date) -> Data? {
         guard let snapshot = snapshots[peer], now < snapshot.validUntil,
-              offset > 0, offset < snapshot.frame.count else { return nil }
+              offset > 0, offset <= snapshot.frame.count else { return nil }
         return Data(snapshot.frame.dropFirst(offset))
     }
 
@@ -85,18 +85,154 @@ struct PeripheralLinks {
         subscriptions[peer] = .closed
         return true
     }
+
+    mutating func removeService() -> [PeerHandle] {
+        let peers = openPeers
+        subscriptions.removeAll()
+        return peers
+    }
 }
 
 struct CentralLinks {
-    private var live: Set<PeerHandle> = []
+    enum State: Equatable { case pending, ready, closing }
+    private var states: [PeerHandle: State] = [:]
 
-    mutating func begin(_ peer: PeerHandle) { live.insert(peer) }
-    mutating func end(_ peer: PeerHandle) -> Bool { live.remove(peer) != nil }
+    func state(_ peer: PeerHandle) -> State? { states[peer] }
 
-    // A command is acknowledged even if no live or pending link remains.
+    mutating func begin(_ peer: PeerHandle, ready: Bool = false) {
+        states[peer] = ready ? .ready : .pending
+    }
+
+    mutating func ready(_ peer: PeerHandle) -> BluetoothEvent? {
+        guard states[peer] == .pending else { return nil }
+        states[peer] = .ready
+        return .connected(.init(peer: peer, role: .central))
+    }
+
+    // Terminal delegate callbacks and radio loss share exactly one ending rule.
+    mutating func end(_ peer: PeerHandle) -> BluetoothEvent? {
+        switch states.removeValue(forKey: peer) {
+        case .pending: return .connectFailed(peer)
+        case .ready: return .disconnected(.init(peer: peer, role: .central))
+        case .closing, nil: return nil
+        }
+    }
+
+    // Each command is acknowledged immediately; its later callback is silent.
     mutating func disconnect(_ peer: PeerHandle) -> BluetoothEvent {
-        live.remove(peer)
+        if states[peer] != nil { states[peer] = .closing }
         return .disconnected(.init(peer: peer, role: .central))
+    }
+}
+
+/// Plain publication decisions; Core Bluetooth objects live only in the adapter.
+struct Publication {
+    enum Radio { case poweredOn, poweredOff, databaseCleared }
+    enum Action: Equatable { case remove, add, startAdvertising, stopAdvertising, unavailable }
+
+    private(set) var requested: Bool?
+    private(set) var pending = false
+    private(set) var published = false
+    private(set) var removalPending = false
+    private(set) var advertisingPending = false
+    private(set) var advertising = false
+    private(set) var unavailable = false
+    private(set) var addRetried = false
+    private(set) var advertisingRetried = false
+    private var radio: Radio = .databaseCleared
+
+    mutating func request(_ requested: Bool) -> [Action] {
+        self.requested = requested
+        if requested {
+            recover()
+        } else {
+            removalPending = true
+        }
+        return reconcile()
+    }
+
+    mutating func update(_ radio: Radio, isAdvertising: Bool = false) -> [Action] {
+        self.radio = radio
+        recover()
+        if radio == .poweredOn {
+            advertising = isAdvertising
+        } else {
+            advertisingPending = false
+            advertising = false
+        }
+        // Powered off preserves the local GATT database, including an add in flight.
+        if radio == .databaseCleared {
+            pending = false
+            published = false
+            removalPending = false
+        }
+        return reconcile()
+    }
+
+    mutating func restorePublished() { published = true }
+
+    mutating func didAdd(matchesUUID: Bool, success: Bool) -> [Action] {
+        guard matchesUUID, pending else { return [] }
+        pending = false
+        if success {
+            published = true
+        } else if requested == true, !removalPending {
+            if addRetried {
+                unavailable = true
+                return [.unavailable]
+            }
+            addRetried = true
+        }
+        return reconcile()
+    }
+
+    mutating func didStartAdvertising(success: Bool) -> [Action] {
+        guard advertisingPending else {
+            return requested == false && radio == .poweredOn ? [.stopAdvertising] : []
+        }
+        advertisingPending = false
+        advertising = success
+        if !success, requested == true, !removalPending {
+            if advertisingRetried {
+                unavailable = true
+                return [.unavailable]
+            }
+            advertisingRetried = true
+        }
+        return reconcile()
+    }
+
+    private mutating func recover() {
+        unavailable = false
+        addRetried = false
+        advertisingRetried = false
+    }
+
+    private mutating func reconcile() -> [Action] {
+        guard radio == .poweredOn else { return [] }
+        var actions: [Action] = []
+        if removalPending {
+            advertising = false
+            advertisingPending = false
+            actions.append(.stopAdvertising)
+            published = false
+            actions.append(.remove)
+            // Remove immediately, but wait for didAdd before starting another add.
+            // Its callback removes again if the old add completed after removal.
+            guard !pending else { return actions }
+            removalPending = false
+        }
+        guard requested == true, !unavailable else { return actions }
+        if !published, !pending {
+            pending = true
+            // Always clear the database before adding, even after an add failure.
+            if actions.last != .remove { actions.append(.remove) }
+            actions.append(.add)
+        } else if published, !advertisingPending, !advertising {
+            advertisingPending = true
+            actions.append(.startAdvertising)
+        }
+        return actions
     }
 }
 
