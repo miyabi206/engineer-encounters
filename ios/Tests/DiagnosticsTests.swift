@@ -115,16 +115,16 @@ final class DiagnosticsTests: XCTestCase {
                                    metadata: fixture.metadata)
         let recent = TrialRecord(creationDate: TrialRecord.calendarDate(fixture.wall.date), metadata: fixture.metadata)
         fixture.log.update { $0 = [old, boundary, recent] }
-        XCTAssertEqual(try fixture.read().map(\.id), [boundary.id, recent.id])
+        XCTAssertEqual(try fixture.read().map(\.id), [recent.id])
         // Test a launch with an unpruned file, rather than relying on update's pruning.
         try JSONEncoder().encode([old, boundary, recent]).write(to: fixture.log.fileURL)
         let relaunched = TrialLog(fileURL: fixture.log.fileURL, now: { fixture.wall.date })
-        XCTAssertEqual(relaunched.records.map(\.id), [boundary.id, recent.id])
+        XCTAssertEqual(relaunched.records.map(\.id), [recent.id])
         XCTAssertTrue(relaunched.records.allSatisfy { !$0.isOpen && $0.discoveryState == .missing })
-        XCTAssertEqual(try fixture.read().map(\.id), [boundary.id, recent.id])
-        fixture.wall.date = fixture.wall.date.addingTimeInterval(1)
-        relaunched.update { _ in }
         XCTAssertEqual(try fixture.read().map(\.id), [recent.id])
+        fixture.wall.date = fixture.wall.date.addingTimeInterval(7 * 86400)
+        relaunched.update { _ in }
+        XCTAssertTrue(try fixture.read().isEmpty)
         XCTAssertTrue(relaunched.clear())
         XCTAssertTrue(try fixture.read().isEmpty)
     }
@@ -142,7 +142,7 @@ final class DiagnosticsTests: XCTestCase {
         let data = try Data(contentsOf: fixture.log.fileURL)
         let records = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
         let record = try XCTUnwrap(records.first)
-        XCTAssertEqual(Set(record.keys), Set(["id", "creationDate", "metadata", "isOpen", "discoveryElapsedSeconds",
+        XCTAssertEqual(Set(record.keys), Set(["id", "ordinal", "startReason", "presenceApproachChanged", "creationDate", "metadata", "isOpen", "discoveryElapsedSeconds",
             "distinctPeerCount", "exchanges", "evidence", "attemptEnds", "serverConfirmation"]))
         let metadata = try XCTUnwrap(record["metadata"] as? [String: Any])
         XCTAssertEqual(Set(metadata.keys), Set(["buildKind", "appVersion", "appBuild", "iOSVersion", "deviceModel",
@@ -162,13 +162,15 @@ final class DiagnosticsTests: XCTestCase {
         XCTAssertFalse(encoded.lowercased().contains("receipt"))
         XCTAssertFalse(encoded.contains("wall"))
         XCTAssertEqual(record["serverConfirmation"] as? String, "unavailable")
+        #if !targetEnvironment(simulator)
         let attributes = try FileManager.default.attributesOfItem(atPath: fixture.log.fileURL.path)
         XCTAssertEqual(attributes[.protectionKey] as? FileProtectionType, .completeUntilFirstUserAuthentication)
+        #endif
         XCTAssertEqual(try fixture.log.fileURL.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
     }
 
     @MainActor
-    func testCorruptLogShowsErrorAndRetryDoesNotSilentlyOverwriteIt() throws {
+    func testCorruptLogRetryMovesUnreadableFileAsideAndClearDeletesIt() throws {
         let fixture = try Fixture()
         defer { fixture.cleanUp() }
         let corrupt = Data("invalid json".utf8)
@@ -177,10 +179,144 @@ final class DiagnosticsTests: XCTestCase {
         XCTAssertEqual(log.state, .failed)
         XCTAssertFalse(log.update { $0 = [] })
         log.retry()
-        XCTAssertEqual(log.state, .failed)
-        XCTAssertEqual(try Data(contentsOf: log.fileURL), corrupt)
-        XCTAssertTrue(log.clear())
         XCTAssertEqual(log.state, .ready)
+        XCTAssertTrue(log.records.isEmpty)
+        let directory = log.fileURL.deletingLastPathComponent()
+        let moved = try XCTUnwrap(FileManager.default.contentsOfDirectory(at: directory,
+            includingPropertiesForKeys: nil).first { $0.lastPathComponent.contains(".unreadable-") })
+        XCTAssertEqual(try Data(contentsOf: moved), corrupt)
+        XCTAssertTrue(log.update { $0.append(TrialRecord(creationDate: TrialRecord.calendarDate(fixture.wall.date), metadata: fixture.metadata)) })
+        XCTAssertTrue(log.clear())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: moved.path))
+        XCTAssertEqual(log.state, .ready)
+    }
+
+    @MainActor
+    func testOrdinalAndStartReasonSurviveResetSwitchAndLaunch() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        fixture.recorder.beginIfNeeded(metadata: fixture.metadata, reason: .participationSwitch)
+        XCTAssertTrue(fixture.recorder.resetCompleted(success: true, metadata: fixture.metadata))
+        fixture.recorder.close()
+        fixture.recorder.beginIfNeeded(metadata: fixture.metadata, reason: .participationSwitch)
+        let relaunchedLog = TrialLog(fileURL: fixture.log.fileURL, now: { fixture.wall.date })
+        let relaunched = TrialRecorder(log: relaunchedLog, clock: fixture.clock, now: { fixture.wall.date })
+        relaunched.beginIfNeeded(metadata: fixture.metadata, reason: .launch)
+        let records = try fixture.read()
+        XCTAssertEqual(records.map(\.ordinal), [1, 2, 3, 4])
+        XCTAssertEqual(records.map(\.startReason), [.participationSwitch, .reset, .participationSwitch, .launch])
+        XCTAssertEqual(records.map(\.isOpen), [false, false, false, true])
+    }
+
+    @MainActor
+    func testCalendarDateAndRetentionUseDeviceLocalDay() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        let time = Date(timeIntervalSince1970: 1_728_060_000) // 16:40 UTC, next day in Japan.
+        XCTAssertEqual(TrialRecord.calendarDate(time, timeZone: try XCTUnwrap(TimeZone(identifier: "Asia/Tokyo"))), "2024-10-05")
+        XCTAssertEqual(TrialRecord.calendarDate(time, timeZone: try XCTUnwrap(TimeZone(secondsFromGMT: 0))), "2024-10-04")
+        fixture.wall.date = time
+        fixture.recorder.beginIfNeeded(metadata: fixture.metadata)
+        let record = try XCTUnwrap(fixture.log.records.first)
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        XCTAssertEqual(record.creationDate, formatter.string(from: time))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        XCTAssertEqual(record.retentionDate, calendar.startOfDay(for: time))
+    }
+
+    @MainActor
+    func testDefaultRecorderClockIsContinuous() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        let recorder = TrialRecorder(log: fixture.log)
+        XCTAssertTrue(recorder.clock is ContinuousTrialClock)
+        XCTAssertGreaterThanOrEqual(recorder.clock.seconds, 0)
+    }
+
+    @MainActor
+    func testApproachChangeIsFlaggedAndFirstKnownRadioAvailabilityIsStored() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        var metadata = fixture.metadata
+        metadata.bluetoothAvailability = "unknown"
+        fixture.recorder.beginIfNeeded(metadata: metadata)
+        fixture.recorder.selectPresenceApproach(.heldConnection)
+        XCTAssertFalse(try fixture.read()[0].presenceApproachChanged)
+        fixture.recorder.selectPresenceApproach(.secondExchange)
+        fixture.recorder.selectPresenceApproach(.heldConnection)
+        fixture.recorder.record(.radioAvailability(.unknown))
+        fixture.recorder.record(.radioAvailability(.available))
+        fixture.recorder.record(.radioAvailability(.unavailable))
+        let record = try fixture.read()[0]
+        XCTAssertTrue(record.presenceApproachChanged)
+        XCTAssertEqual(record.metadata.presenceApproach, "heldConnection")
+        XCTAssertEqual(record.metadata.bluetoothAvailability, "available")
+    }
+
+    @MainActor
+    func testWriteFailureKeepsRecordingAndNextWritePersistsWholeTrial() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        try FileManager.default.removeItem(at: fixture.log.fileURL)
+        try FileManager.default.createDirectory(at: fixture.log.fileURL, withIntermediateDirectories: false)
+        // Even the first trial write can fail: keep its clock and in-memory identity.
+        fixture.recorder.beginIfNeeded(metadata: fixture.metadata)
+        XCTAssertEqual(fixture.log.state, .failed)
+        fixture.clock.seconds = 3
+        fixture.recorder.record(.peerFirstObserved(PeerHandle()))
+        fixture.clock.seconds = 5
+        fixture.recorder.record(.exchangeCompleted(role: .central, nonceDigest: "digest"))
+        try FileManager.default.removeItem(at: fixture.log.fileURL)
+        fixture.clock.seconds = 125
+        fixture.recorder.record(.evidenceReached(role: .central, nonceDigest: "digest", observedDuration: 120))
+        XCTAssertEqual(fixture.log.state, .ready)
+        let record = try fixture.read()[0]
+        XCTAssertEqual(record.discoveryElapsedSeconds, 3)
+        XCTAssertEqual(record.exchanges.first?.elapsedSeconds, 5)
+        XCTAssertEqual(record.evidence.first?.elapsedSeconds, 125)
+    }
+
+    @MainActor
+    func testUnreadableBackupIsPrunedAfterSevenDays() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        try Data("invalid".utf8).write(to: fixture.log.fileURL)
+        let log = TrialLog(fileURL: fixture.log.fileURL, now: { fixture.wall.date })
+        log.retry()
+        let directory = log.fileURL.deletingLastPathComponent()
+        let moved = try XCTUnwrap(FileManager.default.contentsOfDirectory(at: directory,
+            includingPropertiesForKeys: nil).first { $0.lastPathComponent.contains(".unreadable-") })
+        fixture.wall.date = fixture.wall.date.addingTimeInterval(7 * 86400 + 1)
+        XCTAssertTrue(log.prune())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: moved.path))
+    }
+
+    func testJapaneseAndEnglishTablesResolveDocumentedLabels() throws {
+        let bundle = Bundle.main
+        let jaPath = try XCTUnwrap(bundle.path(forResource: "ja", ofType: "lproj"))
+        let enPath = try XCTUnwrap(bundle.path(forResource: "en", ofType: "lproj"))
+        let ja = try XCTUnwrap(Bundle(path: jaPath))
+        let en = try XCTUnwrap(Bundle(path: enPath))
+        for (key, japanese, english) in [
+            ("title", "診断", "Diagnostics"),
+            ("reset", "試行をリセット", "Reset trial"),
+            ("approach", "存在確認の方式", "Presence approach"),
+            ("share", "試行ログを共有", "Share trial log"),
+            ("attemptReset", "リセットによる終了", "Ended by reset"),
+            ("startLaunch", "アプリ起動", "App launch")
+        ] {
+            XCTAssertEqual(ja.localizedString(forKey: key, value: nil, table: "Diagnostics"), japanese)
+            XCTAssertEqual(en.localizedString(forKey: key, value: nil, table: "Diagnostics"), english)
+        }
+        #if DEVELOPMENT_BUILD
+        XCTAssertEqual(ja.localizedString(forKey: "diagnostics", value: nil, table: "DevelopmentDiagnostics"), "診断")
+        XCTAssertEqual(en.localizedString(forKey: "diagnostics", value: nil, table: "DevelopmentDiagnostics"), "Diagnostics")
+        #endif
     }
 
     @MainActor
@@ -215,7 +351,11 @@ final class DiagnosticsTests: XCTestCase {
 private final class ManualTrialClock: TrialClock { var seconds: TimeInterval = 0 }
 
 @MainActor
-private final class TrialWallClock { var date = Date(timeIntervalSince1970: 1_728_000_000) }
+private final class TrialWallClock {
+    // Deliberately away from midnight: retention uses the local calendar day.
+    var date = Calendar.current.startOfDay(for: Date(timeIntervalSince1970: 1_728_000_000))
+        .addingTimeInterval(12 * 3600)
+}
 
 @MainActor
 private struct Fixture {

@@ -76,8 +76,7 @@ struct DiagnosticsView: View {
                     Text(text("localError"))
                     Button(text("retry")) {
                         perform {
-                            if log.state == .failed { log.retry() }
-                            await composition.refreshLocalSummary()
+                            await composition.retryDiagnostics()
                         }
                     }
                     .accessibilityLabel(text("retry"))
@@ -92,7 +91,7 @@ struct DiagnosticsView: View {
             Section(text("trials")) {
                 if log.records.isEmpty { Text(text("empty")) }
                 ForEach(Array(log.records.reversed())) { trial in
-                    DisclosureGroup(trial.creationDate) {
+                    DisclosureGroup("\(trial.creationDate) · \(text("ordinal")) \(trial.ordinal) · \(startReason(trial.startReason))") {
                         row("build", text(trial.metadata.buildKind == "Development" ? "development" : "internal"))
                         row("app", "\(trial.metadata.appVersion) (\(trial.metadata.appBuild))")
                         row("ios", trial.metadata.iOSVersion)
@@ -142,6 +141,9 @@ struct DiagnosticsView: View {
 
     @ViewBuilder
     private func measurements(_ trial: TrialRecord) -> some View {
+        row("ordinal", String(trial.ordinal))
+        row("startReason", startReason(trial.startReason))
+        if trial.presenceApproachChanged { Text(text("approachChanged")) }
         row("discoveryElapsed", trial.discoveryElapsedSeconds.map(seconds) ?? state(trial.discoveryState))
         row("peers", String(trial.distinctPeerCount))
         if trial.exchanges.isEmpty { row("exchangeElapsed", state(trial.exchangeState)) }
@@ -168,7 +170,15 @@ struct DiagnosticsView: View {
         }
         row("serverElapsed", state(trial.serverConfirmation))
         ForEach(Array(trial.attemptEnds.enumerated()), id: \.offset) { _, end in
-            row("attemptEnd", "\(text(end.role.rawValue)) · \(text(end.reason)) · \(seconds(end.elapsedSeconds))")
+            row("attemptEnd", "\(text(end.role.rawValue)) · \(text(end.reason == "reset" ? "attemptReset" : end.reason)) · \(seconds(end.elapsedSeconds))")
+        }
+    }
+
+    private func startReason(_ reason: TrialStartReason) -> String {
+        switch reason {
+        case .reset: text("startReset")
+        case .participationSwitch: text("startParticipationSwitch")
+        case .launch: text("startLaunch")
         }
     }
 

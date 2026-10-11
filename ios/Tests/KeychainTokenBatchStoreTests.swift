@@ -1,6 +1,7 @@
 import EncounterDomain
 import EncounterStorage
 import Foundation
+import Security
 import XCTest
 
 final class KeychainTokenBatchStoreTests: XCTestCase {
@@ -19,7 +20,10 @@ final class KeychainTokenBatchStoreTests: XCTestCase {
             let cleared = try await store.load()
             XCTAssertNil(cleared)
         } catch {
-            try await store.clear()
+            try? await store.clear()
+            if error as? TokenBatchStorageError == .keychainStatus(errSecMissingEntitlement) {
+                throw XCTSkip("Keychain entitlement is unavailable in the unsigned simulator run (CODE_SIGNING_ALLOWED=NO).")
+            }
             throw error
         }
     }

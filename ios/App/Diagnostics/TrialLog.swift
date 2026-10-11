@@ -38,10 +38,17 @@ enum TrialMeasurementState: String, Codable {
     case pending, missing, recorded, unavailable
 }
 
+enum TrialStartReason: String, Codable {
+    case reset, participationSwitch, launch
+}
+
 struct TrialRecord: Codable, Equatable, Identifiable {
     var id = UUID()
     // The shared source file contains a calendar date only, never a time of day.
-    // Retention uses the start of that UTC day, conservatively shortening seven days.
+    // Retention uses the start of the device-local day, conservatively shortening seven days.
+    var ordinal = 1
+    var startReason: TrialStartReason = .launch
+    var presenceApproachChanged = false
     var creationDate: String
     var metadata: TrialMetadata
     var isOpen = true
@@ -53,7 +60,7 @@ struct TrialRecord: Codable, Equatable, Identifiable {
     let serverConfirmation: TrialMeasurementState = .unavailable
 
     enum CodingKeys: String, CodingKey {
-        case id, creationDate, metadata, isOpen, discoveryElapsedSeconds, distinctPeerCount
+        case id, ordinal, startReason, presenceApproachChanged, creationDate, metadata, isOpen, discoveryElapsedSeconds, distinctPeerCount
         case exchanges, evidence, attemptEnds, serverConfirmation
     }
 
@@ -69,13 +76,15 @@ struct TrialRecord: Codable, Equatable, Identifiable {
     }
     private var absentState: TrialMeasurementState { isOpen ? .pending : .missing }
 
-    static func calendarDate(_ date: Date) -> String { dateFormatter().string(from: date) }
+    static func calendarDate(_ date: Date, timeZone: TimeZone = .current) -> String {
+        dateFormatter(timeZone: timeZone).string(from: date)
+    }
     var retentionDate: Date? { Self.dateFormatter().date(from: creationDate) }
-    private static func dateFormatter() -> DateFormatter {
+    private static func dateFormatter(timeZone: TimeZone = .current) -> DateFormatter {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.timeZone = timeZone
         formatter.dateFormat = "yyyy-MM-dd"
         formatter.isLenient = false
         return formatter
@@ -91,6 +100,7 @@ final class TrialLog: ObservableObject {
     @Published private(set) var state: State = .loading
     private let now: () -> Date
     private var didLoad = false
+    private(set) var nextOrdinal = 1
 
     init(fileURL: URL? = nil, now: @escaping () -> Date = { Date() }) {
         self.fileURL = fileURL ?? URL.applicationSupportDirectory
@@ -103,12 +113,14 @@ final class TrialLog: ObservableObject {
     /// must never be used to invent elapsed values for an earlier process.
     func load() {
         state = .loading
+        didLoad = false
         do {
             if FileManager.default.fileExists(atPath: fileURL.path) {
                 records = try JSONDecoder().decode([TrialRecord].self, from: Data(contentsOf: fileURL))
             } else {
                 records = []
             }
+            nextOrdinal = max(nextOrdinal, (records.map(\.ordinal).max() ?? 0) + 1)
             didLoad = true
             for index in records.indices { records[index].isOpen = false }
             try write()
@@ -116,16 +128,27 @@ final class TrialLog: ObservableObject {
     }
 
     func retry() {
-        guard didLoad else { load(); return }
-        do { try write() }
+        do {
+            if !didLoad {
+                if FileManager.default.fileExists(atPath: fileURL.path) {
+                    let movedURL = fileURL.appendingPathExtension("unreadable-\(UUID().uuidString)")
+                    try FileManager.default.moveItem(at: fileURL, to: movedURL)
+                    try FileManager.default.setAttributes([.modificationDate: now()], ofItemAtPath: movedURL.path)
+                }
+                records = []
+                didLoad = true
+            }
+            try write()
+        }
         catch { state = .failed }
     }
 
     @discardableResult
     func update(_ mutation: (inout [TrialRecord]) -> Void) -> Bool {
         // Never overwrite an unreadable log with a partial fresh one.
-        guard state == .ready else { return false }
+        guard didLoad else { return false }
         mutation(&records)
+        nextOrdinal = max(nextOrdinal, (records.map(\.ordinal).max() ?? 0) + 1)
         do {
             try write()
             return true
@@ -139,12 +162,26 @@ final class TrialLog: ObservableObject {
     @discardableResult
     func clear() -> Bool {
         records = []
-        do { try write(); return true }
+        do {
+            for url in try unreadableFiles() { try FileManager.default.removeItem(at: url) }
+            try write()
+            didLoad = true
+            return true
+        }
         catch { state = .failed; return false }
     }
 
     @discardableResult
     func prune() -> Bool { update { _ in } }
+
+    private func unreadableFiles() throws -> [URL] {
+        let directory = fileURL.deletingLastPathComponent()
+        guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
+        return try FileManager.default.contentsOfDirectory(at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey]).filter {
+                $0.lastPathComponent.hasPrefix(fileURL.lastPathComponent + ".unreadable-")
+            }
+    }
 
     private func write() throws {
         let cutoff = now().addingTimeInterval(-Self.retention)
@@ -152,6 +189,10 @@ final class TrialLog: ObservableObject {
         let directory = fileURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
             attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
+        for url in try unreadableFiles() {
+            if let modified = try url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
+               modified < cutoff { try FileManager.default.removeItem(at: url) }
+        }
         var excluded = URLResourceValues()
         excluded.isExcludedFromBackup = true
         var directoryURL = directory

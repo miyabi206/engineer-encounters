@@ -18,24 +18,55 @@ struct EncounterRuntimeStatus: Sendable, Equatable {
 final class EncounterRuntime: ObservableObject {
     @Published private(set) var status = EncounterRuntimeStatus()
     private static var receiptQueueTask: Task<SwiftDataReceiptQueue, any Error>?
-    private var queue: SwiftDataReceiptQueue?
+    private var queue: (any ReceiptQueue)?
     private var engine: EncounterEngine?
-    #if DEVELOPMENT_BUILD
-    private let tokenStore = KeychainTokenBatchStore(service: "EngineerEncounters.Development.LocalTestTokens")
-    #else
-    private let tokenStore = KeychainTokenBatchStore()
-    #endif
+    private let tokenStore: any TokenBatchStore
+    private let transportFactory: @MainActor () async -> any BluetoothTransport
+    private let queueOpener: @MainActor () async throws -> any ReceiptQueue
+    private let clock: any EncounterClock
+    private var engineRunning = false
     private var eventTask: Task<Void, Never>?
     private var operationTask: Task<Void, Never>?
-    private var observers: [UUID: AsyncStream<EncounterEngineEvent>.Continuation] = [:]
     private var participationOn = false
     private var presenceApproach: PresenceApproach
     private var eventObservers: [UUID: @MainActor (EncounterEngineEvent) -> Void] = [:]
     #if DEVELOPMENT_BUILD
     private lazy var issuer = LocalTestTokenIssuer(store: tokenStore)
+    private var tokenTopUpInFlight = false
     #endif
 
-    init(approach: PresenceApproach = .heldConnection) { presenceApproach = approach }
+    init(approach: PresenceApproach = .heldConnection,
+         transportFactory: @escaping @MainActor () async -> any BluetoothTransport = { CoreBluetoothTransport() },
+         queueOpener: @escaping @MainActor () async throws -> any ReceiptQueue = { try await EncounterRuntime.openDefaultQueue() },
+         tokenStore: (any TokenBatchStore)? = nil,
+         clock: any EncounterClock = SystemEncounterClock()) {
+        presenceApproach = approach
+        self.transportFactory = transportFactory
+        self.queueOpener = queueOpener
+        self.tokenStore = tokenStore ?? Self.defaultTokenStore()
+        self.clock = clock
+    }
+
+    private static func defaultTokenStore() -> any TokenBatchStore {
+        #if DEVELOPMENT_BUILD
+        KeychainTokenBatchStore(service: "EngineerEncounters.Development.LocalTestTokens")
+        #else
+        KeychainTokenBatchStore()
+        #endif
+    }
+
+    private static func openDefaultQueue() async throws -> any ReceiptQueue {
+        // Only the production opener shares a task: fakes stay isolated per test.
+        if receiptQueueTask == nil {
+            receiptQueueTask = Task { try await SwiftDataReceiptQueue.fileBacked() }
+        }
+        do { return try await receiptQueueTask!.value }
+        catch {
+            // A failed open created no queue. Allow a later Retry to open it.
+            receiptQueueTask = nil
+            throw error
+        }
+    }
 
     /// Synchronous subscribers share the broadcast without dropping measurements
     /// into a bounded observer buffer while writing a local log.
@@ -46,28 +77,18 @@ final class EncounterRuntime: ObservableObject {
         return id
     }
 
-    deinit {
-        eventTask?.cancel()
-        for continuation in observers.values { continuation.finish() }
-    }
-
-    /// Every observer has its own bounded buffer; only eventTask reads engine.events.
-    func events() -> AsyncStream<EncounterEngineEvent> {
-        let id = UUID()
-        let stream = AsyncStream<EncounterEngineEvent>.makeStream(bufferingPolicy: .bufferingNewest(64))
-        observers[id] = stream.continuation
-        stream.continuation.onTermination = { [weak self] _ in
-            Task { @MainActor in self?.observers.removeValue(forKey: id) }
-        }
-        return stream.stream
-    }
+    deinit { eventTask?.cancel() }
 
     func start() async {
         participationOn = true
         await serialize {
-            guard self.participationOn, await self.prepare() else { return }
+            guard self.participationOn else { return }
+            await self.engine?.stop()
+            self.engineRunning = false
+            guard await self.prepare() else { return }
             await self.replenishTokens()
             guard self.participationOn else { return }
+            self.engineRunning = true
             await self.engine?.start()
             await self.updateLocalSummary()
         }
@@ -77,6 +98,7 @@ final class EncounterRuntime: ObservableObject {
         participationOn = false
         await serialize {
             await self.engine?.stop()
+            self.engineRunning = false
             self.status.discoveryOn = false
             self.status.pausedForLackOfToken = false
             await self.updateLocalSummary()
@@ -85,51 +107,64 @@ final class EncounterRuntime: ObservableObject {
 
     func refresh() async {
         await serialize {
-            guard self.participationOn, !self.status.storageUnavailable else { return }
-            await self.replenishTokens()
-            await self.engine?.refresh()
+            guard self.participationOn else { return }
+            if self.status.storageUnavailable || !self.engineRunning {
+                await self.engine?.stop()
+                self.engineRunning = false
+                guard await self.prepare() else { return }
+                await self.replenishTokens()
+                self.engineRunning = true
+                await self.engine?.start()
+            } else {
+                await self.replenishTokens()
+                await self.engine?.refresh()
+            }
             await self.updateLocalSummary()
         }
     }
 
+    #if DEVELOPMENT_BUILD || INTERNAL_BUILD
     func selectPresenceApproach(_ approach: PresenceApproach) async {
         await serialize {
             self.presenceApproach = approach
             await self.engine?.selectPresenceApproach(approach)
         }
     }
+    #endif
 
     func refreshLocalSummary() async {
         await serialize { await self.updateLocalSummary() }
     }
 
+    #if DEVELOPMENT_BUILD || INTERNAL_BUILD
     func resetTrial(onSuccess: @escaping @MainActor () -> Void = {}) async -> Bool {
         // Serialize reset, verification and restart against other lifecycle actions.
         var success = false
         await serialize {
             guard await self.prepareQueue(), let queue = self.queue else { return }
             do {
+                self.engineRunning = false
                 if let engine = self.engine { await engine.reset() }
                 else { try await queue.removeAll() }
                 success = try await queue.pending().isEmpty
+                self.status.storageUnavailable = false
             } catch {
                 success = false
-            }
-            guard success else {
                 self.status.storageUnavailable = true
-                return
             }
-            self.status.storageUnavailable = false
+            guard success else { return }
             // Start the recorder's new clock before restarting discovery.
             onSuccess()
-            if self.participationOn, let engine = self.engine {
+            if self.participationOn, await self.prepare(), let engine = self.engine {
                 await self.replenishTokens()
+                self.engineRunning = true
                 await engine.start()
             }
             await self.updateLocalSummary()
         }
         return success
     }
+    #endif
 
     private func serialize(_ operation: @escaping @MainActor () async -> Void) async {
         let previous = operationTask
@@ -142,12 +177,20 @@ final class EncounterRuntime: ObservableObject {
     }
 
     private func prepare() async -> Bool {
-        if engine != nil { return !status.storageUnavailable }
         guard await prepareQueue(), participationOn, let queue else { return false }
+        do {
+            _ = try await queue.pending()
+            status.storageUnavailable = false
+        } catch {
+            status.storageUnavailable = true
+            return false
+        }
+        if engine != nil { return true }
         // Do not create either Bluetooth manager until consent and durable storage are ready.
-        let transport = CoreBluetoothTransport()
+        let transport = await transportFactory()
+        guard participationOn else { return false }
         let engine = EncounterEngine(transport: transport, tokenProvider: TokenProvider(store: tokenStore),
-                                     receiptQueue: queue, approach: presenceApproach, sessionFlag: { false })
+                                     receiptQueue: queue, clock: clock, approach: presenceApproach, sessionFlag: { false })
         self.engine = engine
         eventTask = Task { [weak self, engine] in
             for await event in engine.events {
@@ -160,12 +203,8 @@ final class EncounterRuntime: ObservableObject {
 
     private func prepareQueue() async -> Bool {
         if queue != nil { return true }
-        // Cache the opening task, including failure: never open a second queue in this process.
-        if Self.receiptQueueTask == nil {
-            Self.receiptQueueTask = Task { try await SwiftDataReceiptQueue.fileBacked() }
-        }
         do {
-            queue = try await Self.receiptQueueTask?.value
+            queue = try await queueOpener()
         } catch {
             status.storageUnavailable = true
             return false
@@ -176,14 +215,13 @@ final class EncounterRuntime: ObservableObject {
     private func replenishTokens() async {
         #if DEVELOPMENT_BUILD
         // A failed Keychain read/write leaves token eligibility to the engine.
-        try? await issuer.replenish(at: Date())
-        await engine?.refresh()
+        let time = await clock.now()
+        try? await issuer.replenish(at: time.wall)
         #endif
     }
 
     private func receive(_ event: EncounterEngineEvent) {
         for observer in eventObservers.values { observer(event) }
-        for continuation in observers.values { continuation.yield(event) }
         switch event {
         case .radioAvailability(let availability): status.radioAvailability = availability
         case .discoveryChanged(let enabled):
@@ -191,12 +229,32 @@ final class EncounterRuntime: ObservableObject {
             if enabled { status.pausedForLackOfToken = false }
         case .participationPausedForLackOfToken:
             status.pausedForLackOfToken = participationOn
+            #if DEVELOPMENT_BUILD
+            guard participationOn, !tokenTopUpInFlight else { return }
+            tokenTopUpInFlight = true
+            Task {
+                await self.serialize {
+                    defer { self.tokenTopUpInFlight = false }
+                    guard self.participationOn, self.engineRunning else { return }
+                    do {
+                        let time = await self.clock.now()
+                        try await self.issuer.replenish(at: time.wall)
+                        await self.engine?.refresh()
+                    } catch { /* Retry is explicit after a failed top-up; never loop. */ }
+                    await self.updateTokenStatus()
+                }
+            }
+            #else
             Task { await self.updateTokenStatus() }
+            #endif
         case .receiptStorageFailed:
             status.storageUnavailable = true
             Task {
-                guard self.status.storageUnavailable else { return }
-                await self.engine?.stop()
+                await self.serialize {
+                    guard self.status.storageUnavailable else { return }
+                    await self.engine?.stop()
+                    self.engineRunning = false
+                }
             }
         case .exchangeCompleted, .evidenceReached:
             // Keep queue/Keychain reads off the event consumer's path so a
@@ -211,16 +269,20 @@ final class EncounterRuntime: ObservableObject {
             status.pendingReceiptCount = nil
             return
         }
-        do { status.pendingReceiptCount = try await queue.pending().count }
+        do {
+            status.pendingReceiptCount = try await queue.pending().count
+            status.storageUnavailable = false
+        }
         catch {
             status.pendingReceiptCount = nil
-            status.storageUnavailable = true
+            if !engineRunning { status.storageUnavailable = true }
         }
         await updateTokenStatus()
     }
 
     private func updateTokenStatus() async {
-        let window = try? await TokenProvider(store: tokenStore).window(at: Date())
+        let time = await clock.now()
+        let window = try? await TokenProvider(store: tokenStore).window(at: time.wall)
         status.validTokenAvailable = window != nil
         status.pausedForLackOfToken = participationOn && window == nil
     }

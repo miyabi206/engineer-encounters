@@ -25,10 +25,10 @@ settings:
       EXCLUDED_SOURCE_FILE_NAMES: ""
     Internal:
       SWIFT_ACTIVE_COMPILATION_CONDITIONS: INTERNAL_BUILD
-      EXCLUDED_SOURCE_FILE_NAMES: "$(inherited) Development/* */Development/* DevelopmentDiagnostics.strings"
+      EXCLUDED_SOURCE_FILE_NAMES: "$(inherited) $(SRCROOT)/App/Development/* DevelopmentDiagnostics.strings"
     Release:
       SWIFT_ACTIVE_COMPILATION_CONDITIONS: ""
-      EXCLUDED_SOURCE_FILE_NAMES: "$(inherited) Development/* */Development/* Diagnostics/* */Diagnostics/* DevelopmentDiagnostics.strings Diagnostics.strings"
+      EXCLUDED_SOURCE_FILE_NAMES: "$(inherited) $(SRCROOT)/App/Development/* $(SRCROOT)/App/Diagnostics/* DevelopmentDiagnostics.strings Diagnostics.strings"
 packages:
   EncounterDomain:
     path: Packages/EncounterDomain
@@ -70,6 +70,8 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
     dependencies:
       - target: EngineerEncounters
+      - package: EncounterDomain
+        product: EncounterDomainTestSupport
 schemes:
   EngineerEncounters:
     build:

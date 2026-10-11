@@ -65,6 +65,20 @@ final class LocalTestTokenIssuerTests: XCTestCase {
         XCTAssertTrue(batch.windows.allSatisfy { $0.validUntil > later })
     }
 
+    func testClockMovingBackRebuildsAtCurrentQuarterHour() async throws {
+        let store = InMemoryTokenBatchStore()
+        let issuer = LocalTestTokenIssuer(store: store)
+        try await issuer.replenish(at: now)
+        let earlier = now.addingTimeInterval(-3600)
+        try await issuer.replenish(at: earlier)
+        let loaded = try await store.load()
+        let windows = try XCTUnwrap(loaded).windows
+        XCTAssertTrue(try XCTUnwrap(windows.first).contains(earlier))
+        XCTAssertEqual(windows.first?.validFrom.timeIntervalSince1970,
+                       floor(earlier.timeIntervalSince1970 / 900) * 900)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(windows.last).validUntil.timeIntervalSince(earlier), 12 * 3600)
+    }
+
     func testStorageFailurePropagates() async {
         let issuer = LocalTestTokenIssuer(store: FailingTokenStore())
         do {

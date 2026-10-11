@@ -21,7 +21,7 @@ struct ContinuousTrialClock: TrialClock {
 @MainActor
 final class TrialRecorder {
     let log: TrialLog
-    private let clock: any TrialClock
+    let clock: any TrialClock
     private let now: () -> Date
     private var trialID: UUID?
     private var startSeconds: TimeInterval = 0
@@ -31,15 +31,15 @@ final class TrialRecorder {
         self.log = log; self.clock = clock; self.now = now
     }
 
-    func beginIfNeeded(metadata: TrialMetadata) {
+    func beginIfNeeded(metadata: TrialMetadata, reason: TrialStartReason = .participationSwitch) {
         guard trialID == nil || !log.records.contains(where: { $0.id == trialID && $0.isOpen }) else { return }
-        begin(metadata: metadata)
+        begin(metadata: metadata, reason: reason)
     }
 
     @discardableResult
     func resetCompleted(success: Bool, metadata: TrialMetadata) -> Bool {
         guard success else { return false }
-        return begin(metadata: metadata)
+        return begin(metadata: metadata, reason: .reset)
     }
 
     func close() {
@@ -51,23 +51,40 @@ final class TrialRecorder {
     }
 
     @discardableResult
-    private func begin(metadata: TrialMetadata) -> Bool {
-        let record = TrialRecord(creationDate: TrialRecord.calendarDate(now()), metadata: metadata)
-        if log.update({ records in
+    private func begin(metadata: TrialMetadata, reason: TrialStartReason) -> Bool {
+        let record = TrialRecord(ordinal: log.nextOrdinal, startReason: reason,
+            creationDate: TrialRecord.calendarDate(now()), metadata: metadata)
+        let persisted = log.update { records in
             for index in records.indices { records[index].isOpen = false }
             records.append(record)
-        }) {
+        }
+        // Keep recording after a failed write; Retry can persist the whole trial.
+        if log.records.contains(where: { $0.id == record.id }) {
             trialID = record.id
             startSeconds = clock.seconds
-            return true
         }
-        return false
+        return persisted
+    }
+
+    func selectPresenceApproach(_ approach: PresenceApproach) {
+        guard let trialID else { return }
+        let selected = approach == .secondExchange ? "secondExchange" : "heldConnection"
+        change(trialID) {
+            if $0.isOpen && $0.metadata.presenceApproach != selected { $0.presenceApproachChanged = true }
+        }
     }
 
     func record(_ event: EncounterEngineEvent) {
         guard let trialID else { return }
         let elapsed = max(0, clock.seconds - startSeconds)
         switch event {
+        case .radioAvailability(let availability):
+            guard availability != .unknown else { return }
+            change(trialID) {
+                if $0.metadata.bluetoothAvailability == "unknown" {
+                    $0.metadata.bluetoothAvailability = String(describing: availability)
+                }
+            }
         case .peerFirstObserved:
             // The engine emits this once per distinct peer between resets/stops.
             // Count that privacy-safe signal without retaining the handle.

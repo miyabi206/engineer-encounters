@@ -27,7 +27,7 @@ final class AppComposition: ObservableObject {
         if participation.isEnabled {
             let runtime = makeRuntime()
             #if DEVELOPMENT_BUILD || INTERNAL_BUILD
-            trialRecorder.beginIfNeeded(metadata: trialMetadata)
+            trialRecorder.beginIfNeeded(metadata: trialMetadata, reason: .launch)
             #endif
             Task {
                 guard participation.isEnabled else { return }
@@ -61,24 +61,29 @@ final class AppComposition: ObservableObject {
         trialLog.prune()
         #endif
     }
+    #if DEVELOPMENT_BUILD || INTERNAL_BUILD
     func resetTrial() async -> Bool {
-        #if DEVELOPMENT_BUILD || INTERNAL_BUILD
         var recorded = false
         let reset = await makeRuntime().resetTrial {
             recorded = self.trialRecorder.resetCompleted(success: true, metadata: self.trialMetadata)
         }
         return reset && recorded
-        #else
-        return await makeRuntime().resetTrial()
-        #endif
     }
     func selectPresenceApproach(_ approach: PresenceApproach) async {
-        #if DEVELOPMENT_BUILD || INTERNAL_BUILD
+        trialRecorder.selectPresenceApproach(approach)
         approachSetting.value = approach
         presenceApproach = approach
-        #endif
         await runtime?.selectPresenceApproach(approach)
     }
+
+    func retryDiagnostics() async {
+        if trialLog.state == .failed { trialLog.retry() }
+        if isParticipating {
+            trialRecorder.beginIfNeeded(metadata: trialMetadata, reason: .launch)
+            await makeRuntime().start()
+        } else { await makeRuntime().refreshLocalSummary() }
+    }
+    #endif
 
     func refreshLocalSummary() async { await makeRuntime().refreshLocalSummary() }
 

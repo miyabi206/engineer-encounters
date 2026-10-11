@@ -36,6 +36,7 @@ for package in EncounterDomain EncounterBluetooth EncounterStorage EncounterBack
     set -- "$@" -I "ios/Packages/$package/.build/out/Products/Debug-iphonesimulator"
 done
 
+# Match project.yml exclusions anchored to $(SRCROOT)/App, regardless of checkout ancestors.
 # Collect arguments individually, preserving the package include paths above.
 case "$configuration" in
     Development) set -- "$@" -D DEVELOPMENT_BUILD ;;

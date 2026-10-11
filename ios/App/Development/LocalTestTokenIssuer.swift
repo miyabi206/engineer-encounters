@@ -11,6 +11,7 @@ actor LocalTestTokenIssuer {
     func replenish(at now: Date) async throws {
         let duration = EncounterProtocol.tokenWindowDuration
         var windows = try await store.load()?.windows.filter { $0.validUntil > now } ?? []
+        if !windows.contains(where: { $0.contains(now) }) { windows = [] }
         if let current = windows.first, current.contains(now),
            let end = windows.last?.validUntil, end.timeIntervalSince(now) >= 60 * 60 {
             return
