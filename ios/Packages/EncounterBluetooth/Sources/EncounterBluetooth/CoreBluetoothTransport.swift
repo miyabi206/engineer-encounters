@@ -20,6 +20,7 @@ public final class CoreBluetoothTransport: NSObject, BluetoothTransport, @unchec
     private var discoveryRequested: Bool?
     private var service: CBMutableService?
     private var publication = Publication()
+    private var publicationRearm: DispatchWorkItem?
     private var restoredCentral: [BluetoothConnection]?
     private var restoredPeripheral: [BluetoothConnection]?
     private var registry: [PeerHandle: CBPeripheral] = [:]
@@ -63,7 +64,10 @@ public final class CoreBluetoothTransport: NSObject, BluetoothTransport, @unchec
         }
     }
 
-    deinit { continuation.finish() }
+    deinit {
+        publicationRearm?.cancel()
+        continuation.finish()
+    }
 
     /// Applies commands in the same serial order as the managers' callbacks.
     public func execute(_ command: BluetoothCommand) async {
@@ -182,6 +186,20 @@ public final class CoreBluetoothTransport: NSObject, BluetoothTransport, @unchec
                 peripheralManager.stopAdvertising()
             case .unavailable:
                 updateAvailability()
+            case .scheduleRearm(let delay):
+                publicationRearm?.cancel()
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self else { return }
+                    checkQueue()
+                    publicationRearm = nil
+                    applyPublication(publication.rearm())
+                    updateAvailability()
+                }
+                publicationRearm = work
+                queue.asyncAfter(deadline: .now() + delay, execute: work)
+            case .cancelRearm:
+                publicationRearm?.cancel()
+                publicationRearm = nil
             }
         }
     }

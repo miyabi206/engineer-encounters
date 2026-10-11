@@ -128,7 +128,10 @@ struct CentralLinks {
 /// Plain publication decisions; Core Bluetooth objects live only in the adapter.
 struct Publication {
     enum Radio { case poweredOn, poweredOff, databaseCleared }
-    enum Action: Equatable { case remove, add, startAdvertising, stopAdvertising, unavailable }
+    enum Action: Equatable {
+        case remove, add, startAdvertising, stopAdvertising, unavailable
+        case scheduleRearm(after: TimeInterval), cancelRearm
+    }
 
     private(set) var requested: Bool?
     private(set) var pending = false
@@ -139,34 +142,40 @@ struct Publication {
     private(set) var unavailable = false
     private(set) var addRetried = false
     private(set) var advertisingRetried = false
+    private var rearmPending = false
     private var radio: Radio = .databaseCleared
 
     mutating func request(_ requested: Bool) -> [Action] {
         self.requested = requested
+        let actions: [Action]
         if requested {
-            recover()
+            actions = recover()
         } else {
+            actions = cancelRearm()
             removalPending = true
         }
-        return reconcile()
+        return actions + reconcile()
     }
 
     mutating func update(_ radio: Radio, isAdvertising: Bool = false) -> [Action] {
+        // An add interrupted by power-off may never deliver its callback.
+        // Forget it on power-on; reconcile still removes before the next add.
+        if self.radio == .poweredOff, radio == .poweredOn { pending = false }
         self.radio = radio
-        recover()
+        let actions = recover()
         if radio == .poweredOn {
             advertising = isAdvertising
         } else {
             advertisingPending = false
             advertising = false
         }
-        // Powered off preserves the local GATT database, including an add in flight.
+        // Powered off preserves the local GATT database until power-on.
         if radio == .databaseCleared {
             pending = false
             published = false
             removalPending = false
         }
-        return reconcile()
+        return actions + reconcile()
     }
 
     mutating func restorePublished() { published = true }
@@ -178,8 +187,7 @@ struct Publication {
             published = true
         } else if requested == true, !removalPending {
             if addRetried {
-                unavailable = true
-                return [.unavailable]
+                return failPublication()
             }
             addRetried = true
         }
@@ -194,18 +202,38 @@ struct Publication {
         advertising = success
         if !success, requested == true, !removalPending {
             if advertisingRetried {
-                unavailable = true
-                return [.unavailable]
+                return failPublication()
             }
             advertisingRetried = true
         }
         return reconcile()
     }
 
-    private mutating func recover() {
+    // Called only when the adapter's scheduled re-arm fires on its private queue.
+    mutating func rearm() -> [Action] {
+        guard rearmPending, requested == true, radio == .poweredOn else { return [] }
+        rearmPending = false
+        return recover() + reconcile()
+    }
+
+    private mutating func failPublication() -> [Action] {
+        unavailable = true
+        guard !rearmPending else { return [.unavailable] }
+        rearmPending = true
+        return [.unavailable, .scheduleRearm(after: 30)]
+    }
+
+    private mutating func cancelRearm() -> [Action] {
+        guard rearmPending else { return [] }
+        rearmPending = false
+        return [.cancelRearm]
+    }
+
+    private mutating func recover() -> [Action] {
         unavailable = false
         addRetried = false
         advertisingRetried = false
+        return cancelRearm()
     }
 
     private mutating func reconcile() -> [Action] {

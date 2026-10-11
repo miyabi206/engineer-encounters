@@ -430,18 +430,34 @@ final class PublicationTests: XCTestCase {
         XCTAssertEqual(publication.update(.poweredOn), [.stopAdvertising, .remove])
     }
 
-    func testPoweredOnRemovesStoppedPendingAddEvenBeforeItsCallback() {
+    func testPoweredOnClearsStoppedPendingAddWithoutWaitingForItsCallback() {
         var publication = Publication()
         _ = publication.update(.poweredOn)
         _ = publication.request(true)
         _ = publication.update(.poweredOff)
         _ = publication.request(false)
         XCTAssertEqual(publication.update(.poweredOn), [.stopAdvertising, .remove])
-        XCTAssertTrue(publication.pending)
-        XCTAssertTrue(publication.removalPending)
-        XCTAssertEqual(publication.didAdd(matchesUUID: true, success: true), [.stopAdvertising, .remove])
+        XCTAssertFalse(publication.pending)
+        XCTAssertFalse(publication.removalPending)
+        XCTAssertEqual(publication.didAdd(matchesUUID: true, success: true), [])
         XCTAssertFalse(publication.pending)
         XCTAssertFalse(publication.published)
+    }
+
+    func testPowerCycleRetriesPendingAddWhoseCallbackNeverArrives() {
+        var publication = Publication()
+        _ = publication.update(.poweredOn)
+        XCTAssertEqual(publication.request(true), [.remove, .add])
+        XCTAssertEqual(publication.update(.poweredOff), [])
+        XCTAssertTrue(publication.pending)
+        XCTAssertEqual(publication.update(.poweredOn), [.remove, .add])
+        XCTAssertTrue(publication.pending) // A fresh add replaced the interrupted one.
+        XCTAssertEqual(publication.update(.poweredOn), [])
+        XCTAssertEqual(publication.request(true), [])
+        XCTAssertEqual(publication.didAdd(matchesUUID: true, success: true), [.startAdvertising])
+        XCTAssertEqual(publication.didStartAdvertising(success: true), [])
+        XCTAssertTrue(publication.published)
+        XCTAssertTrue(publication.advertising)
     }
 
     func testRestartDuringAddCannotAddTwiceBeforeItsCallback() {
@@ -474,17 +490,18 @@ final class PublicationTests: XCTestCase {
         _ = publication.request(true)
         XCTAssertEqual(publication.didAdd(matchesUUID: true, success: false), [.remove, .add])
         XCTAssertTrue(publication.addRetried)
-        XCTAssertEqual(publication.didAdd(matchesUUID: true, success: false), [.unavailable])
+        XCTAssertEqual(publication.didAdd(matchesUUID: true, success: false),
+                       [.unavailable, .scheduleRearm(after: 30)])
         XCTAssertTrue(publication.unavailable)
         XCTAssertFalse(publication.pending)
         XCTAssertFalse(publication.published)
         XCTAssertEqual(publication.didAdd(matchesUUID: true, success: false), [])
-        XCTAssertEqual(publication.request(true), [.remove, .add])
+        XCTAssertEqual(publication.request(true), [.cancelRearm, .remove, .add])
         XCTAssertFalse(publication.unavailable)
         XCTAssertFalse(publication.addRetried)
         _ = publication.didAdd(matchesUUID: true, success: false)
         _ = publication.didAdd(matchesUUID: true, success: false)
-        XCTAssertEqual(publication.update(.poweredOn), [.remove, .add])
+        XCTAssertEqual(publication.update(.poweredOn), [.cancelRearm, .remove, .add])
         XCTAssertFalse(publication.unavailable)
     }
 
@@ -495,16 +512,96 @@ final class PublicationTests: XCTestCase {
         _ = publication.didAdd(matchesUUID: true, success: true)
         XCTAssertEqual(publication.didStartAdvertising(success: false), [.startAdvertising])
         XCTAssertTrue(publication.advertisingRetried)
-        XCTAssertEqual(publication.didStartAdvertising(success: false), [.unavailable])
+        XCTAssertEqual(publication.didStartAdvertising(success: false),
+                       [.unavailable, .scheduleRearm(after: 30)])
         XCTAssertTrue(publication.unavailable)
         XCTAssertTrue(publication.published)
         XCTAssertEqual(publication.didStartAdvertising(success: false), [])
-        XCTAssertEqual(publication.update(.poweredOn), [.startAdvertising])
+        XCTAssertEqual(publication.update(.poweredOn), [.cancelRearm, .startAdvertising])
         XCTAssertFalse(publication.unavailable)
         _ = publication.didStartAdvertising(success: false)
         _ = publication.didStartAdvertising(success: false)
-        XCTAssertEqual(publication.request(true), [.startAdvertising])
+        XCTAssertEqual(publication.request(true), [.cancelRearm, .startAdvertising])
         XCTAssertFalse(publication.advertisingRetried)
+    }
+
+    func testDelayedRearmBoundsPersistentAddFailuresAndHealsTransientFailure() {
+        var publication = Publication()
+        var radio = CombinedRadio(central: .poweredOn, peripheral: .poweredOn)
+        XCTAssertEqual(radio.update(), .available)
+        _ = publication.update(.poweredOn)
+        _ = publication.request(true)
+        for _ in 0..<3 {
+            XCTAssertEqual(publication.didAdd(matchesUUID: true, success: false), [.remove, .add])
+            XCTAssertEqual(publication.didAdd(matchesUUID: true, success: false),
+                           [.unavailable, .scheduleRearm(after: 30)])
+            radio.peripheral = publication.unavailable ? .unavailable : .poweredOn
+            XCTAssertEqual(radio.update(), .unavailable)
+            XCTAssertEqual(publication.didAdd(matchesUUID: true, success: false), [])
+            XCTAssertEqual(publication.rearm(), [.remove, .add])
+            XCTAssertFalse(publication.unavailable)
+            XCTAssertFalse(publication.addRetried)
+            radio.peripheral = publication.unavailable ? .unavailable : .poweredOn
+            XCTAssertEqual(radio.update(), .available)
+            XCTAssertEqual(publication.rearm(), []) // Only one re-arm per failure pair.
+        }
+        XCTAssertEqual(publication.didAdd(matchesUUID: true, success: true), [.startAdvertising])
+        XCTAssertEqual(publication.didStartAdvertising(success: true), [])
+        XCTAssertTrue(publication.advertising)
+    }
+
+    func testDelayedRearmRetriesAdvertisingWithoutRepublishingService() {
+        var publication = Publication()
+        _ = publication.update(.poweredOn)
+        _ = publication.request(true)
+        _ = publication.didAdd(matchesUUID: true, success: true)
+        for _ in 0..<3 {
+            XCTAssertEqual(publication.didStartAdvertising(success: false), [.startAdvertising])
+            XCTAssertEqual(publication.didStartAdvertising(success: false),
+                           [.unavailable, .scheduleRearm(after: 30)])
+            XCTAssertEqual(publication.didStartAdvertising(success: false), [])
+            XCTAssertEqual(publication.rearm(), [.startAdvertising])
+            XCTAssertFalse(publication.unavailable)
+            XCTAssertFalse(publication.advertisingRetried)
+            XCTAssertTrue(publication.published)
+            XCTAssertEqual(publication.rearm(), [])
+        }
+        XCTAssertEqual(publication.didStartAdvertising(success: true), [])
+        XCTAssertTrue(publication.advertising)
+    }
+
+    func testStoppingDiscoveryCancelsRearmAndLateRearmCannotRepublish() {
+        for advertisingFailure in [false, true] {
+            var publication = Publication()
+            _ = publication.update(.poweredOn)
+            _ = publication.request(true)
+            if advertisingFailure {
+                _ = publication.didAdd(matchesUUID: true, success: true)
+                _ = publication.didStartAdvertising(success: false)
+                _ = publication.didStartAdvertising(success: false)
+            } else {
+                _ = publication.didAdd(matchesUUID: true, success: false)
+                _ = publication.didAdd(matchesUUID: true, success: false)
+            }
+            XCTAssertEqual(publication.request(false), [.cancelRearm, .stopAdvertising, .remove])
+            XCTAssertEqual(publication.rearm(), [])
+            XCTAssertFalse(publication.pending)
+            XCTAssertFalse(publication.advertisingPending)
+            XCTAssertFalse(publication.published)
+            XCTAssertEqual(publication.request(true), [.remove, .add])
+        }
+    }
+
+    func testRadioLossCancelsRearmUntilPoweredOn() {
+        var publication = Publication()
+        _ = publication.update(.poweredOn)
+        _ = publication.request(true)
+        _ = publication.didAdd(matchesUUID: true, success: false)
+        _ = publication.didAdd(matchesUUID: true, success: false)
+        XCTAssertEqual(publication.update(.poweredOff), [.cancelRearm])
+        XCTAssertEqual(publication.rearm(), [])
+        XCTAssertEqual(publication.update(.poweredOn), [.remove, .add])
+        XCTAssertEqual(publication.rearm(), [])
     }
 
     func testLateAdvertisingCallbackAfterStopCannotRestartDiscovery() {
