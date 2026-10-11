@@ -64,6 +64,7 @@ public struct EncounterEngineCore: Sendable {
         let connection: BluetoothConnection
         let approach: PresenceApproach
         let createdAt: TimeInterval
+        var lastObservedAt: TimeInterval?
         var mayRetry = false
         var stage: Stage
         var connected: Bool
@@ -84,11 +85,18 @@ public struct EncounterEngineCore: Sendable {
         let isCheckpoint: Bool
         let original: EncounterReceipt?
     }
+    private struct PendingPeer: Sendable {
+        let insertionSequence: UInt64
+        var lastObservedAt: TimeInterval
+        var mayRetry: Bool
+    }
     private var attempts: [BluetoothConnection: Attempt] = [:]
     private var closing: [BluetoothConnection: TimeInterval] = [:]
     // A queued observation retains one retry; an automatic retry retains none.
-    private var pendingPeers: [PeerHandle: Bool] = [:]
+    private var pendingPeers: [PeerHandle: PendingPeer] = [:]
+    private var pendingSequence: UInt64 = 0
     private static let pendingPeerLimit = 256
+    private static let pendingPeerLifetime: TimeInterval = 30
     private var saves: [UInt64: Save] = [:]
     private var backoff: [PeerHandle: TimeInterval] = [:]
     private var observed: Set<PeerHandle> = []
@@ -114,6 +122,9 @@ public struct EncounterEngineCore: Sendable {
         let active = Set(attempts.values.filter { $0.connected || $0.stage == .connecting }.map(\.connection))
         return active.union(closing.keys).count
     }
+
+    /// The runtime only loads token windows while participating or processing a start.
+    var isRunning: Bool { running }
 
     /// Reduces one ordered input; supplied monotonic time must never run backwards.
     public mutating func receive(_ input: EncounterEngineInput, context: EncounterEngineContext) -> EncounterEngineOutput {
@@ -158,12 +169,12 @@ public struct EncounterEngineCore: Sendable {
                     effects.append(.transport(.connect(key.peer)))
                 }
             }
-            for peer in pendingPeers.keys.sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
+            for (peer, pending) in pendingPeers.sorted(by: { $0.value.insertionSequence < $1.value.insertionSequence }) {
                 let key = BluetoothConnection(peer: peer, role: .central)
                 guard attempts[key] == nil, closing[key] == nil, backoff[peer] == nil,
                       activeConnectionCount < EncounterProtocol.activeConnectionLimit else { continue }
-                let mayRetry = pendingPeers.removeValue(forKey: peer)!
-                start(peer, mayRetry: mayRetry, context, effects: &effects)
+                pendingPeers.removeValue(forKey: peer)
+                start(peer, pending: pending, context, effects: &effects)
             }
         }
         return EncounterEngineOutput(effects: effects, wakeUpDeadline: nextDeadline(context))
@@ -202,6 +213,7 @@ public struct EncounterEngineCore: Sendable {
     }
     private mutating func expire(_ context: EncounterEngineContext, effects: inout [EncounterEngineEffect]) {
         closing = closing.filter { $0.value > context.time.monotonic }
+        pendingPeers = pendingPeers.filter { $0.value.lastObservedAt + Self.pendingPeerLifetime > context.time.monotonic }
         for key in sortedKeys() {
             guard let attempt = attempts[key] else { continue }
             if let firstAt = attempt.firstCompletedAt,
@@ -237,7 +249,8 @@ public struct EncounterEngineCore: Sendable {
             }
         }
         dates.append(contentsOf: closing.values)
-        for peer in pendingPeers.keys {
+        for (peer, pending) in pendingPeers {
+            dates.append(pending.lastObservedAt + Self.pendingPeerLifetime)
             if let deadline = backoff[peer], deadline > context.time.monotonic { dates.append(deadline) }
         }
         return dates.min()
@@ -252,8 +265,12 @@ public struct EncounterEngineCore: Sendable {
             if observed.insert(peer).inserted { effects.append(.event(.peerFirstObserved(peer))) }
             let key = BluetoothConnection(peer: peer, role: .central)
             guard running else { return }
-            if attempts[key] != nil { attempts[key]?.mayRetry = true; return }
-            remember(peer, mayRetry: true)
+            if attempts[key] != nil {
+                attempts[key]?.mayRetry = true
+                attempts[key]?.lastObservedAt = context.time.monotonic
+                return
+            }
+            remember(peer, mayRetry: true, lastObservedAt: context.time.monotonic)
         case .connected(let key):
             // A new incoming link supersedes a missing teardown callback for the old one.
             if key.role == .peripheral { closing.removeValue(forKey: key) }
@@ -336,11 +353,12 @@ public struct EncounterEngineCore: Sendable {
         case .disconnected(let key):
             closing.removeValue(forKey: key)
             guard var attempt = attempts[key] else { return }
+            // A cancelled older link can report teardown after a new dial has begun.
+            if key.role == .central && attempt.stage == .connecting { return }
             if attempt.approach == .secondExchange && attempt.stage == .waiting {
                 attempt.connected = false; attempts[key] = attempt
             } else {
                 attempt.connected = false
-                if attempt.stage == .connecting { attempt.stage = .ready }
                 attempts[key] = attempt
                 end(key, reason: .disconnected, effects: &effects)
             }
@@ -401,15 +419,22 @@ public struct EncounterEngineCore: Sendable {
         guard attempt.first != nil else { return .initialExchange }
         return attempt.approach == .heldConnection ? .heldConnectionCheckpoint : .reconnectEvidence
     }
-    private mutating func remember(_ peer: PeerHandle, mayRetry: Bool) {
-        if let existing = pendingPeers[peer] { pendingPeers[peer] = existing || mayRetry }
-        else if pendingPeers.count < Self.pendingPeerLimit { pendingPeers[peer] = mayRetry }
+    private mutating func remember(_ peer: PeerHandle, mayRetry: Bool, lastObservedAt: TimeInterval) {
+        guard lastObservedAt + Self.pendingPeerLifetime > currentMonotonic else { return }
+        if var existing = pendingPeers[peer] {
+            existing.mayRetry = existing.mayRetry || mayRetry
+            existing.lastObservedAt = max(existing.lastObservedAt, lastObservedAt)
+            pendingPeers[peer] = existing
+        } else if pendingPeers.count < Self.pendingPeerLimit {
+            pendingSequence &+= 1
+            pendingPeers[peer] = PendingPeer(insertionSequence: pendingSequence, lastObservedAt: lastObservedAt, mayRetry: mayRetry)
+        }
     }
-    private mutating func start(_ peer: PeerHandle, mayRetry: Bool, _ context: EncounterEngineContext,
+    private mutating func start(_ peer: PeerHandle, pending: PendingPeer, _ context: EncounterEngineContext,
                                 effects: inout [EncounterEngineEffect]) {
         let key = BluetoothConnection(peer: peer, role: .central)
         attempts[key] = Attempt(connection: key, approach: approach, createdAt: context.time.monotonic,
-                                mayRetry: mayRetry, stage: .connecting, connected: false,
+                                lastObservedAt: pending.lastObservedAt, mayRetry: pending.mayRetry, stage: .connecting, connected: false,
                                 deadline: context.time.monotonic + EncounterProtocol.connectTimeout)
         backoff[peer] = context.time.monotonic + EncounterProtocol.duplicateAttemptBackoff
         effects.append(.transport(.connect(peer)))
@@ -504,7 +529,9 @@ public struct EncounterEngineCore: Sendable {
             backoff[key.peer] = currentMonotonic + EncounterProtocol.duplicateAttemptBackoff
             switch reason {
             case .connectTimeout, .operationTimeout, .failed, .invalidFrame, .disconnected, .storageFailure:
-                if attempt.mayRetry { remember(key.peer, mayRetry: false) }
+                if attempt.mayRetry, let lastObservedAt = attempt.lastObservedAt {
+                    remember(key.peer, mayRetry: false, lastObservedAt: lastObservedAt)
+                }
             default: break
             }
         }

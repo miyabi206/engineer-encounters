@@ -70,6 +70,53 @@ final class EncounterEngineRuntimeTests: XCTestCase {
         await engine.stop(); await transport.finish()
     }
 
+    func testStoppedTransportEventsDoNotCacheTokensAndRestartServesTheReplacedBatch() async throws {
+        for reset in [false, true] {
+            let batch = try EncounterSamples.batch(count: 1)
+            let transport = RuntimeTransport(), store = RuntimeTokenStore(batch), clock = ManualEncounterClock()
+            let engine = engine(transport, store, clock)
+            await engine.start(); try await idle(engine, processed: 1)
+            if reset { await engine.reset() } else { await engine.stop() }
+            let before = await store.loads
+            await transport.emit(.availabilityChanged(.available)); try await idle(engine, processed: 2)
+            let afterEvent = await store.loads; XCTAssertEqual(afterEvent, before)
+            await engine.refresh()
+            let afterRefresh = await store.loads; XCTAssertEqual(afterRefresh, before)
+            let replacement = try TokenWindow(token: EncounterSamples.token(seed: 999),
+                                              validFrom: batch.windows[0].validFrom, validUntil: batch.windows[0].validUntil)
+            await store.save(try TokenBatch(windows: [replacement]))
+            await engine.start()
+            let afterStart = await store.loads; XCTAssertEqual(afterStart, before + 1)
+            let key = BluetoothConnection(peer: PeerHandle(), role: .peripheral)
+            await transport.emit(.connected(key)); await transport.emit(.incomingRead(key.peer, .init(1)))
+            try await idle(engine, processed: 4)
+            let commands = await transport.commands()
+            let snapshot = try XCTUnwrap(commands.compactMap { if case .answerRead(_, _, let value?) = $0 { value } else { nil } }.last)
+            XCTAssertEqual(try ExchangeFrame.decode(snapshot.frame).token, replacement.token)
+            await engine.stop(); await transport.finish()
+        }
+    }
+
+    func testStartReloadsAValidCachedWindowEvenWhenAlreadyRunning() async throws {
+        let batch = try EncounterSamples.batch(count: 1)
+        let transport = RuntimeTransport(), store = RuntimeTokenStore(batch), clock = ManualEncounterClock()
+        let engine = engine(transport, store, clock)
+        await engine.start(); try await idle(engine, processed: 1)
+        let before = await store.loads
+        let replacement = try TokenWindow(token: EncounterSamples.token(seed: 999),
+                                          validFrom: batch.windows[0].validFrom, validUntil: batch.windows[0].validUntil)
+        await store.save(try TokenBatch(windows: [replacement]))
+        await engine.start()
+        let after = await store.loads; XCTAssertEqual(after, before + 1)
+        let key = BluetoothConnection(peer: PeerHandle(), role: .peripheral)
+        await transport.emit(.connected(key)); await transport.emit(.incomingRead(key.peer, .init(1)))
+        try await idle(engine, processed: 3)
+        let commands = await transport.commands()
+        let snapshot = try XCTUnwrap(commands.compactMap { if case .answerRead(_, _, let value?) = $0 { value } else { nil } }.last)
+        XCTAssertEqual(try ExchangeFrame.decode(snapshot.frame).token, replacement.token)
+        await engine.stop(); await transport.finish()
+    }
+
     func testUnconsumedDiagnosticStreamRetainsOnlyTheNewest256Events() async throws {
         let transport = RuntimeTransport(), store = RuntimeTokenStore(try EncounterSamples.batch()), clock = ManualEncounterClock()
         var engine: EncounterEngine? = engine(transport, store, clock)

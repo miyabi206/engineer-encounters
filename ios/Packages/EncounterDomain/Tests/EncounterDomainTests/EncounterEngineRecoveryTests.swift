@@ -42,6 +42,8 @@ final class EncounterEngineRecoveryTests: XCTestCase {
         await rig.second.transport.execute(.disconnect(.init(peer: FakePhoneID.first.peerHandle, role: .peripheral)))
         let links = await rig.link.activeLinkCount; XCTAssertEqual(links, 1)
         try await rig.advance(by: 60, refreshing: false)
+        // A fresh foreground scan keeps this still-nearby peer eligible for one retry.
+        await rig.first.transport.inject(.peerObserved(FakePhoneID.second.peerHandle)); try await rig.settle()
         await rig.link.breakLink(central: .first); try await rig.settle()
         let stale = try await receipts(rig.second); XCTAssertEqual(stale, initial)
         try await rig.advance(by: 10, refreshing: false)
@@ -148,6 +150,7 @@ final class EncounterEngineRecoveryTests: XCTestCase {
         XCTAssertFalse(TestEncounterConfirmation.confirms(failedA, failedB))
         XCTAssertFalse(failedB.contains(where: \.hasQualifyingAmbientEvidence))
         await queue.setWrites()
+        await rig.first.transport.inject(.peerObserved(FakePhoneID.second.peerHandle)); try await rig.settle()
         try await rig.advance(by: 10, refreshing: false)
         try await rig.advance(by: 120, refreshing: false)
         let a = try await receipts(rig.first), b = try await receipts(rig.second)

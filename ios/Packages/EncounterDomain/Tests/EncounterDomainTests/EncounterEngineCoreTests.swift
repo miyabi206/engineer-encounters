@@ -44,8 +44,9 @@ final class EncounterEngineCoreTests: XCTestCase {
         }.first)
         return try ExchangeFrame.decode(bytes)
     }
-    private func completePeripheral(_ core: inout EncounterEngineCore, token: TokenWindow? = nil) throws -> EncounterReceipt {
-        let key = BluetoothConnection(peer: peer(), role: .peripheral)
+    private func completePeripheral(_ core: inout EncounterEngineCore, peer peerHandle: PeerHandle? = nil,
+                                    token: TokenWindow? = nil) throws -> EncounterReceipt {
+        let key = BluetoothConnection(peer: peerHandle ?? peer(), role: .peripheral)
         _ = core.receive(.transport(.connected(key)), context: context(token: token))
         let frame = try offered(core.receive(.transport(.incomingRead(key.peer, .init(1))), context: context(token: token)))
         let write = try ExchangeFrame(phase: .initialExchange, token: EncounterSamples.token(seed: 999), nonce: frame.nonce)
@@ -77,6 +78,7 @@ final class EncounterEngineCoreTests: XCTestCase {
             case .connectTimeout:
                 endTime = 10; output = core.receive(.wakeUp, context: context(endTime))
             case .disconnected:
+                _ = try readID(core.receive(.transport(.connected(key)), context: context()))
                 endTime = 0; output = core.receive(.transport(.disconnected(key)), context: context())
             default:
                 let read = try readID(core.receive(.transport(.connected(key)), context: context()))
@@ -141,11 +143,86 @@ final class EncounterEngineCoreTests: XCTestCase {
         for index in 1...5 { _ = core.receive(.transport(.peerObserved(peer(index))), context: context()) }
         _ = core.receive(.wakeUp, context: context(10))
         XCTAssertEqual(core.activeConnectionCount, 4)
-        _ = core.receive(.wakeUp, context: context(20))
-        _ = core.receive(.wakeUp, context: context(30))
-        let freed = core.receive(.wakeUp, context: context(40))
-        XCTAssertEqual(commands(freed), [.connect(peer(5))])
+        let freed = core.receive(.wakeUp, context: context(20))
+        XCTAssertEqual(commands(freed), [.connect(peer(5)), .connect(peer(1)), .connect(peer(2)), .connect(peer(3))])
+        XCTAssertEqual(core.activeConnectionCount, 4)
+    }
+
+    func testNineContinuouslyObservedPeersAreDialledInInsertionOrderBeforeRetries() {
+        var core = started()
+        let peers = [1, 2, 3, 4, 9, 8, 7, 6, 5].map { peer($0) }
+        var dialled: [PeerHandle] = []
+        // Foreground scans re-report all peers; missing teardown callbacks still release slots.
+        for seconds in stride(from: 0.0, through: 60, by: 2) {
+            for peer in peers {
+                let output = core.receive(.transport(.peerObserved(peer)), context: context(seconds))
+                dialled += commands(output).compactMap { if case .connect(let peer) = $0 { peer } else { nil } }
+                XCTAssertLessThanOrEqual(core.activeConnectionCount, EncounterProtocol.activeConnectionLimit)
+            }
+        }
+        XCTAssertEqual(Array(dialled.prefix(peers.count)), peers)
+        XCTAssertEqual(Set(dialled), Set(peers))
+        XCTAssertGreaterThan(dialled.count, peers.count)
+    }
+
+    func testSilentPendingPeerExpiresWhileNewObservationsKeepAnotherPeerEligible() throws {
+        var core = started()
+        for index in 1...4 { _ = try completePeripheral(&core, peer: peer(index)) }
+        let silent = core.receive(.transport(.peerObserved(peer(5))), context: context())
+        _ = core.receive(.transport(.peerObserved(peer(6))), context: context())
+        XCTAssertTrue(commands(silent).isEmpty)
+        XCTAssertEqual(silent.wakeUpDeadline, 30)
+        _ = core.receive(.transport(.peerObserved(peer(6))), context: context(29))
+        let expired = core.receive(.wakeUp, context: context(30))
+        XCTAssertEqual(expired.wakeUpDeadline, 59)
+        let freed = core.receive(.transport(.disconnected(.init(peer: peer(1), role: .peripheral))), context: context(31))
+        XCTAssertEqual(commands(freed), [.connect(peer(6))])
+        XCTAssertEqual(core.activeConnectionCount, 4)
+        // A later real discovery can bring the forgotten peer back into range.
+        _ = core.receive(.transport(.peerObserved(peer(5))), context: context(32))
+        let rediscovered = core.receive(.transport(.disconnected(.init(peer: peer(2), role: .peripheral))), context: context(32))
+        XCTAssertEqual(commands(rediscovered), [.connect(peer(5))])
+    }
+
+    func testAutomaticRetryUsesLastRealObservationInsteadOfTerminationTime() throws {
+        for observedAgain in [false, true] {
+            var core = started()
+            _ = try completeCentral(&core)
+            if observedAgain { _ = core.receive(.transport(.peerObserved(peer())), context: context(20)) }
+            _ = core.receive(.transport(.disconnected(.init(peer: peer(), role: .central))), context: context(35))
+            let retry = core.receive(.wakeUp, context: context(45))
+            XCTAssertEqual(commands(retry).contains(.connect(peer())), observedAgain)
+        }
+    }
+
+    func testConnectingAttemptIgnoresDisconnectedAndEndsOnConnectFailed() {
+        var core = started()
+        let key = BluetoothConnection(peer: peer(), role: .central)
+        _ = core.receive(.transport(.peerObserved(key.peer)), context: context())
+        let stray = core.receive(.transport(.disconnected(key)), context: context(1))
+        XCTAssertTrue(stray.effects.isEmpty)
         XCTAssertEqual(core.activeConnectionCount, 1)
+        XCTAssertEqual(stray.wakeUpDeadline, 10)
+        let failed = core.receive(.transport(.connectFailed(key.peer)), context: context(2))
+        XCTAssertTrue(ended(failed, .failed))
+        XCTAssertEqual(core.activeConnectionCount, 0)
+    }
+
+    func testImmediateRestartIgnoresLateDisconnectedAfterANewConnectingAttemptBegins() throws {
+        var core = started()
+        let key = BluetoothConnection(peer: peer(), role: .central)
+        _ = core.receive(.transport(.peerObserved(key.peer)), context: context())
+        let stopped = core.receive(.stop, context: context(1))
+        XCTAssertTrue(commands(stopped).contains(.disconnect(key)))
+        _ = core.receive(.start, context: context(1))
+        _ = core.receive(.transport(.peerObserved(key.peer)), context: context(1))
+        // The cancelled link's teardown callback arrives after its slot grace period.
+        let redial = core.receive(.wakeUp, context: context(11))
+        XCTAssertEqual(commands(redial), [.connect(key.peer)])
+        let late = core.receive(.transport(.disconnected(key)), context: context(11))
+        XCTAssertTrue(late.effects.isEmpty)
+        XCTAssertEqual(core.activeConnectionCount, 1)
+        _ = try readID(core.receive(.transport(.connected(key)), context: context(11)))
     }
 
     func testRadioLossDropsClosingEntriesIncludingThoseCreatedDuringTeardown() {

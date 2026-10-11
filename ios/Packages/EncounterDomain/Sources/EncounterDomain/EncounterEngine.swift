@@ -91,13 +91,15 @@ public actor EncounterEngine {
             }
         }
     }
-    private func context(reloadToken: Bool = false) async -> EncounterEngineContext {
+    private func context(reloadToken: Bool = false, starting: Bool = false) async -> EncounterEngineContext {
         let time = await clock.now()
-        if cachedWindow?.contains(time.wall) != true { cachedWindow = nil }
-        if reloadToken || cachedWindow == nil {
-            do { cachedWindow = try await tokens.window(at: time.wall) }
-            catch { /* A valid cached window survives a transient store read failure. */ }
-        }
+        if core.isRunning || starting {
+            if cachedWindow?.contains(time.wall) != true { cachedWindow = nil }
+            if reloadToken || starting || cachedWindow == nil {
+                do { cachedWindow = try await tokens.window(at: time.wall) }
+                catch { /* A valid cached window survives a transient store read failure. */ }
+            }
+        } else { cachedWindow = nil }
         let flag = await sessionFlag()
         return EncounterEngineContext(time: time, tokenWindow: cachedWindow, sessionFlag: flag)
     }
@@ -120,18 +122,16 @@ public actor EncounterEngine {
     private func drain() async {
         while !pending.isEmpty {
             let next = pending.removeFirst()
-            if case .start = next.input, !(await recoverReceipts()) {
-                next.completion.resume()
-                continue
-            }
-            let context = await context(reloadToken: next.reloadToken)
+            let starting: Bool
+            if case .start = next.input {
+                guard await recoverReceipts() else { next.completion.resume(); continue }
+                starting = true
+            } else { starting = false }
+            let context = await context(reloadToken: next.reloadToken, starting: starting)
             let output = core.receive(next.input, context: context)
+            if !core.isRunning { cachedWindow = nil }
             let deadline = await apply(output)
             schedule(deadline)
-            switch next.input {
-            case .stop, .reset: cachedWindow = nil
-            default: break
-            }
             if next.isTransport { processedTransportEventCount &+= 1 }
             next.completion.resume()
         }
