@@ -35,6 +35,8 @@ for configuration in Development Internal Release; do
 
     for marker in DiagnosticsView TrialRecorder TrialLog DemoSwitchSetting LocalTestTokenIssuer DevelopmentDiagnosticsEntry LocalTestTokens; do
         case "$marker:$configuration" in
+            # Require DiagnosticsView for Internal once the Settings list gives it a route to S22.
+            DiagnosticsView:Internal) continue ;;
             LocalTestTokenIssuer:Internal|DevelopmentDiagnosticsEntry:Internal|LocalTestTokens:Internal|*:Release) expected=absent ;;
             *) expected=present ;;
         esac
