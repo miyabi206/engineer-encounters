@@ -146,9 +146,9 @@ public final class CoreBluetoothTransport: NSObject, BluetoothTransport, @unchec
             link.peripheral.writeValue(frame, for: characteristic, type: .withResponse)
         case .disconnect(let connection):
             if connection.role == .central {
-                let wasReady = centralLinks.state(connection.peer) == .ready
-                emit(centralLinks.disconnect(connection.peer))
-                cancelLink(connection.peer, wasReady: wasReady)
+                let disconnection = centralLinks.disconnect(connection.peer)
+                emit(disconnection.event)
+                cancelLink(connection.peer, wasReady: disconnection.wasReady)
                 restartScan()
             } else if peripheralLinks.close(connection.peer) {
                 dropPeripheralRequests(connection.peer)
@@ -248,10 +248,10 @@ public final class CoreBluetoothTransport: NSObject, BluetoothTransport, @unchec
         startScan()
     }
 
-    private func cancelLink(_ peer: PeerHandle, wasReady: Bool? = nil) {
+    private func cancelLink(_ peer: PeerHandle, wasReady: Bool? = nil, readTokenValid: Bool = true) {
         guard let link = links.removeValue(forKey: peer) else { return }
         failOperations(peer, link)
-        beginCancellation(peer, peripheral: link.peripheral, readToken: link.readToken,
+        beginCancellation(peer, peripheral: link.peripheral, readToken: readTokenValid ? link.readToken : nil,
                           wasReady: wasReady ?? (centralLinks.state(peer) == .ready))
     }
 
@@ -399,7 +399,10 @@ extension CoreBluetoothTransport: CBCentralManagerDelegate {
         let peer = peer(peripheral.identifier)
         guard let link = links[peer], link.peripheral === peripheral,
               centralLinks.state(peer) == .pending else {
-            if cancellations[peer]?.peripheral === peripheral { return }
+            if let cancellation = cancellations[peer], cancellation.peripheral === peripheral {
+                applyTeardown(cancellation.teardown.didConnect(), for: peer)
+                return
+            }
             if links[peer] == nil, cancellations[peer] == nil,
                RadioAdmission.canTrackCentral(links: links.count, cancellations: cancellations.count) {
                 beginCancellation(peer, peripheral: peripheral)
@@ -556,7 +559,7 @@ extension CoreBluetoothTransport: CBPeripheralDelegate {
         let peer = peer(peripheral.identifier)
         guard let link = links[peer], link.peripheral === peripheral else { return }
         if centralLinks.state(peer) == .ready {
-            cancelLink(peer)
+            cancelLink(peer, readTokenValid: false)
             if let event = centralLinks.end(peer) { emit(event) }
             restartScan()
         } else { failConnect(peer) }
@@ -627,25 +630,25 @@ extension CoreBluetoothTransport: CBPeripheralManagerDelegate {
             peripheral.respond(to: request, withResult: .readNotPermitted); return
         }
         let token = service?.characteristics?.first { $0.uuid == peripheralTokenUUID } as? CBMutableCharacteristic
-        let isSubscribed = peripheral.state == .poweredOn && publication.published && discoveryRequested != false
-            && token === request.characteristic
-            && token?.subscribedCentrals?.contains { $0.identifier == request.central.identifier } == true
-        switch peripheralLinks.admitRead(peer, offset: request.offset, isSubscribed: isSubscribed,
-                                        backlogCount: eventDelivery.count) {
-        case .refused:
+        let isSubscribed = RadioAdmission.permitsRead(
+            poweredOn: peripheral.state == .poweredOn, servicePublished: publication.published,
+            discoveryRequested: discoveryRequested, characteristicUUID: request.characteristic.uuid.uuidString,
+            centralID: request.central.identifier,
+            subscribedCentralIDs: token?.subscribedCentrals?.map(\.identifier) ?? [])
+        let admission = peripheralLinks.admitRead(peer, offset: request.offset, isSubscribed: isSubscribed,
+                                                 backlogCount: eventDelivery.count)
+        guard admission != .refused else {
             peripheral.respond(to: request, withResult: .readNotPermitted); return
-        case .connected:
-            emit(.connected(.init(peer: peer, role: .peripheral)))
-        case .existing: break
         }
         if request.offset == 0 {
             let id = requestID()
             // Refuse another request until the engine answers the admitted one.
             guard snapshots.begin(peer, request: id) else {
+                for event in admission.events(peer: peer, request: nil) { emit(event) }
                 peripheral.respond(to: request, withResult: .unlikelyError); return
             }
             pendingReads[id] = request
-            emit(.incomingRead(peer, id))
+            for event in admission.events(peer: peer, request: id) { emit(event) }
         } else if let frame = snapshots.continuation(peer, offset: request.offset, now: Date()) {
             request.value = frame
             peripheral.respond(to: request, withResult: .success)
