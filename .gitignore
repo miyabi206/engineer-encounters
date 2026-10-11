@@ -4,3 +4,4 @@
 DerivedData/
 /ios/EngineerEncounters.xcodeproj/
 /ios/Config/Local.xcconfig
+.tmp/
