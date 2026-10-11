@@ -1,7 +1,7 @@
 import Foundation
 
 /// Identifies this phone's role in the Bluetooth exchange.
-public enum ExchangeRole: String, Codable, Sendable { case central, peripheral }
+public enum ExchangeRole: String, Codable, Sendable, Hashable { case central, peripheral }
 
 /// Candidate acceptance remains pending until a terminal server acknowledgement.
 public enum ReceiptUploadStatus: String, Codable, Sendable {
@@ -55,9 +55,9 @@ public struct EncounterReceipt: Codable, Sendable, Equatable, Identifiable {
         self.uploadStatus = uploadStatus
     }
 
-    /// A completed checkpoint and at least 120 monotonic seconds are both required.
+    /// A checkpoint or explicitly joined second exchange needs 120 monotonic seconds.
     public var hasQualifyingAmbientEvidence: Bool {
-        checkpoint != nil && observedDuration >= EncounterProtocol.ambientPresenceThreshold
+        (checkpoint != nil || priorExchangeNonce != nil) && observedDuration >= EncounterProtocol.ambientPresenceThreshold
     }
 
     /// Retries and checkpoint updates never move the 48-hour observation deadline.

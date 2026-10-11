@@ -85,6 +85,11 @@ public struct TokenProvider: Sendable {
 
     /// Prunes expired windows before returning a current token; never extends validity.
     public func token(at wallTime: Date) async throws -> TemporaryToken? {
+        try await window(at: wallTime)?.token
+    }
+
+    /// Returns the validity bound for immutable Bluetooth read snapshots.
+    public func window(at wallTime: Date) async throws -> TokenWindow? {
         guard let batch = try await store.load() else { return nil }
         let retained = batch.windows.filter { $0.validUntil > wallTime }
         if retained.count != batch.windows.count {
@@ -94,6 +99,6 @@ public struct TokenProvider: Sendable {
                 try await store.save(TokenBatch(windows: retained))
             }
         }
-        return retained.first { $0.contains(wallTime) }?.token
+        return retained.first { $0.contains(wallTime) }
     }
 }

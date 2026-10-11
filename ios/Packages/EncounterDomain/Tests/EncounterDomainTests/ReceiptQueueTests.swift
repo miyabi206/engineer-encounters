@@ -24,6 +24,15 @@ final class ReceiptQueueTests: XCTestCase {
         XCTAssertTrue(receipt.hasQualifyingAmbientEvidence)
     }
 
+    func testJoinedExchangeEvidenceRequires120Seconds() {
+        var receipt = EncounterReceipt(role: .central, exchangeNonce: EncounterSamples.nonce(seed: 3),
+                                       priorExchangeNonce: EncounterSamples.nonce(seed: 2),
+                                       start: EncounterSamples.receipt().start, observedDuration: 119)
+        XCTAssertFalse(receipt.hasQualifyingAmbientEvidence)
+        receipt.observedDuration = 120
+        XCTAssertTrue(receipt.hasQualifyingAmbientEvidence)
+    }
+
     func testReceiptCodablePreservesEveryEvidenceField() throws {
         let start = EncounterSamples.receipt().start
         let checkpoint = ReceiptTokenPair(ownToken: EncounterSamples.token(seed: 3), peerToken: EncounterSamples.token(seed: 4),
