@@ -35,7 +35,7 @@ final class EncounterRuntime: ObservableObject {
     private var tokenTopUpInFlight = false
     #endif
 
-    init(approach: PresenceApproach = .heldConnection,
+    init(approach: PresenceApproach = .secondExchange,
          transportFactory: @escaping @MainActor () async -> any BluetoothTransport = { CoreBluetoothTransport() },
          queueOpener: @escaping @MainActor () async throws -> any ReceiptQueue = { try await EncounterRuntime.openDefaultQueue() },
          tokenStore: (any TokenBatchStore)? = nil,

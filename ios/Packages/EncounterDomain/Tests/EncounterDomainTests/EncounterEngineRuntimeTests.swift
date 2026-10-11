@@ -18,6 +18,34 @@ final class EncounterEngineRuntimeTests: XCTestCase {
                         clock: clock, sessionFlag: { false })
     }
 
+    func testDefaultApproachDisconnectsCentralLinkAfterFirstExchange() async throws {
+        let transport = RuntimeTransport(), store = RuntimeTokenStore(try EncounterSamples.batch())
+        let queue = InMemoryReceiptQueue(), clock = ManualEncounterClock()
+        let engine = EncounterEngine(transport: transport, tokenProvider: TokenProvider(store: store),
+                                     receiptQueue: queue, clock: clock, sessionFlag: { false })
+        let peer = FakePhoneID.second.peerHandle
+        let key = BluetoothConnection(peer: peer, role: .central)
+        await engine.start(); try await idle(engine, processed: 1)
+        await transport.emit(.peerObserved(peer)); try await idle(engine, processed: 2)
+        await transport.emit(.connected(key)); try await idle(engine, processed: 3)
+        let reading = await transport.commands()
+        let read = try XCTUnwrap(reading.compactMap { if case .read(_, let id) = $0 { id } else { nil } }.first)
+        let frame = try ExchangeFrame(phase: .initialExchange, token: EncounterSamples.token(seed: 999),
+                                      nonce: EncounterSamples.nonce())
+        await transport.emit(.frameRead(peer, read, frame.encoded())); try await idle(engine, processed: 4)
+        let writing = await transport.commands()
+        let write = try XCTUnwrap(writing.compactMap { if case .write(_, let id, _) = $0 { id } else { nil } }.first)
+        await transport.emit(.writeAcknowledged(peer, write)); try await idle(engine, processed: 5)
+        let receipts = try await queue.pending()
+        XCTAssertEqual(receipts.count, 1)
+        XCTAssertEqual(receipts.first?.role, .central)
+        XCTAssertEqual(receipts.first?.exchangeNonce, frame.nonce)
+        let completed = await transport.commands()
+        XCTAssertTrue(completed.contains(.disconnect(key)))
+        let time = await clock.now(); XCTAssertEqual(time.monotonic, 0)
+        await engine.stop(); await transport.finish()
+    }
+
     private func seedExpiry(_ queue: RuntimeExpiryQueue, expiresAt: Date) async throws -> (EncounterReceipt, EncounterReceipt) {
         func receipt(_ index: Int) -> EncounterReceipt {
             let sample = EncounterSamples.receipt(index)

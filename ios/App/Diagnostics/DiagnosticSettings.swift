@@ -25,7 +25,7 @@ struct PresenceApproachSetting {
     private let key = "diagnostics.presenceApproach"
     init(defaults: UserDefaults = .standard) { self.defaults = defaults }
     var value: PresenceApproach {
-        get { defaults.string(forKey: key) == "secondExchange" ? .secondExchange : .heldConnection }
+        get { defaults.string(forKey: key) == "heldConnection" ? .heldConnection : .secondExchange }
         nonmutating set {
             defaults.set(newValue == .secondExchange ? "secondExchange" : "heldConnection", forKey: key)
         }

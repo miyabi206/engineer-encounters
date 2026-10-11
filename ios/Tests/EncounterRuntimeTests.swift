@@ -7,6 +7,42 @@ import XCTest
 
 final class EncounterRuntimeTests: XCTestCase {
     @MainActor
+    func testDefaultApproachDisconnectsCentralLinkAfterFirstExchange() async throws {
+        let clock = ManualEncounterClock(), link = FakeBluetoothLink()
+        let transport = await FakeBluetoothTransport(phone: .first, link: link, clock: clock)
+        let otherTransport = await FakeBluetoothTransport(phone: .second, link: link, clock: clock)
+        let queue = InMemoryReceiptQueue()
+        let ownStore = InMemoryTokenBatchStore(batch: try EncounterSamples.batch())
+        let otherWindow = try TokenWindow(token: EncounterSamples.token(seed: 999),
+            validFrom: EncounterSamples.observationTime, validUntil: EncounterSamples.observationTime.addingTimeInterval(900))
+        let otherStore = InMemoryTokenBatchStore(batch: try TokenBatch(windows: [otherWindow]))
+        let other = EncounterEngine(transport: otherTransport, tokenProvider: TokenProvider(store: otherStore),
+            receiptQueue: InMemoryReceiptQueue(), clock: clock, sessionFlag: { false })
+        let runtime = EncounterRuntime(transportFactory: { transport }, queueOpener: { queue },
+            tokenStore: ownStore, clock: clock)
+        var exchanges = 0
+        runtime.observeEvents { if case .exchangeCompleted(role: .central, nonceDigest: _) = $0 { exchanges += 1 } }
+        await link.setObservations(to: .second, enabled: false)
+        await other.start()
+        try await eventually {
+            let idle = await other.isIdle, commands = await otherTransport.commands()
+            return idle && commands.contains(.startDiscovery)
+        }
+        await runtime.start()
+        let key = BluetoothConnection(peer: FakePhoneID.second.peerHandle, role: .central)
+        try await eventually {
+            let commands = await transport.commands()
+            return exchanges == 1 && commands.contains(.disconnect(key))
+        }
+        let receipts = try await queue.pending()
+        XCTAssertEqual(receipts.count, 1)
+        XCTAssertEqual(receipts.first?.role, .central)
+        XCTAssertNil(receipts.first?.priorExchangeNonce)
+        let time = await clock.now(); XCTAssertEqual(time.monotonic, 0)
+        await runtime.stop(); await other.stop()
+    }
+
+    @MainActor
     func testParticipationOffNeverBuildsTransportIncludingSummaryAndReset() async throws {
         let queue = InMemoryReceiptQueue()
         let clock = ManualEncounterClock()

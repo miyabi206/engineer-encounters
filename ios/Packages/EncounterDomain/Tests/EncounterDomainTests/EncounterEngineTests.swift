@@ -139,6 +139,45 @@ final class EncounterEngineTests: XCTestCase {
         try await rig.stop()
     }
 
+    func testBothPhonesPauseNewConnectionsAndReceiptsFor15MinutesAfterEvidence() async throws {
+        for approach in [PresenceApproach.heldConnection, .secondExchange] {
+            let rig = try await PairedPhonesRig.make(approach: approach)
+            try await rig.start(); try await rig.advance(by: 120)
+            let a = try await evidence(rig.first), b = try await evidence(rig.second)
+            XCTAssertTrue(TestEncounterConfirmation.confirms(a, b))
+            XCTAssertEqual(a.count, approach == .heldConnection ? 2 : 4)
+            XCTAssertEqual(b.count, a.count)
+            let initialA = await rig.first.transport.commands(), initialB = await rig.second.transport.commands()
+            var elapsed: TimeInterval = 0
+            for seconds in Array(stride(from: 10.0, through: 890, by: 10)) + [899] {
+                try await rig.advance(by: seconds - elapsed, refreshing: false)
+                elapsed = seconds
+                await rig.first.transport.inject(.peerObserved(FakePhoneID.second.peerHandle))
+                await rig.second.transport.inject(.peerObserved(FakePhoneID.first.peerHandle))
+                try await rig.settle()
+                let commandsA = await rig.first.transport.commands(), commandsB = await rig.second.transport.commands()
+                XCTAssertEqual(connectCount(commandsA), connectCount(initialA))
+                XCTAssertEqual(connectCount(commandsB), connectCount(initialB))
+                let pausedA = try await evidence(rig.first), pausedB = try await evidence(rig.second)
+                XCTAssertEqual(pausedA, a); XCTAssertEqual(pausedB, b)
+            }
+            try await rig.advance(by: 1, refreshing: false)
+            let expiredA = await rig.first.transport.commands(), expiredB = await rig.second.transport.commands()
+            XCTAssertEqual(connectCount(expiredA), connectCount(initialA))
+            XCTAssertEqual(connectCount(expiredB), connectCount(initialB))
+            await rig.first.transport.inject(.peerObserved(FakePhoneID.second.peerHandle))
+            await rig.second.transport.inject(.peerObserved(FakePhoneID.first.peerHandle))
+            try await rig.settle()
+            let resumedA = await rig.first.transport.commands(), resumedB = await rig.second.transport.commands()
+            XCTAssertEqual(connectCount(resumedA), connectCount(initialA) + 1)
+            XCTAssertEqual(connectCount(resumedB), connectCount(initialB) + 1)
+            let receiptsA = try await evidence(rig.first), receiptsB = try await evidence(rig.second)
+            XCTAssertEqual(receiptsA.count, a.count + 2)
+            XCTAssertEqual(receiptsB.count, b.count + 2)
+            try await rig.stop()
+        }
+    }
+
     func testEachPhoneMeasures120IndependentlyAndEarlyRefusalCanRetry() async throws {
         for approach in [PresenceApproach.heldConnection, .secondExchange] {
             let rig = try await PairedPhonesRig.make(approach: approach)
@@ -493,6 +532,55 @@ final class EncounterEngineTests: XCTestCase {
         XCTAssertEqual(waitsA, 0); XCTAssertEqual(waitsB, 0)
     }
 
+    func testCentralReturningAfterOwnResetCompletesFirstExchangeImmediatelyAfterALongAttempt() async throws {
+        for approach in [PresenceApproach.heldConnection, .secondExchange] {
+            for silentDisconnects in [false, true] {
+                let rig = try await PairedPhonesRig.make(approach: approach)
+                await rig.link.setSilentPeripheralDisconnects(silentDisconnects)
+                try await startSingle(rig); try await rig.advance(by: 60)
+                let before = try await evidence(rig.first); XCTAssertEqual(before.count, 1)
+                await rig.first.engine.reset(); try await rig.settle()
+                await rig.first.engine.start(); try await rig.settle()
+                if approach == .secondExchange {
+                    let failed = try await evidence(rig.first); XCTAssertTrue(failed.isEmpty)
+                    let failedCommands = await rig.first.transport.commands()
+                    XCTAssertEqual(connectCount(failedCommands), 2)
+                    try await rig.advance(by: 9, refreshing: false)
+                    let early = try await evidence(rig.first); XCTAssertTrue(early.isEmpty)
+                    let earlyCommands = await rig.first.transport.commands()
+                    XCTAssertEqual(connectCount(earlyCommands), 2)
+                    try await rig.advance(by: 1, refreshing: false)
+                }
+                let a = try await evidence(rig.first), b = try await evidence(rig.second)
+                XCTAssertEqual(a.count, 1); XCTAssertEqual(b.count, 1)
+                XCTAssertEqual(a.first?.exchangeNonce, b.first?.exchangeNonce)
+                XCTAssertNotEqual(a.first?.exchangeNonce, before.first?.exchangeNonce)
+                let commands = await rig.first.transport.commands()
+                XCTAssertEqual(connectCount(commands), approach == .heldConnection ? 2 : 3)
+                let peripheralCommands = await rig.second.transport.commands()
+                XCTAssertEqual(successCount(peripheralCommands), 2)
+                let time = await rig.first.clock.now(); XCTAssertEqual(time.monotonic, approach == .heldConnection ? 60 : 70)
+                try await rig.stop()
+                var recorded: [EncounterEngineEvent] = []
+                var stops = 0
+                for await event in rig.first.engine.events {
+                    recorded.append(event)
+                    if event == .discoveryChanged(false) {
+                        stops += 1
+                        if stops == 2 { break }
+                    }
+                }
+                let expected: [EncounterEngineEvent] = approach == .heldConnection ? [
+                    .attemptEnded(role: .central, reason: .reset), .attemptEnded(role: .central, reason: .stopped)
+                ] : [
+                    .attemptEnded(role: .central, reason: .reset), .attemptEnded(role: .central, reason: .invalidFrame),
+                    .attemptEnded(role: .central, reason: .stopped)
+                ]
+                XCTAssertEqual(recorded.filter { if case .attemptEnded = $0 { true } else { false } }, expected)
+            }
+        }
+    }
+
     func testChangingApproachAffectsOnlyNewAttempts() async throws {
         let rig = try await PairedPhonesRig.make()
         try await startSingle(rig)
@@ -501,6 +589,13 @@ final class EncounterEngineTests: XCTestCase {
         try await rig.advance(by: 120)
         let held = try await evidence(rig.first); XCTAssertNotNil(held[0].checkpoint); XCTAssertNil(held[0].priorExchangeNonce)
         try await rig.advance(by: 10)
+        await rig.first.transport.inject(.peerObserved(FakePhoneID.second.peerHandle)); try await rig.settle()
+        let early = try await evidence(rig.first); XCTAssertEqual(early, held)
+        try await rig.advance(by: 889)
+        await rig.first.transport.inject(.peerObserved(FakePhoneID.second.peerHandle)); try await rig.settle()
+        let paused = try await evidence(rig.first); XCTAssertEqual(paused, held)
+        try await rig.advance(by: 1, refreshing: false)
+        let expired = try await evidence(rig.first); XCTAssertEqual(expired, held)
         await rig.first.transport.inject(.peerObserved(FakePhoneID.second.peerHandle)); try await rig.settle()
         try await rig.advance(by: 120)
         let after = try await evidence(rig.first)
