@@ -17,6 +17,34 @@ final class SwiftDataReceiptQueueTests: XCTestCase {
         try await ReceiptQueueContract.checkAll(on: SwiftDataReceiptQueue.fileBacked(directory: directory, now: { EncounterSamples.observationTime }))
     }
 
+    func testAcknowledgingExpiredReceiptDeletesStoredRowDurablyBeforeCleanup() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let receipt = EncounterSamples.receipt()
+        do {
+            let queue = try await SwiftDataReceiptQueue.fileBacked(directory: directory, now: { EncounterSamples.observationTime })
+            try await queue.enqueue(receipt)
+        }
+        let acknowledgementTime = receipt.expiresAt.addingTimeInterval(1)
+        do {
+            let queue = try await SwiftDataReceiptQueue.fileBacked(directory: directory, now: { acknowledgementTime })
+            let pending = try await queue.pending()
+            let stored = try await queue.storedReceiptIdentities()
+            XCTAssertTrue(pending.isEmpty)
+            XCTAssertEqual(stored, [receipt.id])
+            try await queue.acknowledge(receipt.id)
+            let remaining = try await queue.storedReceiptIdentities()
+            XCTAssertTrue(remaining.isEmpty)
+        }
+        let reopened = try await SwiftDataReceiptQueue.fileBacked(directory: directory, now: { EncounterSamples.observationTime })
+        let pending = try await reopened.pending()
+        let stored = try await reopened.storedReceiptIdentities()
+        let deadline = try await reopened.terminalExpiry(for: receipt.id)
+        XCTAssertTrue(pending.isEmpty)
+        XCTAssertTrue(stored.isEmpty)
+        XCTAssertEqual(deadline, acknowledgementTime.addingTimeInterval(EncounterProtocol.receiptLifetime))
+    }
+
     func testExpiryFiltersReadsAndTreatsExpiredIdentitiesAsMissingBeforeCleanup() async throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

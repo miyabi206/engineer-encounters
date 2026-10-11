@@ -218,7 +218,7 @@ public actor SwiftDataReceiptQueue: ModelActor, ReceiptQueue {
             .sorted { $0.expiry < $1.expiry }
         let evicted = tombstones.prefix(max(0, tombstones.count - tombstoneLimit))
         try write {
-            if let row { modelContext.delete(row) }
+            if let storedRow { modelContext.delete(storedRow) }
             if !evicted.contains(where: { $0 === tombstone }) { modelContext.insert(tombstone) }
             for old in evicted where old !== tombstone { modelContext.delete(old) }
         }
