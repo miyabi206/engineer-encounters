@@ -1,0 +1,87 @@
+"back" = "戻る";
+"retry" = "再試行";
+"loading" = "読み込み中…";
+"listError" = "読み込めませんでした";
+"displayName" = "表示名";
+"introduction" = "自己紹介";
+"interests" = "興味のある分野";
+"purposes" = "利用目的";
+"contactDetail" = "連絡先";
+"discoveryPurpose" = "作品を見つける";
+"collaborationPurpose" = "一緒につくる";
+"selectionGuidance" = "興味と目的をそれぞれ1つ以上選んでください";
+"counter" = "%ld/%ld";
+"interestCounter" = "選択した興味：%ld/%ld";
+"requiredField" = "入力してください";
+"tooLong" = "%ld文字以内で入力してください";
+"invalidField" = "入力内容を確認してください";
+"saveError" = "保存できませんでした";
+"emptyInterests" = "選択できる興味はありません";
+"checklist" = "発見に必要な情報";
+"link" = "最初のリンク";
+"linkRequired" = "発見をオンにするにはリンクが1件以上必要です";
+"met" = "完了";
+"missing" = "未完了";
+"authenticationError" = "もう一度サインインしてください";
+"accountError" = "アカウントの設定を確認してください";
+"declarationError" = "年齢と利用規約への同意を確認してください";
+"prerequisiteError" = "発見に必要な情報を入力してください";
+"rateLimitError" = "少し待ってから再試行してください";
+"notFoundError" = "情報が見つかりませんでした";
+"bluetoothPurpose" = "すれちがいを記録するためにBluetoothを使用します。位置情報は使用しません。";
+"bluetoothNotRequested" = "Bluetoothの許可はまだ確認していません";
+"bluetoothAvailable" = "Bluetoothを利用できます";
+"bluetoothDenied" = "Bluetoothの使用が許可されていません";
+"bluetoothOff" = "Bluetoothがオフです";
+"bluetoothUnavailable" = "Bluetoothを利用できません";
+"bluetoothRecovery" = "Bluetoothの設定を確認";
+"allowBluetooth" = "Bluetoothを許可";
+"promise" = "2人とも発見がオンでBluetoothを利用できる場合、少なくともどちらかがアプリを開いていれば、Bluetoothの届く範囲に2分以上いることで、すれちがいが記録されます。";
+"background" = "画面をロックしているときや、アプリがバックグラウンドにあるときも、記録される場合があります。";
+"dailyReport" = "通常のすれちがいは、毎日のレポートでまとめて届きます。初期設定は現地時間の21:00です。";
+"alternatives" = "2人ともセッション中なら、すれちがいは確認後すぐに表示されます。QR交換も確認後すぐに表示されます。";
+"forceQuit" = "アプリを強制終了すると、もう一度開くまで発見は停止します。";
+"firstUnlock" = "再起動後は、一度ロックを解除するまで発見できません。";
+"oneSided" = "片方だけの交換では、すれちがった相手は表示されません。";
+"cancel" = "キャンセル";
+"save" = "保存";
+"settings" = "設定";
+"editProfile" = "プロフィールを編集";
+"discoveryMatching" = "発見・マッチング";
+"visibility" = "公開範囲";
+"visibilityInterests" = "興味";
+"optionalContact" = "連絡先（任意）";
+"contactPrivate" = "連絡先は初期設定で非公開です";
+"discardChanges" = "変更を破棄";
+"discoveryRequired" = "発見をオンにしている間は必須項目を空にできません";
+"discovery" = "発見";
+"requiredInformation" = "必要な情報を入力してください";
+"threshold" = "共通の興味の条件";
+"thresholdCount" = "共通の興味が{count}件以上";
+"matchingExplanation" = "条件は表示順と公開範囲に使われます。すれちがい自体は非表示になりません。";
+"saveMatching" = "マッチング設定を保存";
+"linkVisibility" = "リンクの公開範囲";
+"appliesToPast" = "過去のすれちがいや保存した項目にも適用されます";
+"saveVisibility" = "公開範囲を保存";
+"everyoneEligible" = "すれちがった相手";
+"compatibleOnly" = "条件が合う相手のみ";
+"privateLevel" = "非公開";
+// Neutral copy: wording not supplied in ui.md.
+"everyoneExplanation" = "確認されたすれちがいで、2人とも発見がオンで、どちらもブロックしていない相手に公開されます。";
+// Neutral copy: wording not supplied in ui.md.
+"compatibleExplanation" = "さらに、利用目的が重なり、2人とも共通の興味の条件を満たす相手に公開されます。";
+// Neutral copy: wording not supplied in ui.md.
+"privateExplanation" = "他のユーザーには公開されません。";
+// Neutral copy: wording not supplied in ui.md.
+"purposeRequired" = "利用目的を1つ以上選んでください";
+// Neutral copy: wording not supplied in ui.md.
+"discoveryOffExplanation" = "発見をオフにするとカードは非表示になりますが、すれちがいは削除されません。";
+// Neutral copy: wording not supplied in ui.md.
+"interestLimit" = "興味は%ld件まで選べます";
+// Interim interest vocabulary; replace keys and IDs together in InterimProfileInterests.
+"interestIOS" = "iOS";
+"interestAndroid" = "Android";
+"interestWeb" = "Web";
+"interestBackend" = "バックエンド";
+"interestDesign" = "デザイン";
+"interestOSS" = "オープンソース";

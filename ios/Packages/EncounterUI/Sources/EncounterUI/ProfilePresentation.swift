@@ -231,3 +231,39 @@ public struct ProfileActions {
         self.setFieldVisibility = setFieldVisibility
     }
 }
+
+/// Optional link routes stay absent until the Unit 5 composition layer supplies them.
+@MainActor
+public struct SettingsNavigationActions {
+    public var back: @MainActor () -> Void
+    public var editProfile: @MainActor () -> Void
+    public var discovery: @MainActor () -> Void
+    public var visibility: @MainActor () -> Void
+    public var links: (@MainActor () -> Void)?
+    public var bluetoothRecovery: @MainActor () -> Void
+    public var discoveryOff: @MainActor () -> Void
+
+    public init(back: @escaping @MainActor () -> Void, editProfile: @escaping @MainActor () -> Void,
+                discovery: @escaping @MainActor () -> Void, visibility: @escaping @MainActor () -> Void,
+                links: (@MainActor () -> Void)? = nil,
+                bluetoothRecovery: @escaping @MainActor () -> Void = {},
+                discoveryOff: @escaping @MainActor () -> Void = {}) {
+        self.back = back; self.editProfile = editProfile; self.discovery = discovery
+        self.visibility = visibility; self.links = links
+        self.bluetoothRecovery = bluetoothRecovery; self.discoveryOff = discoveryOff
+    }
+}
+
+/// Interim vocabulary, replaceable in one place or by the caller's loadInterests action.
+public enum InterimProfileInterests {
+    public static var options: [InterestOption] {
+        [option("ios", .interestIOS), option("android", .interestAndroid), option("web", .interestWeb),
+         option("backend", .interestBackend), option("design", .interestDesign), option("oss", .interestOSS)]
+    }
+
+    private static func option(_ id: String, _ key: SettingsString) -> InterestOption {
+        InterestOption(id: id,
+                       labelJapanese: SettingsStrings.localized(key.rawValue, language: "ja") ?? key.rawValue,
+                       labelEnglish: SettingsStrings.localized(key.rawValue, language: "en") ?? key.rawValue)
+    }
+}
