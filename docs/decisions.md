@@ -1,9 +1,9 @@
 # Decisions — Engineer Encounters
 
-**Version:** 0.3\
+**Version:** 0.4\
 **Status:** Confirmed product decisions; drafting defaults and unverified items labelled\
-**Date:** 2026-10-10\
-**Related:** `specification.md` v0.3, `design.md` v0.3, `ui.md` v0.1\
+**Date:** 2026-10-11\
+**Related:** `specification.md` v0.4, `design.md` v0.4, `ui.md` v0.2\
 **Platforms:** iOS first, Android later\
 **Languages:** Japanese, English
 
@@ -94,10 +94,10 @@ All rungs operate at the same time. The app never switches modes.
 
 | Rung | Device state or action | User effort | Status |
 |---|---|---|---|
-| 1 — Locked | Both phones locked, app in the background. | None. | Unproven, may not work at all, never promised. |
-| 2 — Awake | At least one phone in use with another app in front. | None. | Unproven, measured separately from rung 1. |
-| 3 — One open | At least one of the two has the app open. | One tap by one person. | The public promise. Expected to work by two independent paths, the open phone scanning and the open phone advertising. |
-| 4 — Both open | Both have the app open. | One tap each. | Fastest. |
+| 1 — Locked | Both phones locked, app in the background. | None. | Unproven, never promised. **FACT:** neither approach produced two-minute evidence while both devices stayed locked in the 2026-10-11 check. |
+| 2 — Awake | At least one phone in use with another app in front. | None. | Unproven. **UNVERIFIED:** not tried on 2026-10-11; measured separately from rung 1, never promised. |
+| 3 — One open | At least one of the two has the app open. | One tap by one person. | The public promise. **FACT:** both presence approaches worked in both device orientations on 2026-10-11; the held connection with iPad locked was a continuation, not a clean reset-then-lock trial. The matrix remains the release gate. |
+| 4 — Both open | Both have the app open. | One tap each. | Fastest. **FACT:** both presence approaches worked on the device pair on 2026-10-11. |
 | 5 — Manual | One shows a QR code and the other scans it. | A few seconds together. | Always works, no Bluetooth. |
 
 ### Rules
@@ -119,7 +119,8 @@ All rungs operate at the same time. The app never switches modes.
 
 - **FACT** (Apple, Core Bluetooth Background Processing for iOS Apps): a backgrounded app advertises without its local name, and its service UUIDs move to an overflow area that only an iOS device explicitly scanning for them can discover. Advertising frequency may decrease. Background scanning coalesces duplicate discoveries and scans less often. An app woken in the background has around 10 seconds.
 - **FACT:** an Apple engineer wrote on the Apple Developer Forums in July 2026 (thread 837516) that background advertising is best-effort and “slows or stops”, that tokens should be read over a connection and not carried in advertisements, and that an app the user force-quit is not relaunched.
-- **UNVERIFIED:** whether two backgrounded iPhones discover each other at all. Sources conflict and nothing official settles it. Only the device tests can answer.
+- **FACT:** the owner’s 2026-10-11 check used an iPhone 15 and an iPad (10th generation), Development builds and local test tokens, without a backend or account. With one app open, the open device woke the locked device. With both locked, neither approach produced two-minute evidence until a device was woken: a suspended app gets no timer. First exchanges happened just after Reset, before both devices were backgrounded.
+- **UNVERIFIED:** discovery between two backgrounded devices, including two iPhones, was not tested. Rung 2 was not tried. Rungs 1 and 2 remain unproven and never promised; this pair does not establish iPhone-with-iPhone behaviour.
 - **FACT:** a comparable App Store app, Twicon (AYcanD Inc., rated 16+, requires iOS 26), states in its own listing that an exchange is most likely with the app open, likely in the background, and unlikely after force-quit, and recommends keeping the app open to be sure. It asks for Always location permission and uses location as a trigger for background detection, which this product does not do. It adds a random delay before delivery so the person met is harder to identify. It had one rating, so it is not evidence of reliability.
 
 ## 4. Reveal and notifications
@@ -172,14 +173,34 @@ All rungs operate at the same time. The app never switches modes.
 
 Each stage gates the next.
 
-1. **Toolchain check. UNVERIFIED:** whether `swift test` and `xcodebuild` run inside the sandbox that the implementing agent uses on this Mac. The first unit of work proves it.
-2. **Bluetooth engine first,** built inside the real app with a diagnostics screen. Then a one-day check of rungs 3 and 4 on real devices, with made-up identities, no backend, and logs kept on the devices.
-3. **Basic functions.** Then the 160-trial matrix, using a borrowed second iPhone.
+1. **Toolchain check. FACT:** Unit 1 is implemented and merged to main (pull request 2). The sandbox question is resolved: Swift package checks pass with local cache paths and `--disable-sandbox`; Xcode and Supabase checks run outside that sandbox in the tester role. See **Repository and tools**.
+2. **Bluetooth engine first. FACT:** Unit 2 is implemented and merged to main (pull requests 4 and 5), with the real app and S22 diagnostics. The owner completed the one-day check on 2026-10-11 with an iPhone 15 and an iPad (10th generation), Development builds, local test tokens, no backend and no account. Rungs 3 and 4 worked with both approaches in both orientations, with the trial limitation below; unrun trials remain open.
+3. **Basic functions.** Then the 160-trial matrix, using a borrowed second iPhone. Before the matrix, implement the three owner decisions in **Bluetooth transport**: second exchange as default, the 15-minute peer pause after two-minute evidence, and refusal counted from the previous attempt’s start. All three were decided on 2026-10-11 and are not yet implemented; the pause and refusal changes prevent distorted measurements. The refusal diff needs a security review.
 4. **Friends test:** 3 to 5 friends in a small room or cafe, on the free Apple account. **DEFAULT:** the friends test uses development builds pointed at a hosted non-production Supabase project, because the phones leave the owner's Mac. Anonymous sign-in is enabled only on that non-production project and disabled on production, in addition to being compiled out of the release build. Local Supabase is for automated checks and the owner's own development. That means cable installs from the Mac of the owner, builds that stop working after about a week, the temporary anonymous sign-in, sessions for immediate results, and the daily report viewed inside the app without a notification. The GitHub reader alone is enough. If the device cap of the free account is reached, the phone of a friend can be signed with the own free Apple ID of that friend.
 5. **Join the Apple Developer Program.** Add and verify Sign in with Apple, push notifications and TestFlight.
 6. **One real event with 20 or more people,** using a TestFlight build made with the release configuration against the production backend. No demo switch, diagnostics or anonymous sign-in is included; attendees sign in with Apple. Verify these build gates and normal daily reveal and notification timing before the event. Internal builds, which keep the demo switch and diagnostics, go only to the owner's own devices.
 7. **One professional review of the privacy policy and terms,** in Japanese and English. Then public release in Japan.
 8. **Later storefronts in waves,** as in **Product**.
+
+**FACT — one-day radio check, 2026-10-11:** the owner used an iPhone 15 and an iPad (10th generation), Development builds and local test tokens, with no backend or account. Values below are seconds from Reset, iPhone first then iPad. A trial counts only when both devices show two-minute evidence for the same exchange digest.
+
+| Presence approach | Device state | Result |
+|---|---|---|
+| Held connection | Both open | Evidence at 124.4 / 127.5 s and 129.0 / 132.2 s. |
+| Held connection | iPad open, iPhone locked | Evidence at 122.6 / 123.8 s and 121.4 / 122.7 s. |
+| Held connection | iPhone open, iPad locked | Evidence at 256.8 / 261.2 s and 261.3 / 265.9 s, only as a continuation of the both-open trial without Reset; not a clean reset-then-lock trial. |
+| Held connection | Both locked | First exchanges at about 2.3 s; checkpoint only after waking a device at about 255 s, observed duration 252.7 s. A repeat gave the same result. |
+| Second exchange | Both open | Evidence at 124.4 s on both. |
+| Second exchange | iPad open, iPhone locked | Evidence at 125.2 / 136.8 s and 123.6 / 135.3 s; the locked iPhone reconnected on its own at 125 s. |
+| Second exchange | iPhone open, iPad locked | Evidence at 126.1 / 133.0 s and 127.4 / 134.4 s. |
+| Second exchange | Both open, about 2 m apart for 10 minutes | Evidence at about 123.5, 256.3, 389.9 and 522.9 s; no failed or disconnected attempt. |
+| Second exchange | Both locked | First exchanges at about 1–2 s; no second exchange while locked. Waking a device after about 310 s ended attempts as expired at the 5-minute bound, without evidence. Fresh exchanges after waking gave evidence at about 445 s. |
+
+Before the unsubscribe fix, both devices reached evidence at about 123–132 s, then every central attempt failed about every 10 s. The physical link stayed up after app-level cancellation, so the peer saw no new subscription. Pull request 5 fixed unsubscribe-before-cancel and read admission for a still-subscribed central. The table records the check after that fix.
+
+The owner also saw connections beyond 10 m, without a log; Bluetooth range is not a distance guarantee. After Reset, one direction often had a failed central attempt at about 1–2 s and completed the first exchange about 10 s later, caused by the 5-second refusal rule. In second-exchange trials, S22 leaves the first exchange of a pair pending in an open trial because evidence is recorded under the second exchange digest (a closed trial shows missing instead).
+
+The check ended on 2026-10-11 without a trial across a 15-minute token-window boundary, a real loss of contact and return, or iPhone with iPhone. Those remain **UNVERIFIED**, as do rung 2 and background-to-background discovery. The first exchange in both-locked trials happened immediately after Reset, so those trials did not test background discovery.
 
 ### The 160-trial matrix
 
@@ -252,13 +273,21 @@ Three build kinds:
 - One repository with the directories `ios`, `supabase` (database migrations and Edge Functions), `site` and `docs`.
 - App code lives in local Swift packages with a thin app target on top, so most logic builds and tests with `swift test` without a simulator.
 - The Xcode project file is generated from a text file by XcodeGen. Nobody edits the project file by hand.
-- Every unit of work has terminal checks: `swift test`, `xcodebuild` on the simulator, `deno test`, and the local database tests of Supabase.
-- On the Mac of the owner: macOS 27.0.1, Xcode 27.0 with the iOS 27.0 SDK and simulator, Swift 6.4, Homebrew, the Supabase CLI, Docker, Node and the Codex CLI. XcodeGen and Deno are approved and will be installed when implementation starts. The VS Code Swift extension is to be added.
+- Every unit of work has the applicable terminal checks: `swift test`, `xcodebuild` on the simulator, `deno test`, and the local database tests of Supabase. **FACT:** `xcodegen`, `xcodebuild`, app-hosted tests, `ios/Tests/check-release-artifact.sh` and every Supabase command do not run in the implementing agent’s sandbox; the tester role runs them outside it.
+- On the Mac of the owner: macOS 27.0.1, Xcode 27.0 with the iOS 27.0 SDK and simulator, Swift 6.4, Homebrew, the Supabase CLI, Docker, Node and the Codex CLI. **FACT:** XcodeGen and Deno are installed. The VS Code Swift extension is to be added.
+
+**FACT:** plain `swift test` fails on the module-cache path inside the implementing agent’s sandbox. This form passes there, with `<Package>` replaced by the package name:
+
+```sh
+env XDG_CACHE_HOME=$PWD/.build/sandbox/xdg CLANG_MODULE_CACHE_PATH=$PWD/.build/sandbox/clang SWIFTPM_MODULECACHE_OVERRIDE=$PWD/.build/sandbox/manifest swift test --disable-sandbox --package-path ios/Packages/<Package> --cache-path $PWD/.build/sandbox/swiftpm-cache --config-path $PWD/.build/sandbox/swiftpm-config --security-path $PWD/.build/sandbox/swiftpm-security --manifest-cache local
+```
+
+The same environment and cache options with `swift build --triple arm64-apple-ios26.0-simulator --sdk <iPhoneSimulator SDK path>` compile iOS-only code there. `ios/Scripts/typecheck-app.sh Development`, `Internal` or `Release` type-checks the app without `xcodebuild`; only Development also type-checks the hosted tests. EncounterBluetooth declares macOS, so `swift test --package-path ios/Packages/EncounterBluetooth` runs on the Mac (use the cache options above in the sandbox). In the documented unsigned simulator test command, the real Keychain round-trip test is skipped on `errSecMissingEntitlement`. The receipt file-protection assertion is an iOS-only package test, absent from that scheme’s simulator test action; locked-device protection still requires device validation.
 
 ### Workflow
 
 - The owner develops in VS Code with cross-harness: one agent plans and reviews, another implements. Work is split into units. Each unit becomes one commit on a work branch, and the owner merges.
-- The simulator has no Bluetooth. Therefore the Core Bluetooth calls sit behind an interface. The encounter logic (the 2-minute rule, token rotation, the both-phones-report rule) is tested automatically against a fake. Only radio behaviour is verified on real devices, by the owner, using the diagnostics screen and a written test sheet.
+- The simulator has no Bluetooth. **FACT:** Unit 2 changed BluetoothTransport to radio commands and events, with the encounter engine owning the complete exchange, so the fake exercises the real protocol logic. The fake, paired-phones rig, manual clock and local confirmation check live in EncounterDomainTestSupport, which the app never links. The both-receipts check is a test oracle, not on-device confirmation; Unit 3 supplies server resolution. Only radio behaviour is verified on real devices, by the owner, using S22 and a written test sheet.
 - Things that need Xcode itself or the hands of the owner: signing in the Apple ID for code signing, every real-device Bluetooth trial, battery measurements, and the App Store submission screens.
 
 ## 10. Technical design inputs
@@ -275,15 +304,25 @@ These inputs come from an independent review of the v0.2 documents and belong in
 
 - One fixed application service UUID. Every phone acts as both peripheral (advertising that service) and central (scanning for exactly that service).
 - Tokens are never placed in advertisements. After discovery the central connects, reads the current token of the peripheral from one characteristic, and writes its own current token to another. One connection therefore gives both phones the token of the other.
-- Characteristics carry a protocol version so the format can change.
+- **FACT:** Unit 2 uses versioned exchange frames. The peripheral-token characteristic `7AEF0002` has read and notify; no value is ever notified. The central subscribes after discovering the characteristics. The peripheral treats subscription as connected and unsubscription as disconnected: Core Bluetooth supplies no other central connect/disconnect signal to a peripheral and no way for it to force a central off. The central unsubscribes before cancelling its link, waiting at most 1 second. A read at offset 0 from a still-subscribed central with no open logical link admits a new logical connection (pull request 5).
 - No account ID, name, GitHub handle, email or link is ever sent over Bluetooth. This is a binding rule carried over from v0.2; only temporary tokens identify participants.
 - **DEFAULT:** the token format is random, server-issued in batches, with 15-minute windows.
-- **DEFAULT:** a phone confirms two minutes of continued presence either by keeping the connection and reading again after two minutes, or by a second exchange with the same peer at least two minutes after the first. Which of these works in the background is a question for the one-day check.
-- Define connection timeouts, teardown, and what a one-sided result means. When one phone holds a receipt and the other does not, it stays a candidate and is dropped after 48 hours.
+- **FACT:** Unit 2 built both presence approaches: held connection (接続を維持), with a checkpoint after at least 120 seconds, and second exchange (2回目の交換), completing another exchange at least 120 seconds after the first within the 5-minute attempt. The 2026-10-11 check established rungs 3 and 4 on the named device pair, not reliable both-locked evidence or background discovery.
+- **FACT:** BluetoothTransport in EncounterDomain is a radio-primitives interface. Commands: `startDiscovery`, `stopDiscovery`, `connect`, `read`, `write`, `disconnect`, `answerRead`, `answerWrite`. Events: `availabilityChanged`, `peerObserved`, `connected`, `connectFailed`, `frameRead`, `readFailed`, `writeAcknowledged`, `writeFailed`, `disconnected`, `incomingRead`, `incomingWrite`, `restored`. EncounterEngineCore is the deterministic synchronous core; EncounterEngine is its actor runtime. Unit 2 changed the planned transport-owned exchange to this engine-owned exchange so the fake tests the real protocol.
+- **FACT:** Unit 2 implements a 10-second connect timeout, 5-second operation timeout, four active connection slots, a 5-minute presence-attempt bound and a 10-second duplicate-attempt backoff. These timings remain adjustable **DEFAULT** values except the binding 120-second ambient threshold. One-sided uploaded receipts remain candidates and expire after 48 hours; server handling arrives in Unit 3.
+
+**Owner decisions — 2026-10-11:** all three are binding, decided but **not yet implemented**, and must land before the 160-trial matrix.
+
+- Use the second exchange as the default presence approach. Keep the held connection selectable in S22 until the matrix’s iPhone-with-iPhone trials confirm the choice. Reasons: both approaches passed rungs 3 and 4 on the tested pair; the engine gives a phone four connection slots and a held connection occupies one for two minutes per peer; the second exchange is the only approach with a possible route for locked phones. Accepted trade-off: it proves two completed exchanges at least 120 seconds apart, not continuous presence; leaving and returning within the 5-minute attempt still counts. **FACT:** the code default remains held connection; this decision is not yet implemented.
+- After two-minute evidence with a peer, start no new exchange with that peer for 15 minutes (one token window); Reset clears the pause. Reason: a pair currently repeats about every 131 seconds, indefinitely storing receipts and using the radio. A longer pause is impossible because the app keeps no lasting identifier of a peer. **FACT:** the engine still has only its 10-second backoff; the 15-minute pause is not yet implemented.
+- Count the 5-second refusal of a returning central from the start of that central’s previous attempt, rather than its end. Reason: an attacker remains limited to one attempt per 5 seconds per handle, while an honest peer whose attempt lasted longer is accepted at once. **FACT:** the code still counts from the end of an attempt without evidence; this decision is not yet implemented. Its diff requires a security review. The pause and refusal changes are prerequisites because current behaviour distorts matrix measurements.
+
+**UNVERIFIED:** asking iOS for the second connection after a delay with `CBConnectPeripheralOptionStartDelayKey` might let the system wake a locked phone. This is undecided and not built. Showing in S22 which first exchange an evidence entry completes is also undecided and not built.
 
 ### Confirmed encounter, security definition
 
-- A receipt names the two tokens, a per-exchange nonce, whether the phone was in a session, and the observed duration.
+- A receipt names the two tokens, a per-exchange nonce, whether the phone was in a session, and the observed duration. **FACT:** Unit 2’s held connection updates one receipt with a checkpoint token pair. The second exchange creates a second receipt with `priorExchangeNonce` equal to the first exchange’s nonce and the monotonic duration between exchanges; the first receipt is retained and marked final. Unit 3 server resolution must accept both shapes and require matching evidence from both phones.
+- **FACT:** there is no on-device two-receipt confirmation. S22 shows only that device’s two-minute evidence and an exchange digest (the first 8 hexadecimal characters of SHA-256 of the exchange nonce); the owner compares both screens. The local confirmation harness is only a test check in EncounterDomainTestSupport.
 - The server confirms a Bluetooth encounter only when it holds matching receipts from both phones, both tokens were valid for their windows, the receipt is fresh, and it has not been used before (replay rejection).
 - Ambient: confirmed only when the two-minute rule is met. Session: confirmed immediately when the own record of the server shows both users had an active session. QR: confirmed immediately when the scanning phone uploads, before expiry, a short-lived one-time code that the showing phone obtained from the server while signed in; both accounts took part and no receipts are involved.
 - Even a correct exchange can be relayed by an attacker, so a confirmed Bluetooth encounter is evidence of a Bluetooth interaction and not cryptographic proof of physical distance. Signal strength is only a rough range indicator.
@@ -293,8 +332,10 @@ Encounter states for `design.md`, **Encounter states**: Observed (a discovery ca
 
 ### Background lifecycle and storage
 
-- Opt in to Core Bluetooth state preservation and restoration, and define how the central and peripheral managers are rebuilt, how an interrupted exchange is handled, and how tokens rotate while the app is suspended.
-- Receipts are queued on the device and uploaded later when the network is available.
+- **FACT:** Unit 2 built AppComposition and EncounterRuntime around a persisted local participation switch, default off. No Bluetooth manager is created before participation is on. App.init recreates the runtime when the flag is on, including background relaunches for Core Bluetooth state restoration; uncertain interrupted attempts are abandoned. The session flag source returns false until sessions exist.
+- **FACT:** KeychainTokenBatchStore uses after-first-unlock, this-device-only accessibility. Development’s LocalTestTokenIssuer supplies a 12-hour batch of quarter-hour-aligned 15-minute windows. Internal and Release have no issuer and stay paused for lack of a token until Unit 3 supplies server tokens.
+- **FACT:** per-configuration `EXCLUDED_SOURCE_FILE_NAMES`, anchored at the app source directory, and conditional compilation gate `ios/App/Development` to Development and `ios/App/Diagnostics` to Development and Internal. `ios/Tests/check-release-artifact.sh` builds all three configurations and checks marker names and string tables. Internal has no route to S22 until the Settings list exists; Development reaches it from S01.
+- Receipts are queued on the device; uploading later when the network is available arrives with Unit 3. **FACT:** SwiftDataReceiptQueue is a model actor storing each receipt’s Codable payload beside identity, sequence and expiry, with after-first-unlock file protection and a backup-excluded store directory. It bounds receipts and terminal-identity tombstones to 4,096 each, never returns expired receipts, and the engine invokes expiry on start, refresh and every 15 minutes while running.
 - Storage and Keychain items that the background path needs must be readable while the phone is locked after its first unlock. Before the first unlock after a reboot nothing works. Document that as a limitation and test it separately.
 - Do not rely on BGTaskScheduler for continuous scanning or deterministic wake-ups. This is unchanged from v0.2.
 
@@ -302,9 +343,17 @@ Encounter states for `design.md`, **Encounter states**: Observed (a discovery ca
 
 State separately how long each of these is kept and what deletes it: on-device diagnostics, receipts on the device, candidates on the server, token batches, confirmed encounters, favorites, reports, and push tokens.
 
-- **DEFAULT:** development-build diagnostics are kept 7 days.
+- **DEFAULT:** Development and Internal diagnostics are kept 7 days. **FACT:** Unit 2 prunes on launch, writes and Refresh; clearing is available for future sign-out/account-deletion integration, which is not yet built. Logs contain dates, elapsed values and exchange digests, not identities or raw tokens.
 - **DEFAULT:** reports are kept until resolved and then for a period the privacy policy will state, unless account deletion erases them; only operator moderation outcomes may survive under the safety exception in **Privacy and safety**.
 - Removing access cannot retract an external URL a reader has already copied.
+
+**FACT — Unit 2 security fixes, static review on 2026-10-11:** the unbounded adapter event stream, missing receipt expiry invocation, unbounded engine ledgers and trial log, missing own-token recheck at completion, and unbounded write fragments were fixed.
+
+- Adapter: admission threshold of 256 queued events; at that threshold observations are dropped and new subscriptions are refused, while events for admitted work are always delivered (so this is not a hard cap on all events). At most 16 open peripheral-role links, 8 write fragments per callback and no empty fragment, one observation per peer every 2 seconds, and a 256-peer registry.
+- Engine: at most 256 pending peers, dropped 30 seconds after their last observation; 256 observed peers; a 4,096-entry consumed-nonce ledger expiring after 48 hours; a returning central refused for 5 seconds after an attempt without evidence; a 20-second pre-exchange peripheral attempt bound; own token rechecked at the write acknowledgement and after save.
+- Diagnostics: at most 200 exchange and 200 evidence entries per trial, 200 trial records, and the newest 50 attempt endings. S22 shows counters for exchange/evidence entries dropped beyond the limits.
+
+Accepted security trade-offs remain open: oldest nonce entries are evicted above 4,096, so Unit 3 server nonce consumption is the replay control; the 4,096-receipt cap can be filled cheaply only with the session flag set, so short session candidates need a smaller budget when sessions exist; wall-clock changes can delete or extend receipts; failed cleanup after a token-roll rejection can leave the receipt until expiry; sharing a trial log exposes the matching exchange digest on both phones and reveals that their owners met (Development and Internal only).
 
 ### Fetching other pages
 
@@ -328,7 +377,7 @@ A scheduled job runs at a regular interval, selects users whose local time has r
 
 ## 11. User interface
 
-The UI document is new: `ui.md`, version 0.1.
+The UI document is `ui.md`, version 0.2. Unit 2 built the S01 public name/introduction and Development-only S22 entry, and S22 local radio diagnostics; account controls and the Settings list remain to build.
 
 - Start from the six concept screens in `proposal.pdf` (pages 3 to 5). Keep their teal accent on a light background and their card layout. Build with standard iOS components, with light and dark modes and Dynamic Type.
 - A tab bar at the bottom of the screen with three tabs: Discover, Profile, Settings.
@@ -397,9 +446,13 @@ For each screen `ui.md` gives: its purpose, how the user reaches it, a text sket
 ## 13. Open and unverified items
 
 - The trademark registry search for **すれちがいエンジニア** and **Engineer Encounters**.
-- Whether two backgrounded iPhones discover each other at all.
+- **UNVERIFIED:** background-to-background discovery, including two iPhones; the both-locked check began with foreground first exchanges. Rungs 1 and 2 remain unproven and never promised; rung 2 was not tried.
 - Whether the Zenn feed carries the opening text.
-- Whether `swift test` and `xcodebuild` run inside the sandbox of the implementing agent.
+- **UNVERIFIED:** the unrun token-window-boundary, real loss-of-contact-and-return, and iPhone-with-iPhone trials; the clean reset-then-lock held-connection trial with iPad locked, and the 160-trial matrix and battery gate.
+- The three 2026-10-11 owner decisions in **Bluetooth transport** are decided but not yet implemented; implement all before the matrix and security-review the refusal diff.
+- **UNVERIFIED:** delayed second connection with `CBConnectPeripheralOptionStartDelayKey`; undecided and not built. Showing which first exchange a second-exchange evidence entry completes in S22 is also undecided.
+- Accepted Unit 2 security risks: oldest-entry nonce eviction requires Unit 3 server replay control; short session candidates need a smaller receipt budget; wall-clock receipt expiry; failed cleanup after token-roll rejection; shared diagnostic digests reveal that the owners met.
+- **FACT:** the sandbox question is resolved in **Repository and tools**; it is no longer unverified.
 - Whether Sign in with Apple is available on a free Apple account, and the current device cap.
 - Whether a foreign developer needs a government filing number for the China mainland storefront. Sources conflict.
 - Whether a solo developer with a free, ad-free app counts as a trader under EU rules.
