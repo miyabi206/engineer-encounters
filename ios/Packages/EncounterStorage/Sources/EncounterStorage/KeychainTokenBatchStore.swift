@@ -60,8 +60,7 @@ public struct SystemKeychainClient: KeychainClient {
 
     static func writeAttributes(_ data: Data) -> [String: Any] {
         [kSecValueData as String: data,
-         kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-         kSecAttrSynchronizable as String: false]
+         kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly]
     }
 
     static func addAttributes(_ data: Data, service: String, account: String) -> [String: Any] {

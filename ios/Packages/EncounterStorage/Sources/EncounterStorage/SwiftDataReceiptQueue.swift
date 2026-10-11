@@ -180,21 +180,12 @@ public actor SwiftDataReceiptQueue: ModelActor, ReceiptQueue {
     private func pendingIsolated() throws -> [EncounterReceipt] {
         let rows = try fetch(FetchDescriptor<StoredReceipt>(sortBy: [SortDescriptor(\.sequence)]))
         var receipts: [EncounterReceipt] = []
-        var corrupted: [StoredReceipt] = []
         for row in rows {
             if let receipt = try? decode(row) {
                 receipts.append(receipt)
-            } else {
-                corrupted.append(row)
             }
         }
-        if !corrupted.isEmpty {
-            // Unreadable evidence can never upload. Cleanup failure must not hide
-            // healthy evidence, and write rolls back any unsuccessful deletion.
-            try? write {
-                for row in corrupted { modelContext.delete(row) }
-            }
-        }
+        // A future receipt format may be undecodable here; retain it until expiry.
         return receipts
     }
 

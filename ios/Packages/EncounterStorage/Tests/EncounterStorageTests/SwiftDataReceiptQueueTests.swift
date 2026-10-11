@@ -276,7 +276,7 @@ final class SwiftDataReceiptQueueTests: XCTestCase {
         XCTAssertEqual(pending, [EncounterSamples.receipt()])
     }
 
-    func testPendingDiscardsCorruptedRowsAndKeepsHealthyOrderDurably() async throws {
+    func testPendingSkipsCorruptedRowsAndRetainsThemDurablyInHealthyOrder() async throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let receipts = (1...3).map { EncounterSamples.receipt($0) }
@@ -287,19 +287,21 @@ final class SwiftDataReceiptQueueTests: XCTestCase {
             let pending = try await queue.pending()
             XCTAssertEqual(pending, [receipts[0], receipts[2]])
             let identities = try await queue.storedReceiptIdentities()
-            XCTAssertEqual(identities, [receipts[0].id, receipts[2].id])
+            XCTAssertEqual(identities, receipts.map(\.id))
         }
         let reopened = try await SwiftDataReceiptQueue.fileBacked(directory: directory)
         let identities = try await reopened.storedReceiptIdentities()
-        XCTAssertEqual(identities, [receipts[0].id, receipts[2].id])
+        XCTAssertEqual(identities, receipts.map(\.id))
+        let pending = try await reopened.pending()
+        XCTAssertEqual(pending, [receipts[0], receipts[2]])
     }
 
-    func testPendingReturnsHealthyRowsWhenCorruptionCleanupSaveFails() async throws {
+    func testPendingSkipsCorruptedRowsWithoutSavingAndNextWriteRetainsThem() async throws {
         let queue = try await SwiftDataReceiptQueue.inMemory()
         let receipts = (1...3).map { EncounterSamples.receipt($0) }
         for receipt in receipts { try await queue.enqueue(receipt) }
         try await queue.corruptPayload(for: receipts[1].id)
-        await queue.setWriteHooks(ReceiptQueueWriteHooks(beforeSave: { throw NSError(domain: "save-fault", code: 1) }))
+        await queue.setWriteHooks(ReceiptQueueWriteHooks(beforeSave: { XCTFail("Pending attempted a save") }))
         let pending = try await queue.pending()
         XCTAssertEqual(pending, [receipts[0], receipts[2]])
         let beforeRetry = try await queue.storedReceiptIdentities()
@@ -309,7 +311,40 @@ final class SwiftDataReceiptQueueTests: XCTestCase {
         let recovered = try await queue.pending()
         XCTAssertEqual(recovered, [receipts[0], receipts[2], EncounterSamples.receipt(4)])
         let afterRetry = try await queue.storedReceiptIdentities()
-        XCTAssertEqual(afterRetry, recovered.map(\.id))
+        XCTAssertEqual(afterRetry, receipts.map(\.id) + [EncounterSamples.receipt(4).id])
+    }
+
+    func testSkippedCorruptedRowIsRetainedUntilItsExpiry() async throws {
+        let queue = try await SwiftDataReceiptQueue.inMemory()
+        let receipt = EncounterSamples.receipt()
+        let retained = EncounterSamples.receipt(2, observedAt: receipt.start.observedAt.addingTimeInterval(60))
+        try await queue.enqueue(receipt)
+        try await queue.enqueue(retained)
+        try await queue.corruptPayload(for: receipt.id)
+        let pending = try await queue.pending()
+        XCTAssertEqual(pending, [retained])
+        try await queue.removeExpired(asOf: receipt.expiresAt.addingTimeInterval(-1))
+        let beforeExpiry = try await queue.storedReceiptIdentities()
+        XCTAssertEqual(beforeExpiry, [receipt.id, retained.id])
+        try await queue.removeExpired(asOf: receipt.expiresAt)
+        let atExpiry = try await queue.storedReceiptIdentities()
+        XCTAssertEqual(atExpiry, [retained.id])
+        let remaining = try await queue.pending()
+        XCTAssertEqual(remaining, [retained])
+    }
+
+    func testRemoveAllClearsSkippedCorruptedRows() async throws {
+        let queue = try await SwiftDataReceiptQueue.inMemory()
+        let receipts = (1...3).map { EncounterSamples.receipt($0) }
+        for receipt in receipts { try await queue.enqueue(receipt) }
+        try await queue.corruptPayload(for: receipts[1].id)
+        let pending = try await queue.pending()
+        XCTAssertEqual(pending, [receipts[0], receipts[2]])
+        try await queue.removeAll()
+        let identities = try await queue.storedReceiptIdentities()
+        XCTAssertTrue(identities.isEmpty)
+        let cleared = try await queue.pending()
+        XCTAssertTrue(cleared.isEmpty)
     }
 
     func testCorruptedRowRejectsUpdateButCanBeAcknowledgedWithOriginalDeadline() async throws {

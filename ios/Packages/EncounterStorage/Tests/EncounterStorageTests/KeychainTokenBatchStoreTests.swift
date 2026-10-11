@@ -23,8 +23,8 @@ final class KeychainTokenBatchStoreTests: XCTestCase {
             XCTAssertEqual(dictionary[kSecValueData as String] as? Data, data)
             XCTAssertEqual(dictionary[kSecAttrAccessible as String] as? String,
                            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String)
-            XCTAssertEqual(dictionary[kSecAttrSynchronizable as String] as? Bool, false)
         }
+        XCTAssertEqual(Set(update.keys), Set([kSecValueData as String, kSecAttrAccessible as String]))
         XCTAssertEqual(read[kSecReturnData as String] as? Bool, true)
         XCTAssertEqual(read[kSecMatchLimit as String] as? String, kSecMatchLimitOne as String)
         XCTAssertNil(query[kSecValueData as String])
