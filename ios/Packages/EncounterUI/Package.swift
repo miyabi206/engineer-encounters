@@ -3,12 +3,13 @@ import PackageDescription
 
 let package = Package(
     name: "EncounterUI",
+    defaultLocalization: "ja",
     platforms: [.iOS("26.0")],
     products: [
         .library(name: "EncounterUI", targets: ["EncounterUI"])
     ],
     targets: [
-        .target(name: "EncounterUI"),
+        .target(name: "EncounterUI", resources: [.process("Resources")]),
         .testTarget(name: "EncounterUITests", dependencies: ["EncounterUI"])
     ],
     swiftLanguageModes: [.v6]

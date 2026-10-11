@@ -5,6 +5,7 @@ options:
   deploymentTarget:
     iOS: "26.0"
   defaultConfig: Development
+  developmentLanguage: ja
 configs:
   Development: debug
   Internal: release
@@ -21,10 +22,13 @@ settings:
   configs:
     Development:
       SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEVELOPMENT_BUILD
+      EXCLUDED_SOURCE_FILE_NAMES: ""
     Internal:
       SWIFT_ACTIVE_COMPILATION_CONDITIONS: INTERNAL_BUILD
+      EXCLUDED_SOURCE_FILE_NAMES: "$(inherited) Development/* */Development/*"
     Release:
       SWIFT_ACTIVE_COMPILATION_CONDITIONS: ""
+      EXCLUDED_SOURCE_FILE_NAMES: "$(inherited) Development/* */Development/* Diagnostics/* */Diagnostics/*"
 packages:
   EncounterDomain:
     path: Packages/EncounterDomain
