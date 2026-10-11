@@ -21,6 +21,13 @@ enum RadioAdmission {
     static func canTrackCentral(links: Int, cancellations: Int) -> Bool {
         links + cancellations < centralLimit
     }
+
+    static func permitsRead(poweredOn: Bool, servicePublished: Bool, discoveryRequested: Bool?,
+                            characteristicUUID: String, centralID: UUID, subscribedCentralIDs: [UUID]) -> Bool {
+        poweredOn && servicePublished && discoveryRequested != false
+            && characteristicUUID == EncounterProtocol.peripheralTokenCharacteristicUUID
+            && subscribedCentralIDs.contains(centralID)
+    }
 }
 
 /// The stream pulls directly from this FIFO; AsyncStream has no second buffer.
@@ -142,7 +149,18 @@ struct ReadSnapshots {
 }
 
 struct PeripheralLinks {
-    // Only open logical links are tracked; unknown centrals cannot make requests.
+    enum ReadAdmission: Equatable {
+        case refused, existing, connected
+
+        func events(peer: PeerHandle, request: BluetoothRequestID?) -> [BluetoothEvent] {
+            guard self != .refused else { return [] }
+            var events: [BluetoothEvent] = self == .connected
+                ? [.connected(.init(peer: peer, role: .peripheral))] : []
+            if let request { events.append(.incomingRead(peer, request)) }
+            return events
+        }
+    }
+    // Only open logical links are tracked; subscription truth stays with the radio.
     private var subscriptions: Set<PeerHandle> = []
 
     var openPeers: [PeerHandle] { Array(subscriptions) }
@@ -155,6 +173,13 @@ struct PeripheralLinks {
         else { return false }
         subscriptions.insert(peer)
         return true
+    }
+
+    mutating func admitRead(_ peer: PeerHandle, offset: Int, isSubscribed: Bool,
+                            backlogCount: Int) -> ReadAdmission {
+        if acceptsRequests(peer) { return .existing }
+        guard offset == 0, isSubscribed, subscribe(peer, backlogCount: backlogCount) else { return .refused }
+        return .connected
     }
 
     mutating func unsubscribe(_ peer: PeerHandle) -> Bool {
@@ -172,8 +197,53 @@ struct PeripheralLinks {
     }
 }
 
+/// Physical teardown is independent of the logical link's immediate ending event.
+struct CentralTeardown {
+    enum Action: Equatable {
+        case unsubscribe, cancel, cancelTimeout
+        case scheduleTimeout(after: TimeInterval)
+    }
+    private enum Phase { case open, unsubscribing, cancelling, ended }
+    private var phase: Phase = .open
+
+    mutating func begin(wasReady: Bool, poweredOn: Bool, connected: Bool, notifying: Bool) -> [Action] {
+        guard phase == .open else { return [] }
+        if wasReady, poweredOn, connected, notifying {
+            phase = .unsubscribing
+            return [.unsubscribe, .scheduleTimeout(after: 1)]
+        }
+        phase = .cancelling
+        return [.cancel]
+    }
+
+    mutating func notificationStateUpdated() -> [Action] { finishUnsubscribe() }
+    mutating func timeout() -> [Action] { finishUnsubscribe() }
+
+    func didConnect() -> [Action] { phase == .cancelling ? [.cancel] : [] }
+
+    mutating func end() -> [Action] {
+        let actions: [Action] = phase == .unsubscribing ? [.cancelTimeout] : []
+        phase = .ended
+        return actions
+    }
+
+    func blocksRedial(peripheralDisconnected: Bool) -> Bool {
+        phase == .unsubscribing || (phase == .cancelling && !peripheralDisconnected)
+    }
+
+    private mutating func finishUnsubscribe() -> [Action] {
+        guard phase == .unsubscribing else { return [] }
+        phase = .cancelling
+        return [.cancelTimeout, .cancel]
+    }
+}
+
 struct CentralLinks {
     enum State: Equatable { case pending, ready, closing }
+    struct Disconnection {
+        let event: BluetoothEvent
+        let wasReady: Bool
+    }
     private var states: [PeerHandle: State] = [:]
 
     func state(_ peer: PeerHandle) -> State? { states[peer] }
@@ -198,9 +268,10 @@ struct CentralLinks {
     }
 
     // Each command is acknowledged immediately; its later callback is silent.
-    mutating func disconnect(_ peer: PeerHandle) -> BluetoothEvent {
+    mutating func disconnect(_ peer: PeerHandle) -> Disconnection {
+        let wasReady = states[peer] == .ready
         if states[peer] != nil { states[peer] = .closing }
-        return .disconnected(.init(peer: peer, role: .central))
+        return Disconnection(event: .disconnected(.init(peer: peer, role: .central)), wasReady: wasReady)
     }
 }
 
