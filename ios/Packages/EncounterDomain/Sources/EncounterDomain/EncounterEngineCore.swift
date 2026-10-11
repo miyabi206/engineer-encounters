@@ -454,6 +454,7 @@ public struct EncounterEngineCore: Sendable {
         attempts[attempt.connection] = waiting
     }
     private mutating func remember(_ peer: PeerHandle, mayRetry: Bool, lastObservedAt: TimeInterval) {
+        guard evidencePause[peer] == nil else { return }
         guard lastObservedAt + Self.pendingPeerLifetime > currentMonotonic else { return }
         if var existing = pendingPeers[peer] {
             existing.mayRetry = existing.mayRetry || mayRetry
@@ -568,14 +569,15 @@ public struct EncounterEngineCore: Sendable {
             effects.append(.transport(.answerWrite(key.peer, request, success: false)))
         }
         if let receipt = attempt.first { finalize(receipt, preserve: false, effects: &effects) }
-        if reason == .evidenceReached {
+        if key.role == .central && reason == .evidenceReached {
+            pendingPeers.removeValue(forKey: key.peer)
             evidencePause[key.peer] = LedgerEntry(insertionSequence: nextID(),
                 expiresAt: currentMonotonic + EncounterProtocol.evidencePauseDuration)
             trim(&evidencePause, limit: Self.evidencePauseLimit)
         }
         if key.role == .peripheral && reason != .evidenceReached && attempt.first?.hasQualifyingAmbientEvidence != true {
             let expiresAt = attempt.createdAt + Self.peripheralBackoffDuration
-            if expiresAt > currentMonotonic && expiresAt > (peripheralBackoff[key.peer]?.expiresAt ?? currentMonotonic) {
+            if expiresAt > currentMonotonic {
                 peripheralBackoff[key.peer] = LedgerEntry(insertionSequence: nextID(), expiresAt: expiresAt)
                 trim(&peripheralBackoff, limit: Self.peripheralBackoffLimit)
             }
