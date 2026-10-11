@@ -7,9 +7,15 @@ let package = Package(
     products: [
         .library(name: "EncounterStorage", targets: ["EncounterStorage"])
     ],
+    dependencies: [.package(path: "../EncounterDomain")],
     targets: [
-        .target(name: "EncounterStorage"),
-        .testTarget(name: "EncounterStorageTests", dependencies: ["EncounterStorage"])
+        .target(name: "EncounterStorage", dependencies: [
+            .product(name: "EncounterDomain", package: "EncounterDomain")
+        ]),
+        .testTarget(name: "EncounterStorageTests", dependencies: [
+            "EncounterStorage",
+            .product(name: "EncounterDomainTestSupport", package: "EncounterDomain")
+        ])
     ],
     swiftLanguageModes: [.v6]
 )
