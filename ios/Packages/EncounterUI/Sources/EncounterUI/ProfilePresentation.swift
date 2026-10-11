@@ -158,10 +158,16 @@ public enum ProfileValidation {
         value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    public static func characterCount(_ value: String) -> Int { value.count }
+    /// All text limits and counters use trimmed Unicode scalars, as the server does.
+    public static func characterCount(_ value: String) -> Int { trimmed(value).unicodeScalars.count }
+
+    public static func validText(_ value: String, limit: Int, required: Bool) -> Bool {
+        let count = characterCount(value)
+        return count <= limit && (!required || count > 0)
+    }
 
     public static func validRequiredText(_ value: String, limit: Int) -> Bool {
-        !trimmed(value).isEmpty && characterCount(value) <= limit
+        validText(value, limit: limit, required: true)
     }
 
     public static func invalidBasics(displayName: String, introduction: String) -> [ProfileField] {
@@ -205,11 +211,14 @@ public enum BluetoothPermissionState: Sendable {
 }
 
 /// The composition layer implements these actions. This package does no I/O.
+/// Each write performs one contract operation and returns its confirmed profile, so
+/// the model can account for partial success across independently committed writes.
 @MainActor
 public struct ProfileActions {
     public var loadInterests: @MainActor () async throws -> [InterestOption]
     public var saveProfile: @MainActor (String, String, String) async throws -> OwnProfileState
-    public var saveInterestsAndPurposes: @MainActor (Set<String>, Set<ProfilePurpose>) async throws -> OwnProfileState
+    public var saveInterests: @MainActor (Set<String>) async throws -> OwnProfileState
+    public var savePurposes: @MainActor (Set<ProfilePurpose>) async throws -> OwnProfileState
     public var setDiscovery: @MainActor (Bool) async throws -> OwnProfileState
     public var requestBluetooth: @MainActor () async throws -> BluetoothPermissionState
     public var setMinimumSharedInterests: @MainActor (Int) async throws -> OwnProfileState
@@ -217,14 +226,16 @@ public struct ProfileActions {
 
     public init(loadInterests: @escaping @MainActor () async throws -> [InterestOption],
                 saveProfile: @escaping @MainActor (String, String, String) async throws -> OwnProfileState,
-                saveInterestsAndPurposes: @escaping @MainActor (Set<String>, Set<ProfilePurpose>) async throws -> OwnProfileState,
+                saveInterests: @escaping @MainActor (Set<String>) async throws -> OwnProfileState,
+                savePurposes: @escaping @MainActor (Set<ProfilePurpose>) async throws -> OwnProfileState,
                 setDiscovery: @escaping @MainActor (Bool) async throws -> OwnProfileState,
                 requestBluetooth: @escaping @MainActor () async throws -> BluetoothPermissionState,
                 setMinimumSharedInterests: @escaping @MainActor (Int) async throws -> OwnProfileState,
                 setFieldVisibility: @escaping @MainActor (ProfileField, VisibilityLevel) async throws -> OwnProfileState) {
         self.loadInterests = loadInterests
         self.saveProfile = saveProfile
-        self.saveInterestsAndPurposes = saveInterestsAndPurposes
+        self.saveInterests = saveInterests
+        self.savePurposes = savePurposes
         self.setDiscovery = setDiscovery
         self.requestBluetooth = requestBluetooth
         self.setMinimumSharedInterests = setMinimumSharedInterests
@@ -251,19 +262,5 @@ public struct SettingsNavigationActions {
         self.back = back; self.editProfile = editProfile; self.discovery = discovery
         self.visibility = visibility; self.links = links
         self.bluetoothRecovery = bluetoothRecovery; self.discoveryOff = discoveryOff
-    }
-}
-
-/// Interim vocabulary, replaceable in one place or by the caller's loadInterests action.
-public enum InterimProfileInterests {
-    public static var options: [InterestOption] {
-        [option("ios", .interestIOS), option("android", .interestAndroid), option("web", .interestWeb),
-         option("backend", .interestBackend), option("design", .interestDesign), option("oss", .interestOSS)]
-    }
-
-    private static func option(_ id: String, _ key: SettingsString) -> InterestOption {
-        InterestOption(id: id,
-                       labelJapanese: SettingsStrings.localized(key.rawValue, language: "ja") ?? key.rawValue,
-                       labelEnglish: SettingsStrings.localized(key.rawValue, language: "en") ?? key.rawValue)
     }
 }

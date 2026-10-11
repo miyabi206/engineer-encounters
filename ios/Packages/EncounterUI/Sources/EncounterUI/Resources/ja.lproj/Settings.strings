@@ -78,10 +78,10 @@
 "discoveryOffExplanation" = "発見をオフにするとカードは非表示になりますが、すれちがいは削除されません。";
 // Neutral copy: wording not supplied in ui.md.
 "interestLimit" = "興味は%ld件まで選べます";
-// Interim interest vocabulary; replace keys and IDs together in InterimProfileInterests.
-"interestIOS" = "iOS";
-"interestAndroid" = "Android";
-"interestWeb" = "Web";
-"interestBackend" = "バックエンド";
-"interestDesign" = "デザイン";
-"interestOSS" = "オープンソース";
+// Neutral copy: a partial save lists confirmed values beside the failed operation.
+"partialSave" = "すでに適用された変更";
+"appliedChange" = "%@：%@";
+"labelStatus" = "%@ · %@";
+"fieldMessage" = "%@：%@";
+"listItem" = "%@、%@";
+"notSet" = "未設定";

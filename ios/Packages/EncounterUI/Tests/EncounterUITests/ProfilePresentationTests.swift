@@ -12,16 +12,21 @@ final class ProfilePresentationTests: XCTestCase {
         XCTAssertTrue(SignInDeclarations(isAdult: true, acceptsTermsAndPrivacy: true).canSignIn)
     }
 
-    func testLimitsCountExtendedGraphemeCharactersRatherThanBytes() {
-        let family = "👨‍👩‍👧‍👦"
-        let accented = "e\u{301}"
-        XCTAssertEqual(ProfileValidation.characterCount(family + accented + "あ"), 3)
+    func testLimitsCountTrimmedUnicodeScalars() {
+        XCTAssertEqual(ProfileValidation.characterCount(" \n👨‍👩‍👧‍👦e\u{301}あ\t "), 10)
         XCTAssertTrue(ProfileValidation.invalidBasics(
-            displayName: String(repeating: family, count: 30),
-            introduction: String(repeating: accented, count: 200)).isEmpty)
+            displayName: " " + String(repeating: "e\u{301}", count: 15) + "\n",
+            introduction: String(repeating: "e\u{301}", count: 100)).isEmpty)
         XCTAssertEqual(ProfileValidation.invalidBasics(
-            displayName: String(repeating: family, count: 31),
-            introduction: String(repeating: accented, count: 201)), [.displayName, .introduction])
+            displayName: String(repeating: "e\u{301}", count: 16),
+            introduction: String(repeating: "e\u{301}", count: 101)), [.displayName, .introduction])
+        for limit in [30, 200, 100] {
+            let atLimit = " \n" + String(repeating: "a", count: limit) + "\t "
+            XCTAssertEqual(ProfileValidation.characterCount(atLimit), limit)
+            XCTAssertTrue(ProfileValidation.validText(atLimit, limit: limit, required: true))
+            XCTAssertFalse(ProfileValidation.validText(String(repeating: "a", count: limit - 1) + "e\u{301}",
+                                                      limit: limit, required: false))
+        }
     }
 
     func testBlankAndWhitespaceOnlyFieldsAreInvalid() {

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // Resolve the property wrapper rather than the SDK's same-named compiler macro.
 typealias SettingsViewState<Value> = State<Value>
@@ -63,7 +64,7 @@ public struct EditProfileView: View {
             OnboardingCard {
                 textInput(.displayName, value: $model.displayName, limit: ProfileValidation.displayNameLimit)
                 textInput(.introduction, value: $model.introduction, limit: ProfileValidation.introductionLimit)
-            }.disabled(model.isBusy)
+            }.disabled(model.isSaving)
             OnboardingCard {
                 heading(.interests)
                 if model.isLoadingInterests { SettingsProgress() }
@@ -72,8 +73,10 @@ public struct EditProfileView: View {
                                     disabled: model.isBusy, fallback: .listError) {
                         Task { await model.loadInterests() }
                     }
-                } else if model.hasLoadedInterests && model.interests.isEmpty {
-                    Text(SettingsStrings.text(.emptyInterests)).foregroundStyle(.secondary)
+                } else if model.shouldRetryInterestLoad {
+                    if model.hasLoadedInterests {
+                        Text(SettingsStrings.text(.emptyInterests)).foregroundStyle(.secondary)
+                    }
                     Button(SettingsStrings.text(.retry)) { Task { await model.loadInterests() } }
                         .disabled(model.isBusy)
                 }
@@ -86,7 +89,7 @@ public struct EditProfileView: View {
                         }
                         .background(model.selectedInterestIDs.contains(interest.id) ? Color.teal.opacity(0.15) : .clear,
                                     in: RoundedRectangle(cornerRadius: 16))
-                        .disabled(model.isBusy || !ProfileValidation.canToggleInterest(interest.id, selected: model.selectedInterestIDs))
+                        .disabled(model.isSaving || !ProfileValidation.canToggleInterest(interest.id, selected: model.selectedInterestIDs))
                     }
                 }
                 Text(String(format: SettingsStrings.text(.interestCounter), locale: locale,
@@ -103,16 +106,11 @@ public struct EditProfileView: View {
             OnboardingCard {
                 textInput(.contactDetail, value: $model.contactDetail, limit: ProfileValidation.contactDetailLimit)
                 Text(SettingsStrings.text(.contactPrivate)).font(.caption).foregroundStyle(.secondary)
-            }.disabled(model.isBusy)
-            Button(SettingsStrings.text(.visibility), action: navigation.visibility).disabled(model.isBusy)
+            }.disabled(model.isSaving)
+            Button(SettingsStrings.text(.visibility), action: navigation.visibility).disabled(model.isSaving)
             if !model.removedPrerequisites.isEmpty || model.errors[.profile]?.code == .prerequisiteMissing {
                 Text(SettingsStrings.text(model.profile.discoveryOn ? .discoveryRequired : .requiredInformation)).foregroundStyle(.red)
-                Button(SettingsStrings.text(.discoveryMatching), action: navigation.discovery).disabled(model.isBusy)
-            }
-            if model.isSaving { SettingsProgress() }
-            if let error = model.errors[.profile] {
-                SettingsFailure(error: error, screen: .profile, discoveryOn: model.profile.discoveryOn,
-                                disabled: !model.canSaveProfile, retry: save)
+                Button(SettingsStrings.text(.discoveryMatching), action: navigation.discovery).disabled(model.isSaving)
             }
         }
         .task { if !model.hasLoadedInterests { await model.loadInterests() } }
@@ -140,7 +138,7 @@ public struct EditProfileView: View {
                 Text(String(format: SettingsStrings.text(.tooLong), limit)).foregroundStyle(.red)
             } else if model.removedPrerequisites.contains(field) {
                 Text(SettingsStrings.text(.discoveryRequired)).foregroundStyle(.red)
-            } else if field != .contactDetail && SettingsValidation.textCount(value.wrappedValue) == 0 {
+            } else if model.profile.discoveryOn && field != .contactDetail && SettingsValidation.textCount(value.wrappedValue) == 0 {
                 Text(SettingsStrings.text(.requiredField)).foregroundStyle(.red)
             } else if SettingsErrorPresentation.affects(model.errors[.profile], field: field) {
                 Text(SettingsStrings.text(.invalidField)).foregroundStyle(.red)
@@ -167,9 +165,7 @@ public struct EditProfileView: View {
 @MainActor
 public struct DiscoveryAndMatchingView: View {
     @ObservedObject private var model: SettingsModel
-    @SettingsViewState private var retryOperation: RetryOperation = .matching
     private let navigation: SettingsNavigationActions
-    private enum RetryOperation { case matching, discovery(Bool), bluetooth }
 
     public init(model: SettingsModel, navigation: SettingsNavigationActions) {
         self.model = model; self.navigation = navigation
@@ -180,10 +176,9 @@ public struct DiscoveryAndMatchingView: View {
             OnboardingCard {
                 Toggle(SettingsStrings.text(.discovery), isOn: Binding(
                     get: { model.profile.discoveryOn }, set: { enabled in
-                        retryOperation = .discovery(enabled)
                         changeDiscovery(enabled)
                     }))
-                    .disabled(model.isBusy || (!model.profile.discoveryOn && !model.canEnableDiscovery))
+                    .disabled(model.isSaving || (!model.profile.discoveryOn && !model.canEnableDiscovery))
                     .accessibilityLabel(SettingsStrings.text(.discovery))
                 Text(SettingsStrings.text(.discoveryOffExplanation)).font(.caption).foregroundStyle(.secondary)
                 if model.showsDiscoveryExplanation && !model.profile.discoveryOn {
@@ -210,12 +205,11 @@ public struct DiscoveryAndMatchingView: View {
                 Text(SettingsStrings.text(bluetoothLabel))
                 if model.bluetooth.needsRecovery {
                     Button(SettingsStrings.text(.bluetoothRecovery), action: navigation.bluetoothRecovery)
-                        .disabled(model.isBusy)
-                } else if model.bluetooth == .notRequested {
+                        .disabled(model.isSaving)
+                } else if model.allowsDiscoveryActivation && model.bluetooth == .notRequested {
                     Button(SettingsStrings.text(.allowBluetooth)) {
-                        retryOperation = .bluetooth
                         requestBluetooth()
-                    }.disabled(model.isBusy)
+                    }.disabled(model.isSaving)
                 }
             }
             OnboardingCard {
@@ -230,7 +224,7 @@ public struct DiscoveryAndMatchingView: View {
                 Text(SettingsStrings.text(.threshold)).font(.headline).accessibilityAddTraits(.isHeader)
                 Stepper(SettingsStrings.threshold(model.minimumSharedInterests), value: $model.minimumSharedInterests,
                         in: ProfileValidation.sharedInterestRange)
-                    .disabled(model.isBusy)
+                    .disabled(model.isSaving)
                     .accessibilityLabel(SettingsStrings.text(.threshold))
                     .accessibilityValue(SettingsStrings.threshold(model.minimumSharedInterests))
                 if !ProfileValidation.sharedInterestRange.contains(model.minimumSharedInterests) ||
@@ -242,10 +236,10 @@ public struct DiscoveryAndMatchingView: View {
             if model.isSaving { SettingsProgress() }
             if let error = model.errors[.discovery] {
                 SettingsFailure(error: error, screen: .discovery, discoveryOn: model.profile.discoveryOn,
-                                disabled: retryDisabled, retry: retry)
+                                disabled: !model.canRetry(.discovery), fallback: model.errorFallback(.discovery), retry: retry)
+                SettingsAppliedChanges(model: model, screen: .discovery)
             }
             Button(SettingsStrings.text(.saveMatching)) {
-                retryOperation = .matching
                 Task { await model.saveMatching() }
             }.buttonStyle(.borderedProminent).disabled(!model.canSaveMatching)
         }
@@ -261,18 +255,10 @@ public struct DiscoveryAndMatchingView: View {
         }
     }
 
-    private var retryDisabled: Bool {
-        switch retryOperation {
-        case .matching: !model.canSaveMatching
-        case .discovery(let enabled): model.isBusy || (enabled && !model.canEnableDiscovery)
-        case .bluetooth: model.isBusy
-        }
-    }
-
     @ViewBuilder
     private func checklistRow(_ prerequisite: DiscoveryPrerequisite) -> some View {
         let met = model.profile.prerequisites.isMet(prerequisite)
-        let label = SettingsStrings.text(prerequisite.settingsLabel) + " · " + SettingsStrings.text(met ? .met : .missing)
+        let label = SettingsStrings.labelStatus(SettingsStrings.text(prerequisite.settingsLabel), SettingsStrings.text(met ? .met : .missing))
         let error = model.errors[.discovery]
         let hasError = error?.code == .prerequisiteMissing && error?.fields.contains(prerequisite.rawValue) == true
         if (!met || hasError) && (prerequisite != .link || navigation.links != nil) {
@@ -280,7 +266,7 @@ public struct DiscoveryAndMatchingView: View {
                 if prerequisite == .link { navigation.links?() } else { navigation.editProfile() }
             } label: {
                 Label(label, systemImage: "square").multilineTextAlignment(.leading)
-            }.disabled(model.isBusy)
+            }.disabled(model.isSaving)
         } else {
             Label(label, systemImage: met ? "checkmark.square" : "square")
         }
@@ -301,12 +287,14 @@ public struct DiscoveryAndMatchingView: View {
     }
 
     private func retry() {
-        switch retryOperation {
-        case .matching: Task { await model.saveMatching() }
-        case .discovery(let enabled): changeDiscovery(enabled)
-        case .bluetooth: requestBluetooth()
+        Task {
+            let operation = model.failedOperations[.discovery]
+            let succeeded = await model.retry(.discovery)
+            if succeeded && operation == .discovery(false) { navigation.discoveryOff() }
+            if operation == .bluetooth && model.bluetooth.needsRecovery { navigation.bluetoothRecovery() }
         }
     }
+
 }
 
 @MainActor
@@ -329,7 +317,7 @@ public struct VisibilitySettingsView: View {
                             SelectionControl(label: SettingsStrings.text(level.settingsLabel),
                                              selected: SettingsValidation.visibility(field, in: model.visibility) == level) {
                                 model.visibility[field] = level
-                            }.accessibilityLabel(label + ": " + SettingsStrings.text(level.settingsLabel))
+                            }.accessibilityLabel(SettingsStrings.fieldMessage(label, SettingsStrings.text(level.settingsLabel)))
                         }
                         if SettingsErrorPresentation.affects(model.errors[.visibility], field: field) {
                             Text(SettingsStrings.text(.invalidField)).foregroundStyle(.red)
@@ -339,7 +327,7 @@ public struct VisibilitySettingsView: View {
                 if let links = navigation.links {
                     Button(SettingsStrings.text(.linkVisibility), action: links)
                 }
-            }.disabled(model.isBusy)
+            }.disabled(model.isSaving)
             OnboardingCard {
                 ForEach([VisibilityLevel.everyoneEligible, .compatibleOnly, .private], id: \.self) { level in
                     VStack(alignment: .leading, spacing: 4) {
@@ -352,10 +340,11 @@ public struct VisibilitySettingsView: View {
             if model.isSaving { SettingsProgress() }
             if let error = model.errors[.visibility] {
                 SettingsFailure(error: error, screen: .visibility, discoveryOn: model.profile.discoveryOn,
-                                disabled: model.isBusy) { Task { await model.saveVisibility() } }
+                                disabled: !model.canRetry(.visibility)) { Task { await model.retry(.visibility) } }
+                SettingsAppliedChanges(model: model, screen: .visibility)
             }
             Button(SettingsStrings.text(.saveVisibility)) { Task { await model.saveVisibility() } }
-                .buttonStyle(.borderedProminent).disabled(model.isBusy)
+                .buttonStyle(.borderedProminent).disabled(model.isSaving)
         }
     }
 
@@ -379,7 +368,7 @@ private struct SettingsPurposes: View {
             SelectionControl(label: SettingsStrings.text(purpose == .discovery ? .discoveryPurpose : .collaborationPurpose),
                              selected: (screen == .profile ? model.selectedPurposes : model.matchingPurposes).contains(purpose)) {
                 model.togglePurpose(purpose, screen: screen)
-            }.disabled(model.isBusy)
+            }.disabled(model.isSaving)
         }
     }
 }
@@ -400,10 +389,20 @@ private struct SettingsPage<Content: View>: View {
             VStack(alignment: .leading, spacing: 24) {
                 HStack {
                     Button(SettingsStrings.text(screen == .profile ? .cancel : .back), action: leave)
-                        .disabled(model.isBusy)
+                        .disabled(model.isSaving)
                     Spacer()
                     if let save {
-                        Button(SettingsStrings.text(.save), action: save).disabled(!canSave)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Button(SettingsStrings.text(.save), action: save).disabled(!canSave)
+                            if model.isSaving { SettingsProgress() }
+                            if let error = model.errors[screen] {
+                                SettingsFailure(error: error, screen: screen, discoveryOn: model.profile.discoveryOn,
+                                    disabled: !model.canRetry(screen), fallback: model.errorFallback(screen)) {
+                                    Task { if await model.retry(screen) { navigation.back() } }
+                                }
+                                SettingsAppliedChanges(model: model, screen: screen)
+                            }
+                        }
                     }
                 }
                 Text(SettingsStrings.text(title)).font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
@@ -412,6 +411,15 @@ private struct SettingsPage<Content: View>: View {
         }
         .background(Color(uiColor: .systemGroupedBackground)).tint(.teal)
         .navigationBarBackButtonHidden(true)
+        .onDisappear { model.leave(screen) }
+        .onChange(of: model.isSaving) { _, saving in
+            if saving { UIAccessibility.post(notification: .announcement, argument: SettingsSaveFeedback.announcement(model: model, screen: screen)) }
+        }
+        .onChange(of: model.errors[screen]) { _, error in
+            guard error != nil else { return }
+            UIAccessibility.post(notification: .announcement,
+                                 argument: SettingsSaveFeedback.announcement(model: model, screen: screen))
+        }
         .confirmationDialog(SettingsStrings.text(.discardChanges), isPresented: $confirmsDiscard, titleVisibility: .visible) {
             Button(SettingsStrings.text(.discardChanges), role: .destructive) {
                 model.discard(screen)
@@ -428,7 +436,7 @@ private struct SettingsPage<Content: View>: View {
         case .discovery: dirty = model.hasMatchingChanges
         case .visibility: dirty = model.hasVisibilityChanges
         }
-        if dirty { confirmsDiscard = true } else { navigation.back() }
+        if dirty { confirmsDiscard = true } else { model.leave(screen); navigation.back() }
     }
 }
 
@@ -458,5 +466,65 @@ private struct SettingsFailure: View {
             }
             Button(SettingsStrings.text(.retry), action: retry).disabled(disabled)
         }
+    }
+}
+
+@MainActor
+struct SettingsAppliedChanges: View {
+    @ObservedObject var model: SettingsModel
+    let screen: SettingsScreen
+    @Environment(\.locale) private var locale
+
+    var body: some View {
+        let messages = Self.messages(model: model, screen: screen, language: locale.identifier)
+        if !messages.isEmpty {
+            Text(SettingsStrings.text(.partialSave)).font(.headline).accessibilityAddTraits(.isHeader)
+            ForEach(Array(messages.enumerated()), id: \.offset) { _, message in Text(message) }
+        }
+    }
+
+    static func messages(model: SettingsModel, screen: SettingsScreen, language: String) -> [String] {
+        (model.appliedChanges[screen] ?? []).map { change in
+            let label: String
+            let value: String
+            switch change {
+            case .threshold:
+                label = SettingsStrings.text(.threshold)
+                value = SettingsStrings.threshold(model.profile.minimumSharedInterests)
+            case .field(let field):
+                label = SettingsStrings.text(field.settingsLabel)
+                if screen == .visibility {
+                    value = SettingsStrings.text(SettingsValidation.visibility(field, in: model.profile.fieldVisibility).settingsLabel)
+                } else {
+                    switch field {
+                    case .displayName: value = model.profile.displayName
+                    case .introduction: value = model.profile.introduction
+                    case .contactDetail: value = model.profile.contactDetail
+                    case .interests:
+                        value = SettingsStrings.joined(model.profile.interestIDs.sorted().map { id in
+                            model.interests.first(where: { $0.id == id })?.label(language: language) ?? id
+                        })
+                    case .purposes:
+                        value = SettingsStrings.joined(ProfilePurpose.allCases.filter { model.profile.purposes.contains($0) }.map {
+                            SettingsStrings.text($0 == .discovery ? .discoveryPurpose : .collaborationPurpose)
+                        })
+                    }
+                }
+            }
+            return String(format: SettingsStrings.text(.appliedChange), locale: Locale.current,
+                          label, value.isEmpty ? SettingsStrings.text(.notSet) : value)
+        }
+    }
+}
+
+@MainActor
+enum SettingsSaveFeedback {
+    static func announcement(model: SettingsModel, screen: SettingsScreen) -> String? {
+        if model.isSaving { return SettingsStrings.text(.loading) }
+        guard let error = model.errors[screen] else { return nil }
+        let message = SettingsStrings.text(error.code == .unavailable ? model.errorFallback(screen) :
+            SettingsErrorPresentation.message(error, screen: screen, discoveryOn: model.profile.discoveryOn))
+        let applied = SettingsAppliedChanges.messages(model: model, screen: screen, language: Locale.current.identifier)
+        return ([message] + (applied.isEmpty ? [] : [SettingsStrings.text(.partialSave)] + applied)).joined(separator: "\n")
     }
 }

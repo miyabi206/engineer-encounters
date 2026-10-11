@@ -38,7 +38,7 @@
 "signInError" = "サインインできませんでした";
 "listError" = "読み込めませんでした";
 "emptyInterests" = "選択できる興味はありません";
-"interestLimit" = "興味は10件まで選べます";
+"interestLimit" = "興味は%ld件まで選べます";
 "checklist" = "発見に必要な情報";
 "link" = "最初のリンク";
 "linkRequired" = "発見をオンにするにはリンクが1件以上必要です";
@@ -58,3 +58,5 @@
 "rateLimitError" = "少し待ってから再試行してください";
 "notFoundError" = "情報が見つかりませんでした";
 "discoveryOff" = "発見はオフです";
+"labelStatus" = "%@ · %@";
+"fieldMessage" = "%@：%@";

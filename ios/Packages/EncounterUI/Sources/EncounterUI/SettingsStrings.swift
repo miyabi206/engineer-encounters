@@ -8,13 +8,13 @@ enum SettingsString: String, CaseIterable {
     case matchingExplanation, saveMatching, linkVisibility, appliesToPast, saveVisibility
     case everyoneEligible, compatibleOnly, privateLevel, everyoneExplanation, compatibleExplanation, privateExplanation
     case discoveryPurpose, collaborationPurpose, selectionGuidance
-    case counter, interestCounter, interestLimit, requiredField, tooLong, invalidField, saveError, emptyInterests
+    case labelStatus, fieldMessage, counter, interestCounter, interestLimit, requiredField, tooLong, invalidField, saveError, emptyInterests
     case checklist, link, linkRequired, met, missing, purposeRequired
     case authenticationError, accountError, declarationError, prerequisiteError, rateLimitError, notFoundError
     case discoveryOffExplanation, bluetoothPurpose, bluetoothNotRequested, bluetoothAvailable, bluetoothDenied
     case bluetoothOff, bluetoothUnavailable, bluetoothRecovery, allowBluetooth
     case promise, background, dailyReport, alternatives, forceQuit, firstUnlock, oneSided
-    case interestIOS, interestAndroid, interestWeb, interestBackend, interestDesign, interestOSS
+    case partialSave, appliedChange, listItem, notSet
 }
 
 enum SettingsStrings {
@@ -35,8 +35,22 @@ enum SettingsStrings {
         return try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: String] ?? [:]
     }
 
+    static func labelStatus(_ label: String, _ status: String) -> String {
+        String(format: text(.labelStatus), locale: Locale.current, label, status)
+    }
+
+    static func fieldMessage(_ label: String, _ message: String) -> String {
+        String(format: text(.fieldMessage), locale: Locale.current, label, message)
+    }
+
     static func counter(_ value: String, limit: Int) -> String {
         String(format: text(.counter), locale: Locale.current, SettingsValidation.textCount(value), limit)
+    }
+
+    static func joined(_ values: [String]) -> String {
+        values.reduce("") { result, value in
+            result.isEmpty ? value : String(format: text(.listItem), locale: Locale.current, result, value)
+        }
     }
 
     static func threshold(_ count: Int) -> String {

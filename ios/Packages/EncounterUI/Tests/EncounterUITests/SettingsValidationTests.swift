@@ -74,6 +74,18 @@ final class SettingsValidationTests: XCTestCase {
         XCTAssertFalse(SettingsErrorPresentation.affectsThreshold(.init(code: .rateLimited, fields: ["value"])))
     }
 
+    func testRequiredFieldsDependOnDiscoveryAndMembershipOnCatalogue() {
+        let options = InterimProfileInterests.options
+        XCTAssertEqual(SettingsValidation.invalidProfileFields(displayName: "", introduction: "", contactDetail: "",
+            interests: [], purposes: [.discovery], options: options, discoveryOn: false), [])
+        XCTAssertEqual(SettingsValidation.invalidProfileFields(displayName: "", introduction: "", contactDetail: "",
+            interests: [], purposes: [.discovery], options: options, discoveryOn: true), [.displayName, .introduction, .interests])
+        XCTAssertEqual(SettingsValidation.invalidProfileFields(displayName: "", introduction: "", contactDetail: "",
+            interests: ["not-loaded"], purposes: [.discovery], options: [], discoveryOn: false, hasLoadedInterests: false), [])
+        XCTAssertEqual(SettingsValidation.invalidProfileFields(displayName: "", introduction: "", contactDetail: "",
+            interests: ["not-loaded"], purposes: [.discovery], options: options, discoveryOn: false), [.interests])
+    }
+
     private func invalid(_ values: [ProfileField: String]) -> [ProfileField] {
         SettingsValidation.invalidProfileFields(displayName: values[.displayName] ?? "", introduction: values[.introduction] ?? "",
             contactDetail: values[.contactDetail] ?? "", interests: ["ios"], purposes: [.discovery], options: InterimProfileInterests.options)

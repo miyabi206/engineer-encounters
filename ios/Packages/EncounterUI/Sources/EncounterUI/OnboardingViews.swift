@@ -99,8 +99,10 @@ public struct InterestsAndPurposesView: View {
                     OnboardingActionError(error: error, disabled: model.isBusy, fallback: .listError) {
                         Task { await model.loadInterests() }
                     }
-                } else if model.hasLoadedInterests && model.interests.isEmpty {
-                    Text(OnboardingStrings.text(.emptyInterests)).foregroundStyle(.secondary)
+                } else if model.shouldRetryInterestLoad {
+                    if model.hasLoadedInterests {
+                        Text(OnboardingStrings.text(.emptyInterests)).foregroundStyle(.secondary)
+                    }
                     Button(OnboardingStrings.text(.retry)) {
                         Task { await model.loadInterests() }
                     }.disabled(model.isBusy)
@@ -119,7 +121,7 @@ public struct InterestsAndPurposesView: View {
                 Text(String(format: OnboardingStrings.text(.interestCounter), locale: locale,
                             model.selectedInterestIDs.count, ProfileValidation.interestLimit))
                     .font(.caption).foregroundStyle(.secondary)
-                Text(OnboardingStrings.text(.interestLimit)).font(.caption).foregroundStyle(.secondary)
+                Text(String(format: OnboardingStrings.text(.interestLimit), locale: locale, ProfileValidation.interestLimit)).font(.caption).foregroundStyle(.secondary)
             }
             OnboardingCard {
                 Text(OnboardingStrings.text(.purposes))
@@ -156,10 +158,6 @@ public struct InterestsAndPurposesView: View {
 @MainActor
 public struct DiscoveryPermissionsView: View {
     @ObservedObject private var model: OnboardingModel
-    @OnboardingViewState private var retryOperation: RetryOperation = .activation
-
-    private enum RetryOperation { case activation, bluetooth, deferDiscovery }
-
     public init(model: OnboardingModel) { self.model = model }
 
     public var body: some View {
@@ -191,7 +189,6 @@ public struct DiscoveryPermissionsView: View {
                         .disabled(model.isBusy)
                 }
                 Button(OnboardingStrings.text(.allowBluetooth)) {
-                    retryOperation = .bluetooth
                     Task { await model.requestBluetooth() }
                 }
                 .buttonStyle(.bordered)
@@ -201,18 +198,17 @@ public struct DiscoveryPermissionsView: View {
             if model.isSaving { OnboardingProgress() }
             if let error = model.actionError {
                 OnboardingActionError(error: error, disabled: model.isBusy ||
-                    (retryOperation == .activation && !model.canEnableDiscovery)) {
-                    retry()
+                    (model.failedOperation == .finish(discovery: true) && !model.canEnableDiscovery),
+                    fallback: model.errorFallback) {
+                    Task { await model.retry() }
                 }
             }
             Button(OnboardingStrings.text(.enableDiscovery)) {
-                retryOperation = .activation
                 Task { await model.finish(discovery: true) }
             }
             .buttonStyle(.borderedProminent)
             .disabled(!model.canEnableDiscovery)
             Button(OnboardingStrings.text(.notNow)) {
-                retryOperation = .deferDiscovery
                 Task { await model.finish(discovery: false) }
             }
             .buttonStyle(.bordered)
@@ -237,22 +233,14 @@ public struct DiscoveryPermissionsView: View {
         let status = OnboardingStrings.text(met ? .met : .missing)
         if !met && prerequisite != .link {
             Button { model.edit(prerequisite) } label: {
-                Label(label + " · " + status, systemImage: "square")
+                Label(OnboardingStrings.labelStatus(label, status), systemImage: "square")
             }.disabled(model.isBusy)
         } else {
-            Label(label + " · " + status, systemImage: met ? "checkmark.square" : "square")
+            Label(OnboardingStrings.labelStatus(label, status), systemImage: met ? "checkmark.square" : "square")
         }
     }
 
-    private func retry() {
-        Task {
-            switch retryOperation {
-            case .activation: await model.finish(discovery: true)
-            case .bluetooth: await model.requestBluetooth()
-            case .deferDiscovery: await model.finish(discovery: false)
-            }
-        }
-    }
+
 }
 
 extension DiscoveryPrerequisite {
@@ -369,7 +357,7 @@ struct OnboardingActionError: View {
             Text(error.code == .unavailable ? OnboardingStrings.text(fallback) : OnboardingStrings.error(error))
                 .foregroundStyle(.red)
             ForEach(ProfileField.allCases.filter { error.affects($0) }, id: \.self) { field in
-                Text(OnboardingStrings.text(field.labelKey) + ": " + OnboardingStrings.text(.invalidField))
+                Text(OnboardingStrings.fieldMessage(OnboardingStrings.text(field.labelKey), OnboardingStrings.text(.invalidField)))
                     .foregroundStyle(.red)
             }
             if error.fields.contains("link") {

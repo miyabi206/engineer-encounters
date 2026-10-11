@@ -78,10 +78,10 @@
 "discoveryOffExplanation" = "Turning discovery off hides cards without deleting encounters.";
 // Neutral copy: wording not supplied in ui.md.
 "interestLimit" = "Choose up to %ld interests";
-// Interim interest vocabulary; replace keys and IDs together in InterimProfileInterests.
-"interestIOS" = "iOS";
-"interestAndroid" = "Android";
-"interestWeb" = "Web";
-"interestBackend" = "Backend";
-"interestDesign" = "Design";
-"interestOSS" = "Open source";
+// Neutral copy: a partial save lists confirmed values beside the failed operation.
+"partialSave" = "Changes already in effect";
+"appliedChange" = "%@: %@";
+"labelStatus" = "%@ · %@";
+"fieldMessage" = "%@: %@";
+"listItem" = "%@, %@";
+"notSet" = "Not set";

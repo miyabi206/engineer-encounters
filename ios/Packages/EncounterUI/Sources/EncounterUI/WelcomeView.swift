@@ -10,9 +10,8 @@ public struct WelcomeView<Trailing: View>: View {
     private let onTerms: (@MainActor () -> Void)?
     private let onPrivacy: (@MainActor () -> Void)?
     private let onRetry: (@MainActor () -> Void)?
-    @OnboardingViewState private var localDeclarations = SignInDeclarations()
 
-    /// Existing trailing content (including Development diagnostics) remains independently available.
+    /// Existing trailing content remains independently available.
     public init(@ViewBuilder trailing: () -> Trailing) {
         self.trailing = trailing()
         signIn = nil
@@ -42,9 +41,7 @@ public struct WelcomeView<Trailing: View>: View {
         self.onRetry = onRetry
     }
 
-    private var declarations: Binding<SignInDeclarations> {
-        suppliedDeclarations ?? $localDeclarations
-    }
+    var showsSignInControls: Bool { suppliedDeclarations != nil }
 
     public var body: some View {
         ScrollView {
@@ -54,28 +51,28 @@ public struct WelcomeView<Trailing: View>: View {
                     .accessibilityAddTraits(.isHeader)
                 Text("welcome.introduction", bundle: .module)
                     .font(.body)
-                OnboardingCard {
-                    SelectionControl(label: OnboardingStrings.text(.age),
-                                     selected: declarations.wrappedValue.isAdult) {
-                        declarations.wrappedValue.isAdult.toggle()
+                if let declarations = suppliedDeclarations, let signIn {
+                    OnboardingCard {
+                        SelectionControl(label: OnboardingStrings.text(.age),
+                                         selected: declarations.wrappedValue.isAdult) {
+                            declarations.wrappedValue.isAdult.toggle()
+                        }
+                        SelectionControl(label: OnboardingStrings.text(.agreement),
+                                         selected: declarations.wrappedValue.acceptsTermsAndPrivacy) {
+                            declarations.wrappedValue.acceptsTermsAndPrivacy.toggle()
+                        }
+                    }.disabled(isSigningIn)
+                    VStack(alignment: .leading, spacing: 12) {
+                        Button(OnboardingStrings.text(.terms)) { onTerms?() }
+                        Button(OnboardingStrings.text(.privacy)) { onPrivacy?() }
                     }
-                    SelectionControl(label: OnboardingStrings.text(.agreement),
-                                     selected: declarations.wrappedValue.acceptsTermsAndPrivacy) {
-                        declarations.wrappedValue.acceptsTermsAndPrivacy.toggle()
-                    }
-                }.disabled(isSigningIn)
-                VStack(alignment: .leading, spacing: 12) {
-                    Button(OnboardingStrings.text(.terms)) { onTerms?() }.disabled(onTerms == nil)
-                    Button(OnboardingStrings.text(.privacy)) { onPrivacy?() }.disabled(onPrivacy == nil)
-                }
-                if let signIn {
                     signIn.disabled(!declarations.wrappedValue.canSignIn || isSigningIn)
-                }
-                if isSigningIn { OnboardingProgress() }
-                if let signInError {
-                    OnboardingActionError(error: signInError,
-                        disabled: isSigningIn || !declarations.wrappedValue.canSignIn,
-                        fallback: .signInError) { onRetry?() }
+                    if isSigningIn { OnboardingProgress() }
+                    if let signInError {
+                        OnboardingActionError(error: signInError,
+                            disabled: isSigningIn || !declarations.wrappedValue.canSignIn,
+                            fallback: .signInError) { onRetry?() }
+                    }
                 }
                 trailing
             }

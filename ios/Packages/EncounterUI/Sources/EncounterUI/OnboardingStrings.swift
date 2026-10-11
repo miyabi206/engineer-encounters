@@ -7,7 +7,7 @@ enum OnboardingString: String, CaseIterable {
     case interestsTitle, interests, purposes, discoveryPurpose, collaborationPurpose, selectionGuidance
     case enableDiscovery, allowBluetooth, notNow, promise, background, dailyReport, alternatives
     case forceQuit, firstUnlock, bluetoothPurpose, oneSided
-    case counter, interestCounter, requiredField, tooLong, invalidField, saveError
+    case labelStatus, fieldMessage, counter, interestCounter, requiredField, tooLong, invalidField, saveError
     case signInError, listError, emptyInterests, interestLimit
     case checklist, link, linkRequired, addLink, met, missing
     case bluetoothNotRequested, bluetoothAvailable, bluetoothDenied, bluetoothOff, bluetoothUnavailable
@@ -31,6 +31,14 @@ enum OnboardingStrings {
                                           subdirectory: nil, localization: language) else { return [:] }
         let data = try Data(contentsOf: url)
         return try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: String] ?? [:]
+    }
+
+    static func labelStatus(_ label: String, _ status: String) -> String {
+        String(format: text(.labelStatus), locale: Locale.current, label, status)
+    }
+
+    static func fieldMessage(_ label: String, _ message: String) -> String {
+        String(format: text(.fieldMessage), locale: Locale.current, label, message)
     }
 
     static func counter(_ value: String, limit: Int) -> String {

@@ -38,7 +38,7 @@
 "signInError" = "Could not sign in";
 "listError" = "Could not load";
 "emptyInterests" = "No interests are available";
-"interestLimit" = "Choose up to 10 interests";
+"interestLimit" = "Choose up to %ld interests";
 "checklist" = "Discovery requirements";
 "link" = "Your first link";
 "linkRequired" = "Add at least one link to enable discovery";
@@ -47,7 +47,7 @@
 "missing" = "Incomplete";
 "bluetoothNotRequested" = "Bluetooth permission has not been checked";
 "bluetoothAvailable" = "Bluetooth is available";
-"bluetoothDenied" = "Bluetooth access is denied";
+"bluetoothDenied" = "Bluetooth permission is denied";
 "bluetoothOff" = "Bluetooth is off";
 "bluetoothUnavailable" = "Bluetooth is unavailable";
 "bluetoothRecovery" = "Check Bluetooth settings";
@@ -58,3 +58,5 @@
 "rateLimitError" = "Wait a moment and try again";
 "notFoundError" = "Information was not found";
 "discoveryOff" = "Discovery is off";
+"labelStatus" = "%@ · %@";
+"fieldMessage" = "%@: %@";
