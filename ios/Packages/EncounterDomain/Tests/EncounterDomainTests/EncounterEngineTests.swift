@@ -17,6 +17,82 @@ final class EncounterEngineTests: XCTestCase {
         commands.filter { if case .answerWrite(_, _, true) = $0 { true } else { false } }.count
     }
 
+    func testHonestCentralBackoffOutlastsPeripheralPauseAndBothApproachesStillQualify() async throws {
+        for approach in [PresenceApproach.heldConnection, .secondExchange] {
+            let rig = try await PairedPhonesRig.make(approach: approach)
+            await rig.link.dropNext(.incomingWrite)
+            try await startSingle(rig)
+            try await rig.advance(by: 5, refreshing: false)
+            try await rig.advance(by: 9, refreshing: false)
+            let early = await rig.first.transport.commands(); XCTAssertEqual(connectCount(early), 1)
+            try await rig.advance(by: 1, refreshing: false)
+            let retried = await rig.first.transport.commands(); XCTAssertEqual(connectCount(retried), 2)
+            let a = try await evidence(rig.first), b = try await evidence(rig.second)
+            XCTAssertEqual(a.count, 1); XCTAssertEqual(b.count, 1)
+            try await rig.advance(by: 119, refreshing: false)
+            let earlyA = try await evidence(rig.first), earlyB = try await evidence(rig.second)
+            XCTAssertFalse(TestEncounterConfirmation.confirms(earlyA, earlyB))
+            try await rig.advance(by: 1, refreshing: false)
+            let finalA = try await evidence(rig.first), finalB = try await evidence(rig.second)
+            XCTAssertTrue(TestEncounterConfirmation.confirms(finalA, finalB))
+            try await rig.stop()
+        }
+    }
+
+    func testPeerAcknowledgementStalledAcrossOwnWindowBoundaryCannotCompleteExchange() async throws {
+        let rig = try await PairedPhonesRig.make(windowAge: 899)
+        await rig.link.delay([.writeAcknowledgement])
+        try await startSingle(rig)
+        let held = await rig.link.pendingDeliveries(); XCTAssertEqual(held.count, 1)
+        await rig.first.clock.advance(by: 1, deliverWakeUps: false)
+        await rig.second.clock.advance(by: 1, deliverWakeUps: false)
+        await rig.link.releaseAll(); try await rig.settle()
+        let a = try await evidence(rig.first), b = try await evidence(rig.second)
+        XCTAssertTrue(a.isEmpty); XCTAssertTrue(b.isEmpty)
+        try await rig.stop()
+    }
+
+    func testInitialSaveCrossingOwnWindowBoundaryRemovesReceiptEvenForSessionInEitherRole() async throws {
+        for role in [ExchangeRole.central, .peripheral] {
+            let queue = ControlledReceiptQueue(); await queue.setWrites(held: true)
+            let rig = try await PairedPhonesRig.make(firstSession: role == .central, secondSession: role == .peripheral,
+                windowAge: 899, firstQueue: role == .central ? queue : nil, secondQueue: role == .peripheral ? queue : nil)
+            let starting = Task { try await startSingle(rig) }
+            await queue.waitForWrite()
+            await rig.first.clock.advance(by: 1, deliverWakeUps: false)
+            await rig.second.clock.advance(by: 1, deliverWakeUps: false)
+            await queue.setWrites(); try await starting.value; try await rig.settle()
+            let receipts = try await queue.pending(); XCTAssertTrue(receipts.isEmpty)
+            if role == .peripheral {
+                let commands = await rig.second.transport.commands(); XCTAssertEqual(successCount(commands), 0)
+                XCTAssertTrue(commands.contains { if case .answerWrite(_, _, false) = $0 { true } else { false } })
+            }
+            try await rig.stop()
+        }
+    }
+
+    func testPeripheralSaveAcrossCheckpointWindowBoundaryRefusesAndRetriesBothApproaches() async throws {
+        for approach in [PresenceApproach.heldConnection, .secondExchange] {
+            let queue = ControlledReceiptQueue()
+            let rig = try await PairedPhonesRig.make(approach: approach, windowAge: 779, secondQueue: queue)
+            try await startSingle(rig)
+            let firstA = try await evidence(rig.first), firstB = try await evidence(rig.second)
+            await queue.setWrites(held: true)
+            let advancing = Task { try await rig.advance(by: 120, refreshing: false) }
+            await queue.waitForWrite(number: 2)
+            await rig.first.clock.advance(by: 1, deliverWakeUps: false)
+            await rig.second.clock.advance(by: 1, deliverWakeUps: false)
+            await queue.setWrites(); try await advancing.value; try await rig.settle()
+            let refusedA = try await evidence(rig.first), refusedB = try await evidence(rig.second)
+            XCTAssertEqual(refusedA, firstA); XCTAssertEqual(refusedB, firstB)
+            let commands = await rig.second.transport.commands(); XCTAssertEqual(successCount(commands), 1)
+            try await rig.advance(by: 10, refreshing: false)
+            let a = try await evidence(rig.first), b = try await evidence(rig.second)
+            XCTAssertTrue(TestEncounterConfirmation.confirms(a, b))
+            try await rig.stop()
+        }
+    }
+
     func testHeldConnectionNeedsARealCheckpointAt120OnBothPhones() async throws {
         let rig = try await PairedPhonesRig.make()
         try await rig.start()

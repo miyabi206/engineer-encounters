@@ -90,12 +90,13 @@ public protocol ReceiptQueue: Sendable {
 public actor InMemoryReceiptQueue: ReceiptQueue {
     private var receipts: [UUID: EncounterReceipt] = [:]
     private var order: [UUID] = []
-    private var terminalIdentities: Set<UUID> = []
+    private var terminalIdentities: [UUID: Date] = [:]
+    private let wallTime: @Sendable () -> Date
 
-    public init() {}
+    public init(wallTime: @escaping @Sendable () -> Date = { Date() }) { self.wallTime = wallTime }
 
     public func enqueue(_ receipt: EncounterReceipt) async throws {
-        guard receipts[receipt.id] == nil, !terminalIdentities.contains(receipt.id) else { return }
+        guard receipts[receipt.id] == nil, terminalIdentities[receipt.id] == nil else { return }
         receipts[receipt.id] = receipt
         order.append(receipt.id)
     }
@@ -118,6 +119,7 @@ public actor InMemoryReceiptQueue: ReceiptQueue {
 
     public func removeExpired(asOf time: Date) async throws {
         for identity in order where receipts[identity]!.expiresAt <= time { remove(identity) }
+        terminalIdentities = terminalIdentities.filter { $0.value > time }
     }
 
     public func removeAll() async throws {
@@ -127,8 +129,8 @@ public actor InMemoryReceiptQueue: ReceiptQueue {
     }
 
     private func remove(_ identity: UUID) {
-        receipts.removeValue(forKey: identity)
+        terminalIdentities[identity] = receipts.removeValue(forKey: identity)?.expiresAt ?? terminalIdentities[identity] ??
+            wallTime().addingTimeInterval(EncounterProtocol.receiptLifetime)
         order.removeAll { $0 == identity }
-        terminalIdentities.insert(identity)
     }
 }

@@ -9,6 +9,21 @@ final class ReceiptQueueTests: XCTestCase {
         try await ReceiptQueueContract.checkAll(on: InMemoryReceiptQueue(), factory: { EncounterSamples.receipt($0) })
     }
 
+    func testUnseenAcknowledgementKeepsTerminalIdentityUntilInclusiveExpiry() async throws {
+        let wall = EncounterSamples.observationTime
+        let queue = InMemoryReceiptQueue(wallTime: { wall })
+        let receipt = EncounterSamples.receipt()
+        try await queue.acknowledge(receipt.id)
+        try await queue.enqueue(receipt)
+        let before = try await queue.pending(); XCTAssertTrue(before.isEmpty)
+        try await queue.removeExpired(asOf: wall.addingTimeInterval(EncounterProtocol.receiptLifetime - 1))
+        try await queue.enqueue(receipt)
+        let retained = try await queue.pending(); XCTAssertTrue(retained.isEmpty)
+        try await queue.removeExpired(asOf: wall.addingTimeInterval(EncounterProtocol.receiptLifetime))
+        try await queue.enqueue(receipt)
+        let expired = try await queue.pending(); XCTAssertEqual(expired, [receipt])
+    }
+
     func testAmbientEvidenceRequiresCheckpointAnd120Seconds() {
         var receipt = EncounterSamples.receipt()
         receipt.observedDuration = 120

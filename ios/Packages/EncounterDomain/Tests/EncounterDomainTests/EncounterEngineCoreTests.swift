@@ -66,6 +66,107 @@ final class EncounterEngineCoreTests: XCTestCase {
         return receipt
     }
 
+    func testObservedPeersDropTheOldestAt256WithoutRenewingDuplicateObservations() {
+        var core = EncounterEngineCore()
+        for index in 1...256 { _ = core.receive(.transport(.peerObserved(peer(index))), context: context()) }
+        let duplicate = core.receive(.transport(.peerObserved(peer(1))), context: context())
+        XCTAssertFalse(duplicate.effects.contains { if case .event(.peerFirstObserved) = $0 { true } else { false } })
+        _ = core.receive(.transport(.peerObserved(peer(257))), context: context())
+        let retained = core.receive(.transport(.peerObserved(peer(2))), context: context())
+        XCTAssertFalse(retained.effects.contains { if case .event(.peerFirstObserved) = $0 { true } else { false } })
+        let dropped = core.receive(.transport(.peerObserved(peer(1))), context: context())
+        XCTAssertTrue(dropped.effects.contains { if case .event(.peerFirstObserved(peer(1))) = $0 { true } else { false } })
+    }
+
+    // Freeze wall time to prove nonce retention follows only monotonic time.
+    private func ledgerContext(_ seconds: TimeInterval) -> EncounterEngineContext {
+        EncounterEngineContext(time: .init(monotonic: seconds, wall: EncounterSamples.observationTime),
+                               tokenWindow: try! EncounterSamples.batch(count: 1).windows[0], sessionFlag: false)
+    }
+    private func offerToCentral(_ core: inout EncounterEngineCore, nonce: ExchangeNonce,
+                                seconds: TimeInterval, peer index: Int) throws -> EncounterEngineOutput {
+        let key = BluetoothConnection(peer: peer(index), role: .central)
+        _ = core.receive(.transport(.peerObserved(key.peer)), context: ledgerContext(seconds))
+        let read = try readID(core.receive(.transport(.connected(key)), context: ledgerContext(seconds)))
+        let frame = try ExchangeFrame(phase: .initialExchange, token: EncounterSamples.token(seed: 999), nonce: nonce)
+        return core.receive(.transport(.frameRead(key.peer, read, frame.encoded())), context: ledgerContext(seconds))
+    }
+    private func consume(_ core: inout EncounterEngineCore, index: Int, seconds: TimeInterval) throws {
+        let key = BluetoothConnection(peer: peer(index), role: .central)
+        let write = try offerToCentral(&core, nonce: EncounterSamples.nonce(seed: UInt64(index)), seconds: seconds, peer: index)
+        let request = try XCTUnwrap(commands(write).compactMap { if case .write(_, let id, _) = $0 { id } else { nil } }.first)
+        let (id, _) = try save(core.receive(.transport(.writeAcknowledged(key.peer, request)), context: ledgerContext(seconds)))
+        _ = core.receive(.queueResult(id, success: true), context: ledgerContext(seconds))
+        _ = core.receive(.transport(.disconnected(key)), context: ledgerContext(seconds))
+    }
+
+    func testConsumedNonceLedgerRejectsRetainedReplaysAndDropsOldestAbove4096() throws {
+        var core = started()
+        for index in 1...4097 { try consume(&core, index: index, seconds: Double(index) * 10) }
+        let replay = try offerToCentral(&core, nonce: EncounterSamples.nonce(seed: 2), seconds: 41_000, peer: 5000)
+        XCTAssertTrue(ended(replay, .invalidFrame))
+        let oldest = try offerToCentral(&core, nonce: EncounterSamples.nonce(seed: 1), seconds: 41_000, peer: 5001)
+        XCTAssertTrue(commands(oldest).contains { if case .write = $0 { true } else { false } })
+    }
+
+    func testConsumedNoncesExpireAt48HoursOfMonotonicTimeEvenAcrossStop() throws {
+        var core = started()
+        try consume(&core, index: 1, seconds: 0)
+        _ = core.receive(.stop, context: ledgerContext(1))
+        _ = core.receive(.start, context: ledgerContext(1))
+        let retained = try offerToCentral(&core, nonce: EncounterSamples.nonce(seed: 1),
+                                         seconds: EncounterProtocol.receiptLifetime - 1, peer: 2)
+        XCTAssertTrue(ended(retained, .invalidFrame))
+        let expired = try offerToCentral(&core, nonce: EncounterSamples.nonce(seed: 1),
+                                        seconds: EncounterProtocol.receiptLifetime, peer: 3)
+        XCTAssertTrue(commands(expired).contains { if case .write = $0 { true } else { false } })
+    }
+
+    func testReturningCentralIsRefusedUntilFiveSecondsAfterAnAttemptWithoutEvidence() throws {
+        for completedExchange in [false, true] {
+            var core = started()
+            let key = BluetoothConnection(peer: peer(), role: .peripheral)
+            if completedExchange { _ = try completePeripheral(&core) }
+            else { _ = core.receive(.transport(.connected(key)), context: context()) }
+            _ = core.receive(.transport(.disconnected(key)), context: context(1))
+            let early = core.receive(.transport(.connected(key)), context: context(5.999))
+            XCTAssertTrue(commands(early).contains(.disconnect(key)))
+            let read = core.receive(.transport(.incomingRead(key.peer, .init(10))), context: context(5.999))
+            XCTAssertTrue(commands(read).contains(.answerRead(key.peer, .init(10), nil)))
+            _ = core.receive(.transport(.connected(key)), context: context(6))
+            let fresh = try offered(core.receive(.transport(.incomingRead(key.peer, .init(11))), context: context(6)))
+            XCTAssertEqual(fresh.phase, .initialExchange)
+        }
+    }
+
+    func testPeripheralPauseTableDropsOldestAbove256() throws {
+        var core = started()
+        for index in 1...257 {
+            let key = BluetoothConnection(peer: peer(index), role: .peripheral)
+            _ = core.receive(.transport(.connected(key)), context: context())
+            _ = core.receive(.transport(.disconnected(key)), context: context())
+        }
+        let retained = BluetoothConnection(peer: peer(2), role: .peripheral)
+        XCTAssertTrue(commands(core.receive(.transport(.connected(retained)), context: context(1))).contains(.disconnect(retained)))
+        let dropped = BluetoothConnection(peer: peer(1), role: .peripheral)
+        _ = core.receive(.transport(.connected(dropped)), context: context(1))
+        _ = try offered(core.receive(.transport(.incomingRead(dropped.peer, .init(1))), context: context(1)))
+    }
+
+    func testCentralThatReachedEvidenceMayReturnImmediately() throws {
+        var core = started()
+        let first = try completePeripheral(&core)
+        let key = BluetoothConnection(peer: peer(), role: .peripheral)
+        let frame = try offered(core.receive(.transport(.incomingRead(key.peer, .init(3))), context: context(120)))
+        let write = try ExchangeFrame(phase: frame.phase, token: first.start.peerToken, nonce: frame.nonce)
+        let (id, _) = try save(core.receive(.transport(.incomingWrite(key.peer, .init(4), write.encoded())), context: context(120)))
+        XCTAssertTrue(ended(core.receive(.queueResult(id, success: true), context: context(120)), .evidenceReached))
+        let connected = core.receive(.transport(.connected(key)), context: context(120))
+        XCTAssertFalse(commands(connected).contains(.disconnect(key)))
+        let fresh = try offered(core.receive(.transport(.incomingRead(key.peer, .init(5))), context: context(120)))
+        XCTAssertEqual(fresh.phase, .initialExchange)
+    }
+
     func testEveryRetryableCentralEndRetriesOnceWithoutAnotherObservation() throws {
         for reason in [EncounterAttemptEndReason.connectTimeout, .operationTimeout, .failed, .invalidFrame, .disconnected, .storageFailure] {
             var core = started()
@@ -377,6 +478,99 @@ final class EncounterEngineCoreTests: XCTestCase {
             let write = core.receive(.transport(.frameRead(key.peer, nextRead, frame.encoded())), context: context(121, token: old.windows[1]))
             let data = try XCTUnwrap(commands(write).compactMap { if case .write(_, _, let data) = $0 { data } else { nil } }.first)
             XCTAssertEqual(try ExchangeFrame.decode(data).token, old.windows[1].token)
+        }
+    }
+
+    private func prepareStep(_ core: inout EncounterEngineCore, role: ExchangeRole, approach: PresenceApproach,
+                             first: EncounterReceipt?, seconds: TimeInterval, token: TokenWindow) throws -> EncounterEngineOutput {
+        let key = BluetoothConnection(peer: peer(), role: role)
+        if role == .peripheral {
+            if first == nil || approach == .secondExchange {
+                _ = core.receive(.transport(.connected(key)), context: context(seconds, token: token))
+            }
+            let frame = try offered(core.receive(.transport(.incomingRead(key.peer, .init(30))), context: context(seconds, token: token)))
+            let write = try ExchangeFrame(phase: frame.phase, token: EncounterSamples.token(seed: 999), nonce: frame.nonce,
+                priorNonce: frame.phase == .reconnectEvidence ? first?.exchangeNonce : nil)
+            return core.receive(.transport(.incomingWrite(key.peer, .init(31), write.encoded())), context: context(seconds, token: token))
+        }
+        var output: EncounterEngineOutput
+        if first == nil {
+            _ = core.receive(.transport(.peerObserved(key.peer)), context: context(seconds, token: token))
+            output = core.receive(.transport(.connected(key)), context: context(seconds, token: token))
+        } else {
+            if approach == .secondExchange { _ = core.receive(.transport(.disconnected(key)), context: context(token: token)) }
+            output = core.receive(.wakeUp, context: context(seconds, token: token))
+            if approach == .secondExchange { output = core.receive(.transport(.connected(key)), context: context(seconds, token: token)) }
+        }
+        let read = try readID(output)
+        let phase: ExchangePhase = first == nil ? .initialExchange :
+            (approach == .heldConnection ? .heldConnectionCheckpoint : .reconnectEvidence)
+        let frame = try ExchangeFrame(phase: phase, token: EncounterSamples.token(seed: 999),
+            nonce: phase == .heldConnectionCheckpoint ? first!.exchangeNonce : EncounterSamples.nonce(seed: 50))
+        return core.receive(.transport(.frameRead(key.peer, read, frame.encoded())), context: context(seconds, token: token))
+    }
+
+    func testCentralRechecksOwnWindowAtAcknowledgementAndRetriesOnlyPresenceSteps() throws {
+        for initial in [true, false] {
+            for approach in [PresenceApproach.heldConnection, .secondExchange] {
+                let seconds = initial ? 0.0 : 120
+                let batch = try EncounterSamples.batch(start: EncounterSamples.observationTime.addingTimeInterval(seconds - 899), count: 2)
+                var core = started(approach: approach)
+                let first = initial ? nil : try completeCentral(&core, token: batch.windows[0])
+                let write = try prepareStep(&core, role: .central, approach: approach, first: first, seconds: seconds, token: batch.windows[0])
+                let request = try XCTUnwrap(commands(write).compactMap { if case .write(_, let id, _) = $0 { id } else { nil } }.first)
+                let refused = core.receive(.transport(.writeAcknowledged(peer(), request)), context: context(seconds + 1, token: batch.windows[1]))
+                XCTAssertFalse(refused.effects.contains { if case .queue = $0 { true } else { false } })
+                XCTAssertEqual(ended(refused, .invalidFrame), initial)
+                if !initial {
+                    var retry = core.receive(.wakeUp, context: context(seconds + 11, token: batch.windows[1]))
+                    if approach == .secondExchange {
+                        XCTAssertTrue(commands(retry).contains(.connect(peer())))
+                        retry = core.receive(.transport(.connected(.init(peer: peer(), role: .central))), context: context(seconds + 11, token: batch.windows[1]))
+                    }
+                    _ = try readID(retry)
+                }
+            }
+        }
+    }
+
+    func testSaveCompletionRechecksOwnWindowForBothRolesAndRestoresRetriablePresenceSteps() throws {
+        for initial in [true, false] {
+            for approach in [PresenceApproach.heldConnection, .secondExchange] {
+                for role in [ExchangeRole.central, .peripheral] {
+                    let seconds = initial ? 0.0 : 120
+                    let batch = try EncounterSamples.batch(start: EncounterSamples.observationTime.addingTimeInterval(seconds - 899), count: 2)
+                    var core = started(approach: approach)
+                    let first: EncounterReceipt?
+                    if initial { first = nil }
+                    else if role == .central { first = try completeCentral(&core, token: batch.windows[0]) }
+                    else { first = try completePeripheral(&core, token: batch.windows[0]) }
+                    var output = try prepareStep(&core, role: role, approach: approach, first: first, seconds: seconds, token: batch.windows[0])
+                    if role == .central {
+                        let request = try XCTUnwrap(commands(output).compactMap { if case .write(_, let id, _) = $0 { id } else { nil } }.first)
+                        output = core.receive(.transport(.writeAcknowledged(peer(), request)), context: context(seconds, token: batch.windows[0]))
+                    }
+                    let (id, receipt) = try save(output)
+                    let refused = core.receive(.queueResult(id, success: true), context: context(seconds + 1, token: batch.windows[1]))
+                    XCTAssertEqual(ended(refused, .invalidFrame), initial)
+                    XCTAssertFalse(refused.effects.contains {
+                        if case .event(.exchangeCompleted) = $0 { return true }
+                        if case .event(.evidenceReached) = $0 { return true }
+                        return false
+                    })
+                    if role == .peripheral { XCTAssertTrue(commands(refused).contains(.answerWrite(peer(), .init(31), success: false))) }
+                    if !initial && approach == .heldConnection {
+                        XCTAssertTrue(refused.effects.contains { if case .queue(nil, .update(first!)) = $0 { true } else { false } })
+                    } else {
+                        XCTAssertTrue(refused.effects.contains { if case .queue(nil, .remove(receipt.id)) = $0 { true } else { false } })
+                    }
+                    if !initial && role == .peripheral {
+                        let fresh = try offered(core.receive(.transport(.incomingRead(peer(), .init(32))), context: context(seconds + 1, token: batch.windows[1])))
+                        XCTAssertEqual(fresh.token, batch.windows[1].token)
+                        XCTAssertEqual(fresh.phase, approach == .heldConnection ? .heldConnectionCheckpoint : .reconnectEvidence)
+                    }
+                }
+            }
         }
     }
 }

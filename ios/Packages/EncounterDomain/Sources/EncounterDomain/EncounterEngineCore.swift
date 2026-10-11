@@ -71,7 +71,7 @@ public struct EncounterEngineCore: Sendable {
         var deadline: TimeInterval?
         var operation: BluetoothRequestID?
         var offered: ExchangeFrame?
-        var offeredUntil: Date?
+        var offeredWindow: TokenWindow?
         var readWindow: TokenWindow?
         var pair: ReceiptTokenPair?
         var first: EncounterReceipt?
@@ -84,6 +84,7 @@ public struct EncounterEngineCore: Sendable {
         let incomingRequest: BluetoothRequestID?
         let isCheckpoint: Bool
         let original: EncounterReceipt?
+        let ownWindow: TokenWindow
     }
     private struct PendingPeer: Sendable {
         let insertionSequence: UInt64
@@ -99,8 +100,17 @@ public struct EncounterEngineCore: Sendable {
     private static let pendingPeerLifetime: TimeInterval = 30
     private var saves: [UInt64: Save] = [:]
     private var backoff: [PeerHandle: TimeInterval] = [:]
-    private var observed: Set<PeerHandle> = []
-    private var consumedNonces: Set<ExchangeNonce> = []
+    private struct LedgerEntry: Sendable {
+        let insertionSequence: UInt64
+        let expiresAt: TimeInterval
+    }
+    private var observed: [PeerHandle: UInt64] = [:]
+    private var consumedNonces: [ExchangeNonce: LedgerEntry] = [:]
+    private var peripheralBackoff: [PeerHandle: LedgerEntry] = [:]
+    private static let observedPeerLimit = 256
+    private static let consumedNonceLimit = 4096
+    private static let peripheralBackoffLimit = 256
+    private static let peripheralBackoffDuration: TimeInterval = 5
     private var sequence: UInt64 = 0
     private var running = false
     private var discovering = false
@@ -143,6 +153,7 @@ public struct EncounterEngineCore: Sendable {
             discovering = false
             observed.removeAll()
             pendingPeers.removeAll(); backoff.removeAll()
+            peripheralBackoff.removeAll()
             if isReset(input) {
                 consumedNonces.removeAll()
                 effects.append(.queue(nil, .removeAll))
@@ -214,6 +225,8 @@ public struct EncounterEngineCore: Sendable {
     private mutating func expire(_ context: EncounterEngineContext, effects: inout [EncounterEngineEffect]) {
         closing = closing.filter { $0.value > context.time.monotonic }
         pendingPeers = pendingPeers.filter { $0.value.lastObservedAt + Self.pendingPeerLifetime > context.time.monotonic }
+        consumedNonces = consumedNonces.filter { $0.value.expiresAt > context.time.monotonic }
+        peripheralBackoff = peripheralBackoff.filter { $0.value.expiresAt > context.time.monotonic }
         for key in sortedKeys() {
             guard let attempt = attempts[key] else { continue }
             if let firstAt = attempt.firstCompletedAt,
@@ -262,7 +275,13 @@ public struct EncounterEngineCore: Sendable {
             radio = value; effects.append(.event(.radioAvailability(value)))
             if value != .available { closing.removeAll() }
         case .peerObserved(let peer):
-            if observed.insert(peer).inserted { effects.append(.event(.peerFirstObserved(peer))) }
+            if observed[peer] == nil {
+                observed[peer] = nextID()
+                if observed.count > Self.observedPeerLimit, let oldest = observed.min(by: { $0.value < $1.value })?.key {
+                    observed.removeValue(forKey: oldest)
+                }
+                effects.append(.event(.peerFirstObserved(peer)))
+            }
             let key = BluetoothConnection(peer: peer, role: .central)
             guard running else { return }
             if attempts[key] != nil {
@@ -275,6 +294,9 @@ public struct EncounterEngineCore: Sendable {
             // A new incoming link supersedes a missing teardown callback for the old one.
             if key.role == .peripheral { closing.removeValue(forKey: key) }
             guard canParticipate(context), closing[key] == nil else { requestDisconnect(key, effects: &effects); return }
+            if key.role == .peripheral && peripheralBackoff[key.peer] != nil {
+                requestDisconnect(key, effects: &effects); return
+            }
             if key.role == .central {
                 guard var attempt = attempts[key], attempt.stage == .connecting else {
                     requestDisconnect(key, effects: &effects); return
@@ -288,7 +310,7 @@ public struct EncounterEngineCore: Sendable {
                         requestDisconnect(key, effects: &effects); return
                     }
                     attempt.connected = true; attempt.stage = .ready
-                    attempt.offered = nil; attempt.offeredUntil = nil
+                    attempt.offered = nil; attempt.offeredWindow = nil
                     attempt.deadline = context.time.monotonic + EncounterProtocol.operationTimeout
                     attempts[key] = attempt
                 } else if attempt.connected {
@@ -310,9 +332,9 @@ public struct EncounterEngineCore: Sendable {
             guard var attempt = attempts[key], attempt.stage == .reading, attempt.operation == id else { return }
             guard canParticipate(context), let ownWindow = window(context),
                   let frame = try? ExchangeFrame.decode(data), frame.phase == phase(attempt), frame.priorNonce == nil,
-                  (attempt.first == nil ? !consumedNonces.contains(frame.nonce) :
+                  (attempt.first == nil ? consumedNonces[frame.nonce] == nil :
                     (attempt.approach == .heldConnection ? frame.nonce == attempt.first?.exchangeNonce :
-                        frame.nonce != attempt.first?.exchangeNonce && !consumedNonces.contains(frame.nonce))) else {
+                        frame.nonce != attempt.first?.exchangeNonce && consumedNonces[frame.nonce] == nil)) else {
                 end(key, reason: .invalidFrame, effects: &effects); return
             }
             if phase(attempt) != .initialExchange && attempt.readWindow != ownWindow {
@@ -321,6 +343,7 @@ public struct EncounterEngineCore: Sendable {
                 return
             }
             attempt.offered = frame
+            attempt.offeredWindow = ownWindow
             attempt.pair = ReceiptTokenPair(ownToken: ownWindow.token, peerToken: frame.token, observedAt: context.time.wall)
             let writeID = BluetoothRequestID(nextID())
             let write = try! ExchangeFrame(phase: frame.phase, token: ownWindow.token, nonce: frame.nonce,
@@ -334,21 +357,15 @@ public struct EncounterEngineCore: Sendable {
             if attempts[key]?.stage == .reading && attempts[key]?.operation == id { end(key, reason: .failed, effects: &effects) }
         case .writeFailed(let peer, let id):
             let key = BluetoothConnection(peer: peer, role: .central)
-            guard var attempt = attempts[key], attempt.stage == .writing, attempt.operation == id else { return }
-            if phase(attempt) != .initialExchange {
-                // An early peer-side checkpoint refusal may be retried within this attempt.
-                attempt.stage = .waiting; attempt.deadline = nil; attempt.operation = nil
-                attempt.offered = nil
-                attempt.retryAt = context.time.monotonic + EncounterProtocol.duplicateAttemptBackoff
-                if attempt.approach == .secondExchange {
-                    attempt.connected = false; requestDisconnect(key, effects: &effects)
-                }
-                attempts[key] = attempt
-            } else { end(key, reason: .failed, effects: &effects) }
+            guard let attempt = attempts[key], attempt.stage == .writing, attempt.operation == id else { return }
+            refuse(attempt, reason: .failed, context, effects: &effects)
         case .writeAcknowledged(let peer, let id):
             let key = BluetoothConnection(peer: peer, role: .central)
             guard let attempt = attempts[key], attempt.stage == .writing, attempt.operation == id,
                   let frame = attempt.offered, let pair = attempt.pair else { return }
+            guard attempt.offeredWindow == window(context) else {
+                refuse(attempt, reason: .invalidFrame, context, effects: &effects); return
+            }
             persist(attempt, frame: frame, pair: pair, request: nil, context, effects: &effects)
         case .disconnected(let key):
             closing.removeValue(forKey: key)
@@ -371,7 +388,7 @@ public struct EncounterEngineCore: Sendable {
             let currentPhase = phase(attempt)
             let nonce = currentPhase == .heldConnectionCheckpoint ? attempt.first!.exchangeNonce : nonceSource()
             let frame = try! ExchangeFrame(phase: currentPhase, token: ownWindow.token, nonce: nonce)
-            attempt.offered = frame; attempt.offeredUntil = ownWindow.validUntil
+            attempt.offered = frame; attempt.offeredWindow = ownWindow
             attempt.stage = .ready; attempt.deadline = context.time.monotonic + EncounterProtocol.operationTimeout
             attempts[key] = attempt
             effects.append(.transport(.answerRead(peer, id, .init(frame: frame.encoded(), validUntil: ownWindow.validUntil))))
@@ -379,22 +396,16 @@ public struct EncounterEngineCore: Sendable {
             let key = BluetoothConnection(peer: peer, role: .peripheral)
             guard canParticipate(context), let ownWindow = window(context),
                   let attempt = attempts[key], attempt.connected, attempt.stage == .ready,
-                  let offered = attempt.offered, let until = attempt.offeredUntil,
+                  let offered = attempt.offered, let offeredWindow = attempt.offeredWindow,
                   let frame = try? ExchangeFrame.decode(data), frame.nonce == offered.nonce, frame.phase == offered.phase,
                   (frame.phase == .reconnectEvidence ? frame.priorNonce == attempt.first?.exchangeNonce : frame.priorNonce == nil) else {
                 effects.append(.transport(.answerWrite(peer, id, success: false)))
                 if attempts[key] != nil { end(key, reason: .invalidFrame, effects: &effects) }
                 return
             }
-            if context.time.wall >= until || offered.token != ownWindow.token {
+            if offeredWindow != ownWindow {
                 effects.append(.transport(.answerWrite(peer, id, success: false)))
-                if phase(attempt) == .initialExchange {
-                    end(key, reason: .invalidFrame, effects: &effects)
-                } else {
-                    var waiting = attempt
-                    waiting.stage = .waiting; waiting.deadline = nil; waiting.offered = nil
-                    attempts[key] = waiting
-                }
+                refuse(attempt, reason: .invalidFrame, context, effects: &effects)
                 return
             }
             if let firstAt = attempt.firstCompletedAt,
@@ -418,6 +429,23 @@ public struct EncounterEngineCore: Sendable {
     private func phase(_ attempt: Attempt) -> ExchangePhase {
         guard attempt.first != nil else { return .initialExchange }
         return attempt.approach == .heldConnection ? .heldConnectionCheckpoint : .reconnectEvidence
+    }
+    /// A refused checkpoint keeps its first exchange and can use a fresh window.
+    private mutating func refuse(_ attempt: Attempt, reason: EncounterAttemptEndReason,
+                                 _ context: EncounterEngineContext, effects: inout [EncounterEngineEffect]) {
+        guard phase(attempt) != .initialExchange else {
+            end(attempt.connection, reason: reason, effects: &effects); return
+        }
+        var waiting = attempt
+        waiting.stage = .waiting; waiting.deadline = nil; waiting.operation = nil
+        waiting.offered = nil; waiting.offeredWindow = nil
+        if attempt.connection.role == .central {
+            waiting.retryAt = context.time.monotonic + EncounterProtocol.duplicateAttemptBackoff
+            if attempt.approach == .secondExchange {
+                waiting.connected = false; requestDisconnect(attempt.connection, effects: &effects)
+            }
+        }
+        attempts[attempt.connection] = waiting
     }
     private mutating func remember(_ peer: PeerHandle, mayRetry: Bool, lastObservedAt: TimeInterval) {
         guard lastObservedAt + Self.pendingPeerLifetime > currentMonotonic else { return }
@@ -469,7 +497,7 @@ public struct EncounterEngineCore: Sendable {
         }
         let id = nextID()
         saves[id] = Save(connection: attempt.connection, receipt: receipt, incomingRequest: request,
-                         isCheckpoint: checkpoint, original: attempt.first)
+                         isCheckpoint: checkpoint, original: attempt.first, ownWindow: attempt.offeredWindow!)
         var saving = attempt; saving.stage = .saving(id)
         saving.deadline = context.time.monotonic + EncounterProtocol.operationTimeout
         attempts[attempt.connection] = saving
@@ -492,7 +520,18 @@ public struct EncounterEngineCore: Sendable {
             end(save.connection, reason: .storageFailure, effects: &effects)
             return
         }
-        consumedNonces.insert(save.receipt.exchangeNonce)
+        guard save.ownWindow == window(context) else {
+            if let request = save.incomingRequest { effects.append(.transport(.answerWrite(save.connection.peer, request, success: false))) }
+            if save.isCheckpoint, let original = save.original { effects.append(.queue(nil, .update(original))) }
+            else { effects.append(.queue(nil, .remove(save.receipt.id))) }
+            refuse(attempt, reason: .invalidFrame, context, effects: &effects)
+            return
+        }
+        if consumedNonces[save.receipt.exchangeNonce] == nil {
+            consumedNonces[save.receipt.exchangeNonce] = LedgerEntry(insertionSequence: nextID(),
+                expiresAt: context.time.monotonic + EncounterProtocol.receiptLifetime)
+            trim(&consumedNonces, limit: Self.consumedNonceLimit)
+        }
         if let request = save.incomingRequest { effects.append(.transport(.answerWrite(save.connection.peer, request, success: true))) }
         if save.receipt.hasQualifyingAmbientEvidence {
             // The original exchange must survive too: reconnect confirmation matches both nonces.
@@ -508,7 +547,6 @@ public struct EncounterEngineCore: Sendable {
             attempt.first = save.receipt; attempt.firstCompletedAt = context.time.monotonic
             attempt.stage = .waiting; attempt.deadline = nil; attempt.operation = nil; attempt.offered = nil
             attempts[save.connection] = attempt
-            consumedNonces.insert(save.receipt.exchangeNonce)
             effects.append(.event(.exchangeCompleted(role: save.connection.role, nonceDigest: save.receipt.exchangeNonce.diagnosticDigest)))
             if save.connection.role == .central && attempt.approach == .secondExchange {
                 attempt.connected = false; attempts[save.connection] = attempt
@@ -524,6 +562,11 @@ public struct EncounterEngineCore: Sendable {
             effects.append(.transport(.answerWrite(key.peer, request, success: false)))
         }
         if let receipt = attempt.first { finalize(receipt, preserve: false, effects: &effects) }
+        if key.role == .peripheral && reason != .evidenceReached && attempt.first?.hasQualifyingAmbientEvidence != true {
+            peripheralBackoff[key.peer] = LedgerEntry(insertionSequence: nextID(),
+                expiresAt: currentMonotonic + Self.peripheralBackoffDuration)
+            trim(&peripheralBackoff, limit: Self.peripheralBackoffLimit)
+        }
         // Use the termination input's time, recorded by expire/receive, rather than a clock read.
         if key.role == .central && reason != .stopped && reason != .reset {
             backoff[key.peer] = currentMonotonic + EncounterProtocol.duplicateAttemptBackoff
@@ -538,6 +581,11 @@ public struct EncounterEngineCore: Sendable {
         effects.append(.event(.attemptEnded(role: key.role, reason: reason)))
     }
     private var currentMonotonic: TimeInterval = 0
+    private func trim<Key>(_ ledger: inout [Key: LedgerEntry], limit: Int) {
+        if ledger.count > limit, let oldest = ledger.min(by: { $0.value.insertionSequence < $1.value.insertionSequence })?.key {
+            ledger.removeValue(forKey: oldest)
+        }
+    }
     private mutating func requestDisconnect(_ key: BluetoothConnection, effects: inout [EncounterEngineEffect]) {
         if radio != .available { effects.append(.transport(.disconnect(key))); return }
         if closing[key] == nil {

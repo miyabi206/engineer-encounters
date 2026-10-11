@@ -17,6 +17,8 @@ public actor EncounterEngine {
     private var wakeDeadline: TimeInterval?
     private var cachedWindow: TokenWindow?
     private var recoveredReceipts = false
+    private var nextReceiptMaintenance: TimeInterval?
+    private static let receiptMaintenanceInterval: TimeInterval = 15 * 60
     private var transportFinished = false
     private struct Pending {
         let input: EncounterEngineInput
@@ -92,6 +94,7 @@ public actor EncounterEngine {
         }
     }
     private func context(reloadToken: Bool = false, starting: Bool = false) async -> EncounterEngineContext {
+        let flag = await sessionFlag()
         let time = await clock.now()
         if core.isRunning || starting {
             if cachedWindow?.contains(time.wall) != true { cachedWindow = nil }
@@ -100,8 +103,7 @@ public actor EncounterEngine {
                 catch { /* A valid cached window survives a transient store read failure. */ }
             }
         } else { cachedWindow = nil }
-        let flag = await sessionFlag()
-        return EncounterEngineContext(time: time, tokenWindow: cachedWindow, sessionFlag: flag)
+        return EncounterEngineContext(time: await clock.now(), tokenWindow: cachedWindow, sessionFlag: flag)
     }
     private func recoverReceipts() async -> Bool {
         guard !recoveredReceipts else { return true }
@@ -127,6 +129,13 @@ public actor EncounterEngine {
                 guard await recoverReceipts() else { next.completion.resume(); continue }
                 starting = true
             } else { starting = false }
+            let time = await clock.now()
+            if starting || next.reloadToken || (core.isRunning && time.monotonic >= (nextReceiptMaintenance ?? time.monotonic)) {
+                // Advance even on failure so a rejected maintenance call cannot spin.
+                nextReceiptMaintenance = time.monotonic + Self.receiptMaintenanceInterval
+                do { try await queue.removeExpired(asOf: time.wall) }
+                catch { continuation.yield(.receiptStorageFailed) }
+            }
             let context = await context(reloadToken: next.reloadToken, starting: starting)
             let output = core.receive(next.input, context: context)
             if !core.isRunning { cachedWindow = nil }
@@ -161,7 +170,8 @@ public actor EncounterEngine {
         }
         return deadline
     }
-    private func schedule(_ deadline: TimeInterval?) {
+    private func schedule(_ coreDeadline: TimeInterval?) {
+        let deadline = core.isRunning ? [coreDeadline, nextReceiptMaintenance].compactMap { $0 }.min() : nil
         guard deadline != wakeDeadline else { return }
         wakeTask?.cancel(); wakeTask = nil; wakeDeadline = deadline; wakeGeneration &+= 1
         guard let deadline else { return }
