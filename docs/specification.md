@@ -1,9 +1,9 @@
 # Specification — Engineer Encounters
 
-**Version:** 0.4\
+**Version:** 0.5\
 **Status:** Draft requirements; product decisions recorded in `decisions.md`\
 **Date:** 2026-10-12\
-**Related:** `decisions.md` v0.4, `design.md` v0.4, `ui.md` v0.2\
+**Related:** `decisions.md` v0.5, `design.md` v0.5, `ui.md` v0.3\
 **Platforms:** iOS first, Android later\
 **Languages:** Japanese, English
 
@@ -50,6 +50,8 @@ Opportunity mode and career features are a later mode.
 
 ### Accounts
 
+**Owner decision — token prerequisite, 2026-10-12 (binding):** planned token issue will require a signed-in account, recorded 18+ declaration and acceptance of terms and privacy policy, and a valid registered time zone; discovery on will not be required. Accepted consequence: discovery-off accounts can have encounters confirmed and stored as dates only, becoming visible if both people later turn discovery on within retention, subject to reveal and current authorization. No Unit 3 function creates links, so the app cannot turn discovery on before Unit 5. Requiring discovery for token issue remains an owner open item to revisit once onboarding and link flows exist. See `design.md`, **Unit 3 contract** for the planned server/client detail.
+
 - The release build requires Sign in with Apple.
 - Sign-up includes the 18+ declaration and acceptance of the terms and privacy policy.
 - GitHub is a linked identity used for verification, not a sign-in method.
@@ -70,7 +72,7 @@ A durable identity makes blocks, removals, the 18+ declaration and account delet
 
 **DEFAULT:** no uploaded avatar in v1; the card uses an initial-letter avatar.
 
-Discovery is the master switch for taking part in encounters and is off by default. Turning it on requires a display name, a self-introduction, at least one interest and at least one link of any kind.
+Discovery is the master switch for product discovery and card eligibility and is off by default; token issue and discovery-off confirmation follow **Accounts** above. Turning it on requires a display name, a self-introduction, at least one interest and at least one link of any kind.
 
 Onboarding requests Bluetooth permission and explains what discovery promises, its limitations and the force-quit rule before turning discovery on.
 
@@ -121,11 +123,11 @@ An **exchange** is one Bluetooth connection that swaps temporary tokens in both 
 
 Symmetric rule: an encounter counts only when both phones take part, meaning both report the Bluetooth exchange, or one shows and the other scans a QR code.
 
-Confirmation must reject invalid, stale or replayed receipts. Session confirmation must use the server's own record that both users had active sessions. The protocol and confirmation details belong in `design.md`, **Bluetooth transport** and **Confirmed encounter, security definition**.
+Confirmation must reject invalid, stale or replayed receipts. Session confirmation must use the server's own record that both users had active sessions. The protocol and planned confirmation details belong in `design.md`, **Bluetooth transport**, **Confirmed encounter, security definition** and **Unit 3 contract**. Token prerequisites follow **Accounts** above.
 
 A confirmed Bluetooth encounter is evidence of a Bluetooth interaction, not cryptographic proof of physical distance: an attacker can relay an exchange. Signal strength is only a rough range indicator.
 
-**FACT:** Unit 2 built both held connection (接続を維持) and second exchange (2回目の交換). The held connection updates one receipt with a checkpoint token pair; the second exchange creates a second receipt with `priorExchangeNonce` naming the first exchange and the monotonic duration between exchanges, retaining the first receipt as final. Unit 3 server resolution must accept both shapes: clients now send the linked second-exchange shape by default, and the held-connection checkpoint shape must remain accepted while selectable. It must reject replay and require the matching receipts from both phones. On device, S22 shows only local two-minute evidence and an exchange digest (first 8 hexadecimal characters of SHA-256 of the exchange nonce); the owner compares the two screens. The two-receipt confirmation harness is only a test check and is not linked into the app.
+**FACT:** Unit 2 built both held connection (接続を維持) and second exchange (2回目の交換). The held connection updates one receipt with a checkpoint token pair; the second exchange creates a second receipt with `priorExchangeNonce` naming the first exchange and the monotonic duration between exchanges, retaining the first receipt as final. The planned server acceptance of both shapes is specified in `design.md`, **Unit 3 contract**. On device, S22 shows only local two-minute evidence and an exchange digest (first 8 hexadecimal characters of SHA-256 of the exchange nonce); the owner compares the two screens. The two-receipt confirmation harness is only a test check and is not linked into the app.
 
 ### The ladder
 
@@ -267,7 +269,7 @@ Core Bluetooth provides discovery; it is the only Apple framework that works in 
 
 Implementation uses SwiftData with a replaceable receipt queue, CryptoKit and the Keychain, camera QR scanning, Supabase's free-plan Auth, PostgreSQL, Edge Functions and Cron, and APNs. Architecture, backend languages, storage, token handling, repository structure and development tools belong in `design.md`, **Stack, tools and workflow**, following `decisions.md`, **Stack, tools and workflow**.
 
-**FACT:** Unit 2 built AppComposition and EncounterRuntime around a persisted local participation switch, default off. No Bluetooth manager is created before it is on; App.init recreates the runtime when participation is on so state restoration works. The session flag source is false until sessions exist. KeychainTokenBatchStore uses after-first-unlock, this-device-only accessibility. Development issues local test tokens in a 12-hour batch of quarter-hour-aligned 15-minute windows; Internal and Release have no issuer and stay paused for lack of a token until Unit 3. App-directory-anchored source exclusions and conditional compilation gate Development and Diagnostics sources; the release-artifact script checks marker names and string tables in all three configurations.
+**FACT:** Unit 2 built AppComposition and EncounterRuntime around a persisted local participation switch, default off. No Bluetooth manager is created before it is on; App.init recreates the runtime when participation is on so state restoration works. The session flag source is false until sessions exist. KeychainTokenBatchStore uses after-first-unlock, this-device-only accessibility. Development issues local test tokens in a 12-hour batch of quarter-hour-aligned 15-minute windows; Internal and Release currently have no issuer and stay paused for lack of a token. Planned server integration is in `design.md`, **Unit 3 contract**; those builds cannot sign in before Unit 7. App-directory-anchored source exclusions and conditional compilation gate Development and Diagnostics sources; the release-artifact script checks marker names and string tables in all three configurations.
 
 **FACT:** SwiftDataReceiptQueue stores each receipt’s Codable payload beside identity, sequence and expiry on a model actor, with after-first-unlock file protection, a backup-excluded directory and at most 4,096 receipts and 4,096 terminal-identity tombstones. Expired receipts are never returned; the engine invokes expiry on start, refresh and every 15 minutes while running. The adapter bounds admission, observations and write fragments, and the engine bounds peer/nonce ledgers and rechecks its own token at completion; the verified values and accepted security trade-offs are recorded in `decisions.md`, **Technical design inputs**.
 
@@ -280,7 +282,7 @@ Each stage gates the next. Device radio tests and battery measurements are perfo
 |---|---|
 | 1 — Toolchain check | **FACT:** Unit 1 implemented and merged to main (pull request 2); XcodeGen and Deno installed. Sandbox Swift tests pass with local cache paths and `--disable-sandbox`, and iOS code compiles with the simulator triple/SDK. XcodeGen, xcodebuild, app-hosted tests, release-artifact checks and every Supabase command run outside that sandbox in the tester role. The sandbox question is resolved. |
 | 2 — Bluetooth engine | **FACT:** Unit 2 implemented and merged to main (pull requests 4 and 5), with real-app S22 diagnostics. The owner’s 2026-10-11 check used an iPhone 15 and an iPad (10th generation), Development builds and local test tokens, no backend/account. Rungs 3 and 4 worked with both approaches in both orientations, subject to the continuation limitation below; unrun trials remain open. |
-| 3 — Basic functions | Build the basic functions, then complete the 160-trial matrix with a borrowed second iPhone. **FACT:** the three 2026-10-11 owner decisions were implemented on 2026-10-12; see **Release path and gates** for completed and open prerequisites. |
+| 3 — Basic functions | Follow the Unit 3 scope below and `design.md`, **Unit 3 contract**, then complete Units 4 and 5 before the 160-trial matrix with a borrowed second iPhone. **FACT:** the three 2026-10-11 owner decisions were implemented on 2026-10-12; see **Release path and gates** for completed and open prerequisites. |
 | 4 — Friends test | Test with 3 to 5 friends in a small room or cafe using the free Apple account, cable installs from the owner's Mac, temporary anonymous sign-in and sessions for immediate results. **DEFAULT:** the friends test uses development builds pointed at a hosted non-production Supabase project, because the phones leave the owner's Mac. Anonymous sign-in is enabled only on that non-production project and disabled on production, in addition to being compiled out of the release build. Local Supabase is for automated checks and the owner's own development. View the daily report inside the app without a notification. The GitHub reader alone is sufficient. |
 | 5 — Developer Program | Join the Apple Developer Program; add and verify Sign in with Apple, push notifications and TestFlight. |
 | 6 — Event | Test at one real event with 20 or more people using a TestFlight build made with the release configuration against the production backend. No demo switch, diagnostics or anonymous sign-in; attendees sign in with Apple. Internal builds keep the demo switch and diagnostics and go only to the owner's own devices. |
@@ -302,6 +304,10 @@ The owner ended the check on 2026-10-11 without token-window-boundary, real loss
 - Count a returning central’s 5-second refusal from the previous attempt’s start, rather than its end, retaining one attempt per 5 seconds per handle while accepting honest peers immediately after longer attempts. **FACT — implemented on 2026-10-12:** refusal after an evidence-free attempt ends 5 seconds after attempt start, admitting honest longer attempts at once; see `decisions.md`, **Bluetooth transport** for scope and lifetime.
 
 **FACT:** the static security review and verification of 2026-10-12, including one accepted low occupancy risk, are recorded in `decisions.md`, **Retention and deletion contract**; **UNVERIFIED:** device verification remains open.
+
+**Owner decision — scope, 2026-10-12 (binding):** Unit 3 will build `S02`, `S03`, `S05`, `S12`, `S16`, `S17`, the Settings list needed to reach `S12`, `S16`, `S17`, and the two declarations plus Development-only temporary sign-in on `S01`. `S04` and all link flows will stay in Unit 5, Sign in with Apple in Unit 7, and sessions, QR, feed, block, report and deletion in Unit 4. Until the owner supplies real values, screens will use a placeholder interest list and a threshold range of 1 to 10; the real list and range remain open. Unit 3 is entirely planned; see `design.md`, **Unit 3 contract**.
+
+**Owner decision — review, 2026-10-12 (binding):** the owner confirmed the planned auth and database changes of Unit 3 and a security review of its diff before merge. Neither the implementation nor that review is complete; see `design.md`, **Unit 3 contract**.
 
 ### Device matrix and battery gate
 
@@ -374,7 +380,8 @@ The objective is meaningful discovery, not maximizing the number of encounters. 
 | Sample encounter | On-device only and dismissible. |
 | Saved link | Same retention and current-visibility rules as a favorite; disappears if the encounter is removed. |
 | Feed card | Display name, shared interests, first visible link card, a verified or unverified label per link, encounter kind (ambient, session or QR), and day. Never time or place. Layout belongs in `ui.md`, **The 26 screens**. |
-| Temporary tokens | Random, server-issued in batches, valid for 15-minute windows and the only identifiers exchanged. Details belong in `design.md`, **Bluetooth transport**. |
+| Temporary tokens | Planned server/client details belong in `design.md`, **Unit 3 contract**; the binding owner prerequisite is under **Accounts**. |
+| Unit 3 | **DEFAULT:** server, wire, limits, schema and client choices are proposed in `design.md`, **Unit 3 contract**; its owner decisions are binding. |
 | Presence implementation | **FACT:** Unit 2 built held connection and second exchange; the binding 2026-10-11 default decision was implemented on 2026-10-12; see **Release path and gates** and `decisions.md`, **Bluetooth transport**. |
 | Friends-test backend | Development builds use hosted non-production Supabase; anonymous sign-in enabled only there, disabled on production and compiled out of release. Local Supabase is for automated checks and the owner's own development. |
 | Success measurement | No usage analytics in v1; ask friends-test/event participants for product measures and use development/internal diagnostics for technical measures. |
@@ -384,6 +391,15 @@ The objective is meaningful discovery, not maximizing the number of encounters. 
 Discovery off, the 21:00 daily report, profile visibility and private contact details are specified product defaults, rather than gaps filled during drafting. Links require an explicit visibility choice. The second-exchange default, 15-minute peer pause and refusal-from-attempt-start decisions are also binding; **FACT:** all three were implemented on 2026-10-12 and are recorded with reasons in **Release path and gates**.
 
 ## 15. Open items
+
+- **Owner — interests and threshold:** supply the real curated interest list and threshold range; interim values follow the binding scope decision above and `design.md`, **Unit 3 contract**.
+- **Owner — token prerequisite:** revisit requiring discovery for token issue once onboarding and link flows exist; see the binding account decision above and `design.md`, **Unit 3 contract**.
+- **Unit 4 — short session evidence:** decide early discard before expiry once server sessions exist; see `design.md`, **Unit 3 contract**.
+- **Digests:** review plain versus keyed token/nonce digests against the proposed contract in `design.md`, **Unit 3 contract**.
+- **New Unit 3 DEFAULT values:** review contact detail 100 characters, at most 10 interests, 300-second skew, token and unresolved-candidate limits, and day-granular nonce expiry. Details belong in `design.md`, **Unit 3 contract**.
+- **Legal versions:** settle terms and privacy version strings; the interim Development plan is in `design.md`, **Unit 3 contract**.
+- **Sign-out integration:** integrate auth with the local runtime, protected stores and clearing; see `design.md`, **Unit 3 contract** and **Retention and deletion contract**.
+- **UNVERIFIED — local backend:** verify on a device that a Development phone reaches a backend on the local network; see `design.md`, **Unit 3 contract**.
 
 - Trademark registry searches for **すれちがいエンジニア** and **Engineer Encounters**.
 - **UNVERIFIED:** background-to-background discovery, including two iPhones, and rung 2 (not tried); neither rung 1 nor rung 2 is promised. Both-locked trials began with foreground first exchanges.

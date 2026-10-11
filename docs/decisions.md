@@ -1,9 +1,9 @@
 # Decisions — Engineer Encounters
 
-**Version:** 0.4\
+**Version:** 0.5\
 **Status:** Confirmed product decisions; drafting defaults and unverified items labelled\
 **Date:** 2026-10-12\
-**Related:** `specification.md` v0.4, `design.md` v0.4, `ui.md` v0.2\
+**Related:** `specification.md` v0.5, `design.md` v0.5, `ui.md` v0.3\
 **Platforms:** iOS first, Android later\
 **Languages:** Japanese, English
 
@@ -27,7 +27,7 @@ Unmarked items are binding product decisions. **DEFAULT** marks a value chosen t
 - **Link card:** one shared link with its automatically filled title or name, description, main language, source, tags and opening or preview text, where available.
 - **Link reader:** the server component that reads one kind of source (GitHub, Qiita, Zenn, other pages).
 - **Eligible and compatible:** defined in **Matching and visibility**.
-- **Discovery:** the master switch a user has for taking part in encounters.
+- **Discovery:** the master switch for product discovery and card eligibility. Token issue and discovery-off confirmation follow **Accounts**.
 - **Development build, internal build, release build:** defined in **Stack, tools and workflow**.
 
 ## 1. Product
@@ -45,6 +45,8 @@ Unmarked items are binding product decisions. **DEFAULT** marks a value chosen t
 ## 2. Profile, accounts and links
 
 ### Accounts
+
+**Owner decision — token prerequisite, 2026-10-12 (binding):** planned token issue will require a signed-in account, recorded 18+ declaration and acceptance of terms and privacy policy, and a valid registered time zone; discovery on will not be required. Accepted consequence: discovery-off accounts can have encounters confirmed and stored as dates only, becoming visible if both people later turn discovery on within retention, subject to reveal and current authorization. No Unit 3 function creates links, so the app cannot turn discovery on before Unit 5. Requiring discovery for token issue remains an owner open item to revisit once onboarding and link flows exist. See `design.md`, **Unit 3 contract** for the planned server/client detail.
 
 - Sign in with Apple is required in the release build.
 - Anonymous accounts exist only in development builds, as a temporary sign-in that is compiled out of the release build. The friends test in **Build, test and release path** uses it.
@@ -175,7 +177,7 @@ Each stage gates the next.
 
 1. **Toolchain check. FACT:** Unit 1 is implemented and merged to main (pull request 2). The sandbox question is resolved: Swift package checks pass with local cache paths and `--disable-sandbox`; Xcode and Supabase checks run outside that sandbox in the tester role. See **Repository and tools**.
 2. **Bluetooth engine first. FACT:** Unit 2 is implemented and merged to main (pull requests 4 and 5), with the real app and S22 diagnostics. The owner completed the one-day check on 2026-10-11 with an iPhone 15 and an iPad (10th generation), Development builds, local test tokens, no backend and no account. Rungs 3 and 4 worked with both approaches in both orientations, with the trial limitation below; unrun trials remain open.
-3. **Basic functions.** Then the 160-trial matrix, using a borrowed second iPhone. **FACT:** the three binding owner decisions of 2026-10-11 were implemented on 2026-10-12; device verification remains open before the matrix; see **Bluetooth transport**.
+3. **Basic functions.** Follow the Unit 3 allocation under **User interface** and the planned contract in `design.md`, **Unit 3 contract**, then complete Units 4 and 5 before the 160-trial matrix, using a borrowed second iPhone. **FACT:** the three binding owner decisions of 2026-10-11 were implemented on 2026-10-12; device verification remains open before the matrix; see **Bluetooth transport**.
 4. **Friends test:** 3 to 5 friends in a small room or cafe, on the free Apple account. **DEFAULT:** the friends test uses development builds pointed at a hosted non-production Supabase project, because the phones leave the owner's Mac. Anonymous sign-in is enabled only on that non-production project and disabled on production, in addition to being compiled out of the release build. Local Supabase is for automated checks and the owner's own development. That means cable installs from the Mac of the owner, builds that stop working after about a week, the temporary anonymous sign-in, sessions for immediate results, and the daily report viewed inside the app without a notification. The GitHub reader alone is enough. If the device cap of the free account is reached, the phone of a friend can be signed with the own free Apple ID of that friend.
 5. **Join the Apple Developer Program.** Add and verify Sign in with Apple, push notifications and TestFlight.
 6. **One real event with 20 or more people,** using a TestFlight build made with the release configuration against the production backend. No demo switch, diagnostics or anonymous sign-in is included; attendees sign in with Apple. Verify these build gates and normal daily reveal and notification timing before the event. Internal builds, which keep the demo switch and diagnostics, go only to the owner's own devices.
@@ -292,13 +294,16 @@ The same environment and cache options with `swift build --triple arm64-apple-io
 
 ## 10. Technical design inputs
 
-These inputs come from an independent review of the v0.2 documents and belong in `design.md`. Items marked **DEFAULT** are starting values that the matrix may change.
+These inputs come from an independent review of the v0.2 documents and belong in `design.md`. Items marked **DEFAULT** are starting values that the matrix may change. Unit 3 server/client details are defined in `design.md`, **Unit 3 contract** rather than repeated here.
+
+**Owner decision — review, 2026-10-12 (binding):** the owner confirmed the planned auth and database changes of Unit 3 and a security review of its diff before merge. Neither the implementation nor that review is complete; see `design.md`, **Unit 3 contract**.
 
 **Defaults chosen during drafting (consistency review additions):**
 
 | Area | Drafting default |
 |---|---|
 | Friends-test backend | Development builds use hosted non-production Supabase; anonymous sign-in enabled only there, disabled on production and compiled out of release. Local Supabase is for automated checks and the owner's own development. |
+| Unit 3 | **DEFAULT:** proposed server, wire, limits, schema and client choices are in `design.md`, **Unit 3 contract**; its three owner decisions are binding. |
 
 ### Bluetooth transport
 
@@ -306,7 +311,7 @@ These inputs come from an independent review of the v0.2 documents and belong in
 - Tokens are never placed in advertisements. After discovery the central connects, reads the current token of the peripheral from one characteristic, and writes its own current token to another. One connection therefore gives both phones the token of the other.
 - **FACT:** Unit 2 uses versioned exchange frames. The peripheral-token characteristic `7AEF0002` has read and notify; no value is ever notified. The central subscribes after discovering the characteristics. The peripheral treats subscription as connected and unsubscription as disconnected: Core Bluetooth supplies no other central connect/disconnect signal to a peripheral and no way for it to force a central off. The central unsubscribes before cancelling its link, waiting at most 1 second. A read at offset 0 from a still-subscribed central with no open logical link admits a new logical connection (pull request 5).
 - No account ID, name, GitHub handle, email or link is ever sent over Bluetooth. This is a binding rule carried over from v0.2; only temporary tokens identify participants.
-- **DEFAULT:** the token format is random, server-issued in batches, with 15-minute windows.
+- Planned token issue follows the binding prerequisite under **Accounts** and `design.md`, **Unit 3 contract**.
 - **FACT:** Unit 2 built both presence approaches: held connection (接続を維持), with a checkpoint after at least 120 seconds, and second exchange (2回目の交換), completing another exchange at least 120 seconds after the first within the 5-minute attempt. The 2026-10-11 check showed rungs 3 and 4 working on the iPhone 15 and iPad (10th generation) pair, not reliable both-locked evidence or background discovery.
 - **FACT:** BluetoothTransport in EncounterDomain is a radio-primitives interface. Commands: `startDiscovery`, `stopDiscovery`, `connect`, `read`, `write`, `disconnect`, `answerRead`, `answerWrite`. Events: `availabilityChanged`, `peerObserved`, `connected`, `connectFailed`, `frameRead`, `readFailed`, `writeAcknowledged`, `writeFailed`, `disconnected`, `incomingRead`, `incomingWrite`, `restored`. EncounterEngineCore is the deterministic synchronous core; EncounterEngine is its actor runtime. Unit 2 changed the planned transport-owned exchange to this engine-owned exchange so the fake tests the real protocol.
 - **FACT:** Unit 2 implements a 10-second connect timeout, 5-second operation timeout, four active connection slots, a 5-minute presence-attempt bound and a 10-second duplicate-attempt backoff. These timings remain adjustable **DEFAULT** values except the binding 120-second ambient threshold. One-sided uploaded receipts remain candidates and expire after 48 hours; server handling arrives in Unit 3.
@@ -321,7 +326,7 @@ These inputs come from an independent review of the v0.2 documents and belong in
 
 ### Confirmed encounter, security definition
 
-- A receipt names the two tokens, a per-exchange nonce, whether the phone was in a session, and the observed duration. **FACT:** Unit 2’s held connection updates one receipt with a checkpoint token pair. The second exchange creates a second receipt with `priorExchangeNonce` equal to the first exchange’s nonce and the monotonic duration between exchanges; the first receipt is retained and marked final. Unit 3 server resolution must accept both shapes and require matching evidence from both phones.
+- A receipt names the two tokens, a per-exchange nonce, whether the phone was in a session, and the observed duration. **FACT:** Unit 2’s held connection updates one receipt with a checkpoint token pair. The second exchange creates a second receipt with `priorExchangeNonce` equal to the first exchange’s nonce and the monotonic duration between exchanges; the first receipt is retained and marked final. Planned Unit 3 server resolution is in `design.md`, **Unit 3 contract**.
 - **FACT:** there is no on-device two-receipt confirmation. S22 shows only that device’s two-minute evidence and an exchange digest (the first 8 hexadecimal characters of SHA-256 of the exchange nonce); the owner compares both screens. The local confirmation harness is only a test check in EncounterDomainTestSupport.
 - The server confirms a Bluetooth encounter only when it holds matching receipts from both phones, both tokens were valid for their windows, the receipt is fresh, and it has not been used before (replay rejection).
 - Ambient: confirmed only when the two-minute rule is met. Session: confirmed immediately when the own record of the server shows both users had an active session. QR: confirmed immediately when the scanning phone uploads, before expiry, a short-lived one-time code that the showing phone obtained from the server while signed in; both accounts took part and no receipts are involved.
@@ -333,7 +338,7 @@ Encounter states for `design.md`, **Encounter states**: Observed (a discovery ca
 ### Background lifecycle and storage
 
 - **FACT:** Unit 2 built AppComposition and EncounterRuntime around a persisted local participation switch, default off. No Bluetooth manager is created before participation is on. App.init recreates the runtime when the flag is on, including background relaunches for Core Bluetooth state restoration; uncertain interrupted attempts are abandoned. The session flag source returns false until sessions exist.
-- **FACT:** KeychainTokenBatchStore uses after-first-unlock, this-device-only accessibility. Development’s LocalTestTokenIssuer supplies a 12-hour batch of quarter-hour-aligned 15-minute windows. Internal and Release have no issuer and stay paused for lack of a token until Unit 3 supplies server tokens.
+- **FACT:** KeychainTokenBatchStore uses after-first-unlock, this-device-only accessibility. Development’s LocalTestTokenIssuer supplies a 12-hour batch of quarter-hour-aligned 15-minute windows. Internal and Release currently have no issuer and stay paused for lack of a token. Planned server integration is in `design.md`, **Unit 3 contract**; those builds cannot sign in before Unit 7.
 - **FACT:** per-configuration `EXCLUDED_SOURCE_FILE_NAMES`, anchored at the app source directory, and conditional compilation gate `ios/App/Development` to Development and `ios/App/Diagnostics` to Development and Internal. `ios/Tests/check-release-artifact.sh` builds all three configurations and checks marker names and string tables. Internal has no route to S22 until the Settings list exists; Development reaches it from S01.
 - Receipts are queued on the device; uploading later when the network is available arrives with Unit 3. **FACT:** SwiftDataReceiptQueue is a model actor storing each receipt’s Codable payload beside identity, sequence and expiry, with after-first-unlock file protection and a backup-excluded store directory. It bounds receipts and terminal-identity tombstones to 4,096 each, never returns expired receipts, and the engine invokes expiry on start, refresh and every 15 minutes while running.
 - Storage and Keychain items that the background path needs must be readable while the phone is locked after its first unlock. Before the first unlock after a reboot nothing works. Document that as a limitation and test it separately.
@@ -385,7 +390,9 @@ A scheduled job runs at a regular interval, selects users whose local time has r
 
 ## 11. User interface
 
-The UI document is `ui.md`, version 0.2. Unit 2 built the S01 public name/introduction and Development-only S22 entry, and S22 local radio diagnostics; account controls and the Settings list remain to build.
+The UI document is `ui.md`, version 0.3. Unit 2 built the S01 public name/introduction and Development-only S22 entry, and S22 local radio diagnostics; account controls and the Settings list remain to build.
+
+**Owner decision — scope, 2026-10-12 (binding):** Unit 3 will build `S02`, `S03`, `S05`, `S12`, `S16`, `S17`, the Settings list needed to reach `S12`, `S16`, `S17`, and the two declarations plus Development-only temporary sign-in on `S01`. `S04` and all link flows will stay in Unit 5, Sign in with Apple in Unit 7, and sessions, QR, feed, block, report and deletion in Unit 4. Until the owner supplies real values, screens will use a placeholder interest list and a threshold range of 1 to 10; the real list and range remain open. Unit 3 is entirely planned; see `design.md`, **Unit 3 contract**.
 
 - Start from the six concept screens in `proposal.pdf` (pages 3 to 5). Keep their teal accent on a light background and their card layout. Build with standard iOS components, with light and dark modes and Dynamic Type.
 - A tab bar at the bottom of the screen with three tabs: Discover, Profile, Settings.
@@ -452,6 +459,15 @@ For each screen `ui.md` gives: its purpose, how the user reaches it, a text sket
 | Apple Developer Forums, free account code signing | https://developer.apple.com/forums/thread/838074 |
 
 ## 13. Open and unverified items
+
+- **Owner — interests and threshold:** supply the real curated interest list and threshold range; interim values follow the binding scope decision above and `design.md`, **Unit 3 contract**.
+- **Owner — token prerequisite:** revisit requiring discovery for token issue once onboarding and link flows exist; see the binding account decision above and `design.md`, **Unit 3 contract**.
+- **Unit 4 — short session evidence:** decide early discard before expiry once server sessions exist; see `design.md`, **Unit 3 contract**.
+- **Digests:** review plain versus keyed token/nonce digests against the proposed contract in `design.md`, **Unit 3 contract**.
+- **New Unit 3 DEFAULT values:** review contact detail 100 characters, at most 10 interests, 300-second skew, token and unresolved-candidate limits, and day-granular nonce expiry. Details belong in `design.md`, **Unit 3 contract**.
+- **Legal versions:** settle terms and privacy version strings; the interim Development plan is in `design.md`, **Unit 3 contract**.
+- **Sign-out integration:** integrate auth with the local runtime, protected stores and clearing; see `design.md`, **Unit 3 contract** and **Retention and deletion contract**.
+- **UNVERIFIED — local backend:** verify on a device that a Development phone reaches a backend on the local network; see `design.md`, **Unit 3 contract**.
 
 - The trademark registry search for **すれちがいエンジニア** and **Engineer Encounters**.
 - **UNVERIFIED:** background-to-background discovery, including two iPhones; the both-locked check began with foreground first exchanges. Rungs 1 and 2 remain unproven and never promised; rung 2 was not tried.
