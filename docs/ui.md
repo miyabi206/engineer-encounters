@@ -129,38 +129,37 @@ Sketches show English wording. Label tables provide Japanese and English equival
 
 **Mockup:** [images/s01-welcome-sign-in.png](images/s01-welcome-sign-in.png)
 
-**Purpose and entry:** Introduce the product and, when accounts arrive, establish a durable account. **FACT:** Unit 2 built the public name, introduction and Development-only Diagnostics entry on launch. The declarations, legal links and sign-in controls arrive with accounts; the mockup includes those future controls. With accounts, entry is on first launch, after sign-out/account deletion or when authentication has expired.
+**Purpose and entry:** Introduce the product and establish a durable account. Open on first launch, after sign-out or account deletion, or when authentication has expired.
+
+**FACT:** Unit 2 built only the public name, the introduction and the Development-only Diagnostics entry (WelcomeView in EncounterUI and DevelopmentDiagnosticsEntry in the app). The declarations, legal links and sign-in controls arrive with accounts.
 
 ```text
 Engineer Encounters
 Discover the work of engineers you encounter.
-(Development only: [Diagnostics])
+[ ] I am 18 or older
+[ ] I agree to the terms and privacy policy
+[Terms]  [Privacy policy]
+[Sign in with Apple]
+(Development only: [Temporary sign-in] [Diagnostics])
 ```
 
-**Elements:** **FACT:** WelcomeView shows the localized product name and introduction; DevelopmentDiagnosticsEntry adds the Diagnostics navigation link only in Development. Internal and Release show only the name and introduction. The account implementation will add separate age and agreement declarations, legal links and the standard Apple sign-in control. Both declarations are required before sign-in. GitHub is not a sign-in option. The planned temporary anonymous control is Development-only, with the same declarations; it is absent in Internal and Release.
+**Elements:** Public name, short introduction, separate age and agreement declarations, legal links and the standard Apple sign-in control. Both declarations are required before sign-in. GitHub is not a sign-in option. The temporary anonymous control is compiled in only for development, with the same declarations; it is absent in internal and release builds.
 
-**States:** **FACT:** the built screen displays local strings and has no account loading/error state. With accounts, declarations start unchecked; loading disables repeated sign-in and shows progress; failure offers Retry, and cancellation returns without an error. A person who cannot make the 18+ declaration cannot proceed.
+**States:** Empty: declarations are unchecked. Loading: disable repeated sign-in and show progress. Error: show sign-in failure with Retry; cancellation returns to this screen without an error. A person who cannot make the 18+ declaration cannot proceed.
 
-**Actions:** **FACT:** Diagnostics → S22 only in Development, without a backend or account; Back → S01. With accounts, successful new sign-in → S02; existing account → its unfinished S02–S05 step or S06 when setup is complete. Terms/privacy → S21 in signed-out context; Back there → S01. Temporary sign-in follows the same setup route. Retry → S01 sign-in flow. These account/legal routes are not yet built.
-
-Built labels are verbatim from EncounterUI’s Japanese/English Localizable.strings and DevelopmentDiagnostics.strings:
+**Actions:** Successful new sign-in → S02. Existing account → its unfinished S02–S05 step or S06 when setup is complete. Terms/privacy → S21 in signed-out context; Back there → S01. Temporary sign-in follows the same setup route. Retry → S01 sign-in flow. **DEFAULT:** Diagnostics → S22 before sign-in only in development builds, with no backend or account required; Back → S01.
 
 | Japanese | English |
 |---|---|
 | すれちがいエンジニア | Engineer Encounters |
 | すれちがったエンジニアの作品を見つけよう | Discover the work of engineers you encounter. |
-| 診断 | Diagnostics |
-
-The remaining labels are drafting wording for the account implementation:
-
-| Japanese | English |
-|---|---|
 | 18歳以上です | I am 18 or older |
 | 利用規約とプライバシーポリシーに同意します | I agree to the terms and privacy policy |
 | 利用規約 | Terms |
 | プライバシーポリシー | Privacy policy |
 | Appleでサインイン | Sign in with Apple |
 | テスト用の一時サインイン | Temporary sign-in |
+| 診断 | Diagnostics |
 
 ### S02 Profile basics
 
@@ -1222,7 +1221,7 @@ See `proposal.pdf`, pages 3–5, and `decisions.md`, **User interface**. Keep th
 - **Interests and matching controls:** What is the initial curated Japanese/English interest list, and what values may the shared-interest threshold take? `decisions.md`, **Profile** and **Matching and visibility**, fix the approach but not the vocabulary or range. S03/S12/S16 need these values; no new purpose or free-text interest is proposed.
 - **Blocked-user references:** What minimal identifier may S19 retain/display after blocking while the server sends no unauthorized profile fields? `decisions.md`, **Privacy and safety** and **Matching and visibility**, require blocks and current authorization but do not define the list's identification contract. No retained name or link preview is promised.
 - **Report failure:** How is immediate reporter-side hiding persisted when report submission fails or is offline, and how is a pending report retried? S26 conceals the card immediately but cannot claim server acceptance. `decisions.md`, **Privacy and safety**, specifies immediate hiding without the failure contract.
-- **Session interruptions:** Does discovery off, Bluetooth loss, sign-out or auth expiry also stop the server session ledger, or let it expire? `design.md`, **iOS app structure**, settles online start, offline continuation and explicit local stop; **Bluetooth transport** settles radio teardown on discovery off/sign-out, but neither defines all automatic session-stop triggers. S08/S20 and external surfaces must follow a single interruption rule once settled. Eligibility is never bypassed; no signed-out card access is shown.
+- **Session interruptions:** Does discovery off, Bluetooth loss, sign-out or auth expiry also stop the server session ledger, or let it expire? `design.md`, **iOS app structure**, settles online start, offline continuation and explicit local stop; **Bluetooth transport** settles radio teardown when participation stops, while sign-out integration remains planned; neither defines all automatic session-stop triggers. S08/S20 and external surfaces must follow a single interruption rule once settled. Eligibility is never bypassed; no signed-out card access is shown.
 - **One-tap and Live Activity availability:** Verify the chosen Control Center start action, authentication requirements and interactive stop on supported devices. Define the unavailable/disabled surface wording without claiming the control bypasses device security.
 - **Unproven discovery behavior:** **FACT:** the 2026-10-11 iPhone 15/iPad (10th generation) check with Development/local test tokens passed rungs 3 and 4 with both approaches in both orientations, with the held-connection/iPad-locked result only a continuation without Reset. Both-locked evidence required waking a device. **UNVERIFIED:** background-to-background discovery (first exchanges preceded locking), rung 2, token-window-boundary, real loss-of-contact-and-return and iPhone-with-iPhone trials. Rungs 1 and 2 remain unproven and never promised; S05 keeps “may also work” and rung 3 remains the public promise subject to the release gate.
 - **Diagnostics follow-up:** the three binding 2026-10-11 presence decisions are decided but not yet implemented; implement all before the matrix and security-review the refusal diff. Delayed second connection with `CBConnectPeripheralOptionStartDelayKey` is unverified, undecided and not built; showing which first exchange an evidence entry completes is also undecided. Internal awaits a Settings route to S22, and account integration must clear the trial log. Sharing matching exchange digests remains an accepted privacy risk.

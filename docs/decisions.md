@@ -94,10 +94,10 @@ All rungs operate at the same time. The app never switches modes.
 
 | Rung | Device state or action | User effort | Status |
 |---|---|---|---|
-| 1 — Locked | Both phones locked, app in the background. | None. | Unproven, never promised. **FACT:** neither approach produced two-minute evidence while both devices stayed locked in the 2026-10-11 check. |
+| 1 — Locked | Both phones locked, app in the background. | None. | Unproven, may not work at all, never promised. **FACT:** neither approach produced two-minute evidence while both devices stayed locked on the iPhone 15 and iPad (10th generation) pair in the 2026-10-11 check. |
 | 2 — Awake | At least one phone in use with another app in front. | None. | Unproven. **UNVERIFIED:** not tried on 2026-10-11; measured separately from rung 1, never promised. |
-| 3 — One open | At least one of the two has the app open. | One tap by one person. | The public promise. **FACT:** both presence approaches worked in both device orientations on 2026-10-11; the held connection with iPad locked was a continuation, not a clean reset-then-lock trial. The matrix remains the release gate. |
-| 4 — Both open | Both have the app open. | One tap each. | Fastest. **FACT:** both presence approaches worked on the device pair on 2026-10-11. |
+| 3 — One open | At least one of the two has the app open. | One tap by one person. | The public promise. Expected to work by two independent paths, the open phone scanning and the open phone advertising. **FACT:** both presence approaches worked in both device orientations on the iPhone 15 and iPad (10th generation) pair on 2026-10-11; the held connection with iPad locked was a continuation, not a clean reset-then-lock trial. The matrix remains the release gate. |
+| 4 — Both open | Both have the app open. | One tap each. | Fastest. **FACT:** both presence approaches worked on the iPhone 15 and iPad (10th generation) pair on 2026-10-11. |
 | 5 — Manual | One shows a QR code and the other scans it. | A few seconds together. | Always works, no Bluetooth. |
 
 ### Rules
@@ -119,8 +119,8 @@ All rungs operate at the same time. The app never switches modes.
 
 - **FACT** (Apple, Core Bluetooth Background Processing for iOS Apps): a backgrounded app advertises without its local name, and its service UUIDs move to an overflow area that only an iOS device explicitly scanning for them can discover. Advertising frequency may decrease. Background scanning coalesces duplicate discoveries and scans less often. An app woken in the background has around 10 seconds.
 - **FACT:** an Apple engineer wrote on the Apple Developer Forums in July 2026 (thread 837516) that background advertising is best-effort and “slows or stops”, that tokens should be read over a connection and not carried in advertisements, and that an app the user force-quit is not relaunched.
-- **FACT:** the owner’s 2026-10-11 check used an iPhone 15 and an iPad (10th generation), Development builds and local test tokens, without a backend or account. With one app open, the open device woke the locked device. With both locked, neither approach produced two-minute evidence until a device was woken: a suspended app gets no timer. First exchanges happened just after Reset, before both devices were backgrounded.
-- **UNVERIFIED:** discovery between two backgrounded devices, including two iPhones, was not tested. Rung 2 was not tried. Rungs 1 and 2 remain unproven and never promised; this pair does not establish iPhone-with-iPhone behaviour.
+- **FACT:** the owner’s 2026-10-11 check used an iPhone 15 and an iPad (10th generation), Development builds and local test tokens, without a backend or account. In the trials with one app open the locked device completed its part on time; in most of them its step followed contact from the open device within seconds, which is consistent with the open device waking it (an inference from timing, not logged); in the second-exchange trial with the iPhone locked, the locked iPhone made its second connection on its own at about 125 s, about ten seconds before the iPad made its own. With both locked, neither approach produced two-minute evidence until a device was woken: a suspended app gets no timer. First exchanges happened just after Reset, before both devices were backgrounded.
+- **UNVERIFIED:** discovery between two backgrounded devices, including two iPhones, was not tested. Sources conflict and nothing official settles it. Rung 2 was not tried. Rungs 1 and 2 remain unproven and never promised; this pair does not establish iPhone-with-iPhone behaviour.
 - **FACT:** a comparable App Store app, Twicon (AYcanD Inc., rated 16+, requires iOS 26), states in its own listing that an exchange is most likely with the app open, likely in the background, and unlikely after force-quit, and recommends keeping the app open to be sure. It asks for Always location permission and uses location as a trigger for background detection, which this product does not do. It adds a random delay before delivery so the person met is harder to identify. It had one rating, so it is not evidence of reliability.
 
 ## 4. Reveal and notifications
@@ -182,17 +182,17 @@ Each stage gates the next.
 7. **One professional review of the privacy policy and terms,** in Japanese and English. Then public release in Japan.
 8. **Later storefronts in waves,** as in **Product**.
 
-**FACT — one-day radio check, 2026-10-11:** the owner used an iPhone 15 and an iPad (10th generation), Development builds and local test tokens, with no backend or account. Values below are seconds from Reset, iPhone first then iPad. A trial counts only when both devices show two-minute evidence for the same exchange digest.
+**FACT — one-day radio check, 2026-10-11:** the owner used an iPhone 15 and an iPad (10th generation), Development builds and local test tokens, with no backend or account. Values are seconds from trial start (Reset). Each device records two evidence values per trial, one per role; each row gives the iPhone values, then the iPad values. The two devices start their trial clocks at their own Reset, so values for the same exchange differ slightly between devices. A trial counts only when both devices show two-minute evidence for the same exchange digest.
 
 | Presence approach | Device state | Result |
 |---|---|---|
-| Held connection | Both open | Evidence at 124.4 / 127.5 s and 129.0 / 132.2 s. |
-| Held connection | iPad open, iPhone locked | Evidence at 122.6 / 123.8 s and 121.4 / 122.7 s. |
-| Held connection | iPhone open, iPad locked | Evidence at 256.8 / 261.2 s and 261.3 / 265.9 s, only as a continuation of the both-open trial without Reset; not a clean reset-then-lock trial. |
+| Held connection | Both open | Evidence: iPhone 124.4 and 127.5 s; iPad 129.0 and 132.2 s. |
+| Held connection | iPad open, iPhone locked | Evidence: iPhone 122.6 and 123.8 s; iPad 121.4 and 122.7 s. |
+| Held connection | iPhone open, iPad locked | Evidence: iPhone 256.8 and 261.2 s; iPad 261.3 and 265.9 s, only as a continuation of the both-open trial without Reset; not a clean reset-then-lock trial. |
 | Held connection | Both locked | First exchanges at about 2.3 s; checkpoint only after waking a device at about 255 s, observed duration 252.7 s. A repeat gave the same result. |
-| Second exchange | Both open | Evidence at 124.4 s on both. |
-| Second exchange | iPad open, iPhone locked | Evidence at 125.2 / 136.8 s and 123.6 / 135.3 s; the locked iPhone reconnected on its own at 125 s. |
-| Second exchange | iPhone open, iPad locked | Evidence at 126.1 / 133.0 s and 127.4 / 134.4 s. |
+| Second exchange | Both open | Evidence: iPhone about 124.4 s for both exchanges; iPad about 124.4 s for both exchanges. |
+| Second exchange | iPad open, iPhone locked | Evidence: iPhone 125.2 and 136.8 s; iPad 123.6 and 135.3 s; the locked iPhone reconnected on its own at 125 s. |
+| Second exchange | iPhone open, iPad locked | Evidence: iPhone 126.1 and 133.0 s; iPad 127.4 and 134.4 s. |
 | Second exchange | Both open, about 2 m apart for 10 minutes | Evidence at about 123.5, 256.3, 389.9 and 522.9 s; no failed or disconnected attempt. |
 | Second exchange | Both locked | First exchanges at about 1–2 s; no second exchange while locked. Waking a device after about 310 s ended attempts as expired at the 5-minute bound, without evidence. Fresh exchanges after waking gave evidence at about 445 s. |
 
@@ -292,7 +292,7 @@ The same environment and cache options with `swift build --triple arm64-apple-io
 
 ## 10. Technical design inputs
 
-These inputs come from an independent review of the v0.2 documents and belong in `design.md`. Items marked **DEFAULT** are starting values that the one-day check and the matrix may change.
+These inputs come from an independent review of the v0.2 documents and belong in `design.md`. Items marked **DEFAULT** are starting values that the matrix may change.
 
 **Defaults chosen during drafting (consistency review additions):**
 
@@ -307,14 +307,14 @@ These inputs come from an independent review of the v0.2 documents and belong in
 - **FACT:** Unit 2 uses versioned exchange frames. The peripheral-token characteristic `7AEF0002` has read and notify; no value is ever notified. The central subscribes after discovering the characteristics. The peripheral treats subscription as connected and unsubscription as disconnected: Core Bluetooth supplies no other central connect/disconnect signal to a peripheral and no way for it to force a central off. The central unsubscribes before cancelling its link, waiting at most 1 second. A read at offset 0 from a still-subscribed central with no open logical link admits a new logical connection (pull request 5).
 - No account ID, name, GitHub handle, email or link is ever sent over Bluetooth. This is a binding rule carried over from v0.2; only temporary tokens identify participants.
 - **DEFAULT:** the token format is random, server-issued in batches, with 15-minute windows.
-- **FACT:** Unit 2 built both presence approaches: held connection (接続を維持), with a checkpoint after at least 120 seconds, and second exchange (2回目の交換), completing another exchange at least 120 seconds after the first within the 5-minute attempt. The 2026-10-11 check established rungs 3 and 4 on the named device pair, not reliable both-locked evidence or background discovery.
+- **FACT:** Unit 2 built both presence approaches: held connection (接続を維持), with a checkpoint after at least 120 seconds, and second exchange (2回目の交換), completing another exchange at least 120 seconds after the first within the 5-minute attempt. The 2026-10-11 check showed rungs 3 and 4 working on the iPhone 15 and iPad (10th generation) pair, not reliable both-locked evidence or background discovery.
 - **FACT:** BluetoothTransport in EncounterDomain is a radio-primitives interface. Commands: `startDiscovery`, `stopDiscovery`, `connect`, `read`, `write`, `disconnect`, `answerRead`, `answerWrite`. Events: `availabilityChanged`, `peerObserved`, `connected`, `connectFailed`, `frameRead`, `readFailed`, `writeAcknowledged`, `writeFailed`, `disconnected`, `incomingRead`, `incomingWrite`, `restored`. EncounterEngineCore is the deterministic synchronous core; EncounterEngine is its actor runtime. Unit 2 changed the planned transport-owned exchange to this engine-owned exchange so the fake tests the real protocol.
 - **FACT:** Unit 2 implements a 10-second connect timeout, 5-second operation timeout, four active connection slots, a 5-minute presence-attempt bound and a 10-second duplicate-attempt backoff. These timings remain adjustable **DEFAULT** values except the binding 120-second ambient threshold. One-sided uploaded receipts remain candidates and expire after 48 hours; server handling arrives in Unit 3.
 
 **Owner decisions — 2026-10-11:** all three are binding, decided but **not yet implemented**, and must land before the 160-trial matrix.
 
 - Use the second exchange as the default presence approach. Keep the held connection selectable in S22 until the matrix’s iPhone-with-iPhone trials confirm the choice. Reasons: both approaches passed rungs 3 and 4 on the tested pair; the engine gives a phone four connection slots and a held connection occupies one for two minutes per peer; the second exchange is the only approach with a possible route for locked phones. Accepted trade-off: it proves two completed exchanges at least 120 seconds apart, not continuous presence; leaving and returning within the 5-minute attempt still counts. **FACT:** the code default remains held connection; this decision is not yet implemented.
-- After two-minute evidence with a peer, start no new exchange with that peer for 15 minutes (one token window); Reset clears the pause. Reason: a pair currently repeats about every 131 seconds, indefinitely storing receipts and using the radio. A longer pause is impossible because the app keeps no lasting identifier of a peer. **FACT:** the engine still has only its 10-second backoff; the 15-minute pause is not yet implemented.
+- After two-minute evidence with a peer, start no new exchange with that peer for 15 minutes (one token window); Reset clears the pause. Reason: a pair currently repeats about every 131 to 133 seconds, indefinitely storing receipts and using the radio. A longer pause is impossible because the app keeps no lasting identifier of a peer. **FACT:** the engine still has only its 10-second backoff; the 15-minute pause is not yet implemented.
 - Count the 5-second refusal of a returning central from the start of that central’s previous attempt, rather than its end. Reason: an attacker remains limited to one attempt per 5 seconds per handle, while an honest peer whose attempt lasted longer is accepted at once. **FACT:** the code still counts from the end of an attempt without evidence; this decision is not yet implemented. Its diff requires a security review. The pause and refusal changes are prerequisites because current behaviour distorts matrix measurements.
 
 **UNVERIFIED:** asking iOS for the second connection after a delay with `CBConnectPeripheralOptionStartDelayKey` might let the system wake a locked phone. This is undecided and not built. Showing in S22 which first exchange an evidence entry completes is also undecided and not built.
