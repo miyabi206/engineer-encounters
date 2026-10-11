@@ -69,3 +69,5 @@
 "startLaunch" = "App launch";
 "approachChanged" = "Presence approach changed during trial";
 "attemptReset" = "Ended by reset";
+"droppedExchangeCount" = "Exchange entries dropped beyond limit";
+"droppedEvidenceCount" = "Evidence entries dropped beyond limit";

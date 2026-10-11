@@ -146,6 +146,8 @@ struct DiagnosticsView: View {
         if trial.presenceApproachChanged { Text(text("approachChanged")) }
         row("discoveryElapsed", trial.discoveryElapsedSeconds.map(seconds) ?? state(trial.discoveryState))
         row("peers", String(trial.distinctPeerCount))
+        row("droppedExchangeCount", String(trial.droppedExchangeCount))
+        row("droppedEvidenceCount", String(trial.droppedEvidenceCount))
         if trial.exchanges.isEmpty { row("exchangeElapsed", state(trial.exchangeState)) }
         ForEach(Array(trial.exchanges.enumerated()), id: \.offset) { _, exchange in
             VStack(alignment: .leading) {

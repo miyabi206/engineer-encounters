@@ -106,6 +106,112 @@ final class DiagnosticsTests: XCTestCase {
     }
 
     @MainActor
+    func testEntryCapsKeepEarliestMeasurementsAndPersistIndependentOverflowCounts() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        fixture.recorder.beginIfNeeded(metadata: fixture.metadata)
+        for index in 0..<200 {
+            fixture.clock.seconds = Double(index)
+            fixture.recorder.record(.exchangeCompleted(role: .central, nonceDigest: "exchange-\(index)"))
+            fixture.recorder.record(.evidenceReached(role: .peripheral, nonceDigest: "evidence-\(index)", observedDuration: 120))
+        }
+        let full = try fixture.read()[0]
+        XCTAssertEqual(full.exchanges.count, 200)
+        XCTAssertEqual(full.evidence.count, 200)
+        XCTAssertEqual(full.droppedExchangeCount, 0)
+        XCTAssertEqual(full.droppedEvidenceCount, 0)
+        fixture.clock.seconds = 200
+        fixture.recorder.record(.exchangeCompleted(role: .central, nonceDigest: "overflow"))
+        XCTAssertEqual(try fixture.read()[0].droppedExchangeCount, 1)
+        XCTAssertEqual(try fixture.read()[0].droppedEvidenceCount, 0)
+        for index in 0..<9 {
+            fixture.clock.seconds = Double(201 + index)
+            if index < 4 {
+                fixture.recorder.record(.exchangeCompleted(role: .central, nonceDigest: "overflow-\(index)"))
+            }
+            fixture.recorder.record(.evidenceReached(role: .peripheral, nonceDigest: "overflow-\(index)", observedDuration: 120))
+        }
+        let trial = try fixture.read()[0]
+        XCTAssertEqual(trial.exchanges, full.exchanges)
+        XCTAssertEqual(trial.evidence, full.evidence)
+        XCTAssertEqual(trial.exchanges.first?.exchangeDigest, "exchange-0")
+        XCTAssertEqual(trial.evidence.first?.exchangeDigest, "evidence-0")
+        XCTAssertEqual(trial.exchanges.first?.elapsedSeconds, 0)
+        XCTAssertEqual(trial.evidence.first?.elapsedSeconds, 0)
+        XCTAssertEqual(trial.droppedExchangeCount, 5)
+        XCTAssertEqual(trial.droppedEvidenceCount, 9)
+        XCTAssertEqual(fixture.log.records.first, trial)
+        let relaunched = TrialLog(fileURL: fixture.log.fileURL, now: { fixture.wall.date })
+        XCTAssertEqual(relaunched.records[0].droppedExchangeCount, 5)
+        XCTAssertEqual(relaunched.records[0].droppedEvidenceCount, 9)
+        XCTAssertEqual(relaunched.records[0].exchanges, full.exchanges)
+        XCTAssertEqual(relaunched.records[0].evidence, full.evidence)
+    }
+
+    @MainActor
+    func testRecordCapDropsOldestClosedTrialsAndPreservesOpenTrialAndOrdinal() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        let trials = (1...206).map { ordinal in
+            TrialRecord(ordinal: ordinal, creationDate: TrialRecord.calendarDate(fixture.wall.date),
+                        metadata: fixture.metadata, isOpen: ordinal == 1)
+        }
+        XCTAssertTrue(fixture.log.update { $0 = trials })
+        let kept = try fixture.read()
+        XCTAssertEqual(kept.count, 200)
+        XCTAssertEqual(kept.map(\.ordinal), [1] + Array(8...206))
+        XCTAssertEqual(kept.first?.id, trials[0].id)
+        XCTAssertEqual(kept.filter(\.isOpen).map(\.id), [trials[0].id])
+        XCTAssertEqual(fixture.log.records, kept)
+        // Starting a new trial closes the previously protected one and makes
+        // it the oldest eligible record, without reusing a dropped ordinal.
+        fixture.recorder.beginIfNeeded(metadata: fixture.metadata)
+        XCTAssertEqual(try fixture.read().map(\.ordinal), Array(8...207))
+        XCTAssertEqual(try fixture.read().filter(\.isOpen).map(\.ordinal), [207])
+    }
+
+    @MainActor
+    func testLegacyLogLoadsWithoutCountersAndCapsOversizedEntriesAndRecords() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        var trials = (1...205).map { ordinal in
+            TrialRecord(ordinal: ordinal, creationDate: TrialRecord.calendarDate(fixture.wall.date),
+                        metadata: fixture.metadata)
+        }
+        trials[204].exchanges = (0..<203).map {
+            TrialExchange(role: .central, exchangeDigest: "exchange-\($0)", elapsedSeconds: Double($0))
+        }
+        trials[204].evidence = (0..<204).map {
+            TrialEvidence(role: .peripheral, exchangeDigest: "evidence-\($0)",
+                          elapsedSeconds: Double($0), observedDurationSeconds: 120)
+        }
+        let encoded = try JSONEncoder().encode(trials)
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [[String: Any]])
+        for index in legacy.indices {
+            legacy[index].removeValue(forKey: "droppedExchangeCount")
+            legacy[index].removeValue(forKey: "droppedEvidenceCount")
+        }
+        let data = try JSONSerialization.data(withJSONObject: legacy)
+        let decoded = try JSONDecoder().decode([TrialRecord].self, from: data)
+        XCTAssertTrue(decoded.allSatisfy { $0.droppedExchangeCount == 0 && $0.droppedEvidenceCount == 0 })
+        try data.write(to: fixture.log.fileURL)
+        let relaunched = TrialLog(fileURL: fixture.log.fileURL, now: { fixture.wall.date })
+        XCTAssertEqual(relaunched.state, .ready)
+        XCTAssertEqual(relaunched.records.map(\.ordinal), Array(6...205))
+        XCTAssertEqual(relaunched.nextOrdinal, 206)
+        XCTAssertTrue(relaunched.records.allSatisfy { !$0.isOpen })
+        let capped = try XCTUnwrap(relaunched.records.last)
+        XCTAssertEqual(capped.exchanges, Array(trials[204].exchanges.prefix(200)))
+        XCTAssertEqual(capped.evidence, Array(trials[204].evidence.prefix(200)))
+        XCTAssertEqual(capped.droppedExchangeCount, 3)
+        XCTAssertEqual(capped.droppedEvidenceCount, 4)
+        XCTAssertEqual(try fixture.read(), relaunched.records)
+        XCTAssertTrue(relaunched.prune())
+        XCTAssertEqual(try fixture.read().last?.droppedExchangeCount, 3)
+        XCTAssertEqual(try fixture.read().last?.droppedEvidenceCount, 4)
+    }
+
+    @MainActor
     func testPruningOnWriteAndLoadAndRelaunchClosesPendingTrial() throws {
         let fixture = try Fixture()
         defer { fixture.cleanUp() }
@@ -143,7 +249,7 @@ final class DiagnosticsTests: XCTestCase {
         let records = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
         let record = try XCTUnwrap(records.first)
         XCTAssertEqual(Set(record.keys), Set(["id", "ordinal", "startReason", "presenceApproachChanged", "creationDate", "metadata", "isOpen", "discoveryElapsedSeconds",
-            "distinctPeerCount", "exchanges", "evidence", "attemptEnds", "serverConfirmation"]))
+            "distinctPeerCount", "exchanges", "evidence", "droppedExchangeCount", "droppedEvidenceCount", "attemptEnds", "serverConfirmation"]))
         let metadata = try XCTUnwrap(record["metadata"] as? [String: Any])
         XCTAssertEqual(Set(metadata.keys), Set(["buildKind", "appVersion", "appBuild", "iOSVersion", "deviceModel",
             "presenceApproach", "participationEnabled", "bluetoothAvailability", "batteryLevel"]))
@@ -308,7 +414,9 @@ final class DiagnosticsTests: XCTestCase {
             ("approach", "存在確認の方式", "Presence approach"),
             ("share", "試行ログを共有", "Share trial log"),
             ("attemptReset", "リセットによる終了", "Ended by reset"),
-            ("startLaunch", "アプリ起動", "App launch")
+            ("startLaunch", "アプリ起動", "App launch"),
+            ("droppedExchangeCount", "上限を超えて記録しなかった交換の数", "Exchange entries dropped beyond limit"),
+            ("droppedEvidenceCount", "上限を超えて記録しなかった証拠の数", "Evidence entries dropped beyond limit")
         ] {
             XCTAssertEqual(ja.localizedString(forKey: key, value: nil, table: "Diagnostics"), japanese)
             XCTAssertEqual(en.localizedString(forKey: key, value: nil, table: "Diagnostics"), english)

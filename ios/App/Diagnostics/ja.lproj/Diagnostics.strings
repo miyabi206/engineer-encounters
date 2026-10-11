@@ -69,3 +69,5 @@
 "startLaunch" = "アプリ起動";
 "approachChanged" = "試行中に存在確認の方式を変更";
 "attemptReset" = "リセットによる終了";
+"droppedExchangeCount" = "上限を超えて記録しなかった交換の数";
+"droppedEvidenceCount" = "上限を超えて記録しなかった証拠の数";

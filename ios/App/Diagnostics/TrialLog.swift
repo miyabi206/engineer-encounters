@@ -43,6 +43,7 @@ enum TrialStartReason: String, Codable {
 }
 
 struct TrialRecord: Codable, Equatable, Identifiable {
+    static let entryLimit = 200
     var id = UUID()
     // The shared source file contains a calendar date only, never a time of day.
     // Retention uses the start of the device-local day, conservatively shortening seven days.
@@ -56,12 +57,25 @@ struct TrialRecord: Codable, Equatable, Identifiable {
     var distinctPeerCount = 0
     var exchanges: [TrialExchange] = []
     var evidence: [TrialEvidence] = []
+    var droppedExchangeCount = 0
+    var droppedEvidenceCount = 0
     var attemptEnds: [TrialAttemptEnd] = []
     let serverConfirmation: TrialMeasurementState = .unavailable
 
     enum CodingKeys: String, CodingKey {
         case id, ordinal, startReason, presenceApproachChanged, creationDate, metadata, isOpen, discoveryElapsedSeconds, distinctPeerCount
-        case exchanges, evidence, attemptEnds, serverConfirmation
+        case exchanges, evidence, droppedExchangeCount, droppedEvidenceCount, attemptEnds, serverConfirmation
+    }
+
+    mutating func capEntries() {
+        if exchanges.count > Self.entryLimit {
+            droppedExchangeCount += exchanges.count - Self.entryLimit
+            exchanges.removeLast(exchanges.count - Self.entryLimit)
+        }
+        if evidence.count > Self.entryLimit {
+            droppedEvidenceCount += evidence.count - Self.entryLimit
+            evidence.removeLast(evidence.count - Self.entryLimit)
+        }
     }
 
     var discoveryState: TrialMeasurementState {
@@ -91,10 +105,32 @@ struct TrialRecord: Codable, Equatable, Identifiable {
     }
 }
 
+extension TrialRecord {
+    // Keep the array-based log format; older records have no overflow counters.
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        ordinal = try values.decode(Int.self, forKey: .ordinal)
+        startReason = try values.decode(TrialStartReason.self, forKey: .startReason)
+        presenceApproachChanged = try values.decode(Bool.self, forKey: .presenceApproachChanged)
+        creationDate = try values.decode(String.self, forKey: .creationDate)
+        metadata = try values.decode(TrialMetadata.self, forKey: .metadata)
+        isOpen = try values.decode(Bool.self, forKey: .isOpen)
+        discoveryElapsedSeconds = try values.decodeIfPresent(TimeInterval.self, forKey: .discoveryElapsedSeconds)
+        distinctPeerCount = try values.decode(Int.self, forKey: .distinctPeerCount)
+        exchanges = try values.decode([TrialExchange].self, forKey: .exchanges)
+        evidence = try values.decode([TrialEvidence].self, forKey: .evidence)
+        droppedExchangeCount = try values.decodeIfPresent(Int.self, forKey: .droppedExchangeCount) ?? 0
+        droppedEvidenceCount = try values.decodeIfPresent(Int.self, forKey: .droppedEvidenceCount) ?? 0
+        attemptEnds = try values.decode([TrialAttemptEnd].self, forKey: .attemptEnds)
+    }
+}
+
 @MainActor
 final class TrialLog: ObservableObject {
     enum State { case loading, ready, failed }
     static let retention: TimeInterval = 7 * 24 * 60 * 60
+    static let recordLimit = 200
     let fileURL: URL
     @Published private(set) var records: [TrialRecord] = []
     @Published private(set) var state: State = .loading
@@ -186,6 +222,15 @@ final class TrialLog: ObservableObject {
     private func write() throws {
         let cutoff = now().addingTimeInterval(-Self.retention)
         records.removeAll { ($0.retentionDate.map { $0 < cutoff }) ?? true }
+        // Records are in trial-start order. Preserve the open trial even if it
+        // precedes closed ones, and enforce caps before any fallible file I/O.
+        var excess = max(0, records.count - Self.recordLimit)
+        records.removeAll { record in
+            guard excess > 0, !record.isOpen else { return false }
+            excess -= 1
+            return true
+        }
+        for index in records.indices { records[index].capEntries() }
         let directory = fileURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
             attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
