@@ -155,7 +155,7 @@ final class EventAdmissionTests: XCTestCase {
         XCTAssertTrue(links.subscribe(refused, backlogCount: backlog.count))
         backlog.append(.connected(.init(peer: refused, role: .peripheral)))
         for peer in peers {
-            XCTAssertFalse(links.acceptsRequests(peer)) // Both ATT callbacks refuse unknown centrals.
+            XCTAssertFalse(links.acceptsRequests(peer)) // Writes and continuations still need an open link.
             let closed = links.close(peer), unsubscribed = links.unsubscribe(peer)
             XCTAssertFalse(closed)
             XCTAssertFalse(unsubscribed)
@@ -261,6 +261,184 @@ final class EventAdmissionTests: XCTestCase {
         XCTAssertFalse(snapshots.begin(peers[0], request: .init(3)))
         snapshots.drop(peers[0])
         XCTAssertTrue(snapshots.begin(refused, request: .init(1)))
+    }
+}
+
+final class PeripheralReadAdmissionTests: XCTestCase {
+    func testSubscribedCentralCanReadmitAfterLogicalClose() {
+        let peer = PeerHandle()
+        var links = PeripheralLinks()
+        XCTAssertTrue(links.subscribe(peer))
+        XCTAssertTrue(links.close(peer))
+        XCTAssertFalse(links.acceptsRequests(peer))
+        XCTAssertEqual(links.admitRead(peer, offset: 0, isSubscribed: true, backlogCount: 0), .connected)
+        XCTAssertTrue(links.acceptsRequests(peer))
+        XCTAssertEqual(links.count, 1)
+        XCTAssertEqual(links.admitRead(peer, offset: 0, isSubscribed: true, backlogCount: 0), .existing)
+        XCTAssertFalse(links.subscribe(peer)) // A late subscription cannot duplicate connected.
+        XCTAssertTrue(links.unsubscribe(peer))
+        XCTAssertFalse(links.unsubscribe(peer))
+    }
+
+    func testUnsubscribedCentralAndUnknownReadContinuationsStayRefused() {
+        let peer = PeerHandle()
+        var links = PeripheralLinks()
+        for subscribed in [false, true] {
+            for offset in [-1, 1, Int.max] {
+                XCTAssertEqual(links.admitRead(peer, offset: offset, isSubscribed: subscribed, backlogCount: 0), .refused)
+            }
+        }
+        XCTAssertEqual(links.admitRead(peer, offset: 0, isSubscribed: false, backlogCount: 0), .refused)
+        XCTAssertEqual(links.count, 0)
+        XCTAssertFalse(links.acceptsRequests(peer)) // Writes still have no admission path.
+        XCTAssertFalse(links.unsubscribe(peer))
+    }
+
+    func testReadAdmissionSharesSubscriptionLinkLimitAndFreesSlotOnClose() {
+        let peers = (0..<16).map { _ in PeerHandle() }, returning = PeerHandle()
+        var links = PeripheralLinks()
+        for peer in peers { XCTAssertTrue(links.subscribe(peer)) }
+        XCTAssertEqual(links.admitRead(returning, offset: 0, isSubscribed: true, backlogCount: 0), .refused)
+        XCTAssertEqual(links.count, 16)
+        XCTAssertFalse(links.acceptsRequests(returning))
+        XCTAssertFalse(links.unsubscribe(returning))
+        XCTAssertTrue(links.close(peers[0]))
+        XCTAssertEqual(links.admitRead(returning, offset: 0, isSubscribed: true, backlogCount: 0), .connected)
+        XCTAssertEqual(links.count, 16)
+        XCTAssertEqual(links.admitRead(returning, offset: 1, isSubscribed: true, backlogCount: 300), .existing)
+    }
+
+    func testReadAdmissionSharesSubscriptionBacklogRuleWithoutTrackingRefusals() {
+        let peer = PeerHandle()
+        var links = PeripheralLinks()
+        for count in [256, 257, 300] {
+            XCTAssertEqual(links.admitRead(peer, offset: 0, isSubscribed: true, backlogCount: count), .refused)
+            XCTAssertEqual(links.count, 0)
+            XCTAssertFalse(links.unsubscribe(peer))
+        }
+        XCTAssertEqual(links.admitRead(peer, offset: 0, isSubscribed: true, backlogCount: 255), .connected)
+        XCTAssertEqual(links.admitRead(peer, offset: 0, isSubscribed: true, backlogCount: 256), .existing)
+        XCTAssertTrue(links.unsubscribe(peer))
+        XCTAssertFalse(links.unsubscribe(peer))
+    }
+
+    func testReadmissionEmitsConnectedBeforeIncomingReadAndOnlyOneEnding() {
+        let peer = PeerHandle(), id = BluetoothRequestID(1)
+        let connection = BluetoothConnection(peer: peer, role: .peripheral)
+        let now = Date(timeIntervalSince1970: 100)
+        var links = PeripheralLinks(), snapshots = ReadSnapshots(), writes = PeripheralRequests()
+        var backlog = EventBacklog()
+        XCTAssertTrue(links.subscribe(peer))
+        XCTAssertTrue(snapshots.begin(peer, request: .init(0)))
+        XCTAssertEqual(snapshots.answer(peer, request: .init(0), snapshot:
+            .init(frame: Data([1, 2]), validUntil: now.addingTimeInterval(10)), now: now), Data([1, 2]))
+        XCTAssertTrue(writes.begin(peer, request: .init(0)))
+        if links.close(peer) {
+            snapshots.drop(peer)
+            writes.drop(peer)
+        }
+        XCTAssertEqual(links.admitRead(peer, offset: 0, isSubscribed: true, backlogCount: backlog.count), .connected)
+        backlog.append(.connected(connection))
+        XCTAssertNil(snapshots.continuation(peer, offset: 1, now: now))
+        XCTAssertFalse(writes.contains(peer))
+        XCTAssertTrue(snapshots.begin(peer, request: id))
+        backlog.append(.incomingRead(peer, id))
+        XCTAssertEqual(links.admitRead(peer, offset: 0, isSubscribed: true, backlogCount: backlog.count), .existing)
+        XCTAssertFalse(snapshots.begin(peer, request: .init(2)))
+        XCTAssertFalse(links.subscribe(peer))
+        for _ in 0..<2 {
+            snapshots.drop(peer)
+            if links.unsubscribe(peer) { backlog.append(.disconnected(connection)) }
+        }
+        XCTAssertNil(snapshots.answer(peer, request: id, snapshot:
+            .init(frame: Data([3, 4]), validUntil: now.addingTimeInterval(10)), now: now))
+        XCTAssertEqual(backlog.next(), .connected(connection))
+        XCTAssertEqual(backlog.next(), .incomingRead(peer, id))
+        XCTAssertEqual(backlog.next(), .disconnected(connection))
+        XCTAssertNil(backlog.next())
+    }
+}
+
+final class CentralTeardownTests: XCTestCase {
+    func testReadyDisconnectEndsImmediatelyThenUnsubscribesBeforeCancellingOnCallback() {
+        let peer = PeerHandle()
+        let connection = BluetoothConnection(peer: peer, role: .central)
+        var links = CentralLinks(), teardown = CentralTeardown(), backlog = EventBacklog()
+        links.begin(peer)
+        XCTAssertEqual(links.ready(peer), .connected(.init(peer: peer, role: .central)))
+        let wasReady = links.state(peer) == .ready
+        backlog.append(links.disconnect(peer))
+        XCTAssertEqual(teardown.begin(wasReady: wasReady, poweredOn: true, connected: true, notifying: true),
+                       [.unsubscribe, .scheduleTimeout(after: 1)])
+        XCTAssertEqual(backlog.next(), .disconnected(connection))
+        XCTAssertNil(backlog.next()) // No callback is needed to acknowledge the command.
+        XCTAssertNil(links.ready(peer))
+        XCTAssertEqual(teardown.notificationStateUpdated(), [.cancelTimeout, .cancel])
+        XCTAssertEqual(teardown.notificationStateUpdated(), [])
+        XCTAssertEqual(teardown.timeout(), [])
+        XCTAssertEqual(teardown.end(), [])
+        XCTAssertNil(links.end(peer))
+        XCTAssertNil(links.end(peer))
+    }
+
+    func testOneSecondBoundCancelsOnceEvenWhenNotificationCallbackArrivesLate() {
+        var teardown = CentralTeardown()
+        XCTAssertEqual(teardown.begin(wasReady: true, poweredOn: true, connected: true, notifying: true),
+                       [.unsubscribe, .scheduleTimeout(after: 1)])
+        XCTAssertEqual(teardown.timeout(), [.cancelTimeout, .cancel])
+        XCTAssertEqual(teardown.timeout(), [])
+        XCTAssertEqual(teardown.notificationStateUpdated(), [])
+        XCTAssertEqual(teardown.begin(wasReady: true, poweredOn: true, connected: true, notifying: true), [])
+        XCTAssertTrue(teardown.blocksRedial(peripheralDisconnected: false))
+        XCTAssertEqual(teardown.end(), [])
+    }
+
+    func testImmediateCancellationUnlessReadyPoweredConnectedAndNotifying() {
+        for ready in [false, true] {
+            for poweredOn in [false, true] {
+                for connected in [false, true] {
+                    for notifying in [false, true] {
+                        if ready && poweredOn && connected && notifying { continue }
+                        var teardown = CentralTeardown()
+                        XCTAssertEqual(teardown.begin(wasReady: ready, poweredOn: poweredOn,
+                                                      connected: connected, notifying: notifying), [.cancel])
+                        XCTAssertEqual(teardown.notificationStateUpdated(), [])
+                        XCTAssertEqual(teardown.timeout(), [])
+                        XCTAssertEqual(teardown.begin(wasReady: ready, poweredOn: poweredOn,
+                                                      connected: connected, notifying: notifying), [])
+                        XCTAssertEqual(teardown.end(), [])
+                    }
+                }
+            }
+        }
+    }
+
+    func testRedialStaysBlockedDuringUnsubscribeEvenIfPeripheralAlreadyReportsDisconnected() {
+        var teardown = CentralTeardown()
+        _ = teardown.begin(wasReady: true, poweredOn: true, connected: true, notifying: true)
+        XCTAssertTrue(teardown.blocksRedial(peripheralDisconnected: false))
+        XCTAssertTrue(teardown.blocksRedial(peripheralDisconnected: true))
+        XCTAssertEqual(teardown.begin(wasReady: true, poweredOn: true, connected: true, notifying: true), [])
+        _ = teardown.notificationStateUpdated()
+        XCTAssertTrue(teardown.blocksRedial(peripheralDisconnected: false))
+        XCTAssertFalse(teardown.blocksRedial(peripheralDisconnected: true))
+        _ = teardown.end()
+        XCTAssertFalse(teardown.blocksRedial(peripheralDisconnected: false))
+    }
+
+    func testTerminalCallbackOrRadioLossCancelsPendingTimeoutWithoutAnotherCancel() {
+        let peer = PeerHandle()
+        var links = CentralLinks(), teardown = CentralTeardown()
+        links.begin(peer, ready: true)
+        XCTAssertEqual(teardown.begin(wasReady: true, poweredOn: true, connected: true, notifying: true),
+                       [.unsubscribe, .scheduleTimeout(after: 1)])
+        XCTAssertEqual(links.end(peer), .disconnected(.init(peer: peer, role: .central)))
+        XCTAssertEqual(teardown.end(), [.cancelTimeout])
+        XCTAssertNil(links.end(peer))
+        XCTAssertEqual(teardown.end(), [])
+        XCTAssertEqual(teardown.timeout(), [])
+        XCTAssertEqual(teardown.notificationStateUpdated(), [])
+        XCTAssertFalse(teardown.blocksRedial(peripheralDisconnected: false))
     }
 }
 

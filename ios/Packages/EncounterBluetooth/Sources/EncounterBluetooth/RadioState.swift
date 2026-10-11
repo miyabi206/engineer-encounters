@@ -142,7 +142,8 @@ struct ReadSnapshots {
 }
 
 struct PeripheralLinks {
-    // Only open logical links are tracked; unknown centrals cannot make requests.
+    enum ReadAdmission: Equatable { case refused, existing, connected }
+    // Only open logical links are tracked; subscription truth stays with the radio.
     private var subscriptions: Set<PeerHandle> = []
 
     var openPeers: [PeerHandle] { Array(subscriptions) }
@@ -157,6 +158,13 @@ struct PeripheralLinks {
         return true
     }
 
+    mutating func admitRead(_ peer: PeerHandle, offset: Int, isSubscribed: Bool,
+                            backlogCount: Int) -> ReadAdmission {
+        if acceptsRequests(peer) { return .existing }
+        guard offset == 0, isSubscribed, subscribe(peer, backlogCount: backlogCount) else { return .refused }
+        return .connected
+    }
+
     mutating func unsubscribe(_ peer: PeerHandle) -> Bool {
         subscriptions.remove(peer) != nil
     }
@@ -169,6 +177,45 @@ struct PeripheralLinks {
         let peers = openPeers
         subscriptions.removeAll()
         return peers
+    }
+}
+
+/// Physical teardown is independent of the logical link's immediate ending event.
+struct CentralTeardown {
+    enum Action: Equatable {
+        case unsubscribe, cancel, cancelTimeout
+        case scheduleTimeout(after: TimeInterval)
+    }
+    private enum Phase { case open, unsubscribing, cancelling, ended }
+    private var phase: Phase = .open
+
+    mutating func begin(wasReady: Bool, poweredOn: Bool, connected: Bool, notifying: Bool) -> [Action] {
+        guard phase == .open else { return [] }
+        if wasReady, poweredOn, connected, notifying {
+            phase = .unsubscribing
+            return [.unsubscribe, .scheduleTimeout(after: 1)]
+        }
+        phase = .cancelling
+        return [.cancel]
+    }
+
+    mutating func notificationStateUpdated() -> [Action] { finishUnsubscribe() }
+    mutating func timeout() -> [Action] { finishUnsubscribe() }
+
+    mutating func end() -> [Action] {
+        let actions: [Action] = phase == .unsubscribing ? [.cancelTimeout] : []
+        phase = .ended
+        return actions
+    }
+
+    func blocksRedial(peripheralDisconnected: Bool) -> Bool {
+        phase == .unsubscribing || (phase == .cancelling && !peripheralDisconnected)
+    }
+
+    private mutating func finishUnsubscribe() -> [Action] {
+        guard phase == .unsubscribing else { return [] }
+        phase = .cancelling
+        return [.cancelTimeout, .cancel]
     }
 }
 
