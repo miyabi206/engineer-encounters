@@ -283,29 +283,61 @@ public actor SessionManager: CustomStringConvertible, CustomDebugStringConvertib
         return cached
     }
 
-    /// Unlinks only the live GitHub identity through Auth; never clears the session.
+    /// Unlinks all live GitHub identities through Auth; never clears the session.
     public func unlinkGitHubIdentity() async throws -> GitHubUnlinkOutcome {
         let authorization = try await authorization()
         let userRequest = try AuthRequest(path: "user", method: "GET", body: Data())
         let response = try await authenticatedAuth(userRequest, authorization: authorization)
         guard (200..<300).contains(response.statusCode) else { throw BackendError.httpFailure(statusCode: response.statusCode) }
         struct User: Decodable {
-            struct Identity: Decodable { let identity_id: UUID; let provider: String }
+            struct Identity: Decodable {
+                let identity_id: UUID
+                let provider: String
+                let created_at: Date?
+            }
             let id: UUID
             let identities: [Identity]
         }
-        guard let user = try? JSONDecoder().decode(User.self, from: response.data),
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let value = try decoder.singleValueContainer().decode(String.self)
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let date = formatter.date(from: value) { return date }
+            formatter.formatOptions = [.withInternetDateTime]
+            guard let date = formatter.date(from: value) else { throw BackendError.invalidResponse }
+            return date
+        }
+        guard let user = try? decoder.decode(User.self, from: response.data),
               user.id == authorization.session.userID else { throw BackendError.invalidResponse }
-        guard let identity = user.identities.first(where: { $0.provider == "github" }) else { return .notLinked }
-        let unlink = try AuthRequest(path: "user/identities/" + identity.identity_id.uuidString.lowercased(),
-                                     method: "DELETE", body: Data())
-        let deleted = try await authenticatedAuth(unlink, authorization: authorization)
-        if (200..<300).contains(deleted.statusCode) { return .unlinked }
-        struct Failure: Decodable { let code: String }
-        if [400, 422].contains(deleted.statusCode),
-           let failure = try? JSONDecoder().decode(Failure.self, from: deleted.data),
-           failure.code == "single_identity_not_deletable" { return .lastIdentityRetained }
-        throw BackendError.httpFailure(statusCode: deleted.statusCode)
+        let identities = user.identities.filter { $0.provider == "github" }.sorted {
+            let left = $0.created_at ?? .distantFuture
+            let right = $1.created_at ?? .distantFuture
+            if left != right { return left < right }
+            return $0.identity_id.uuidString < $1.identity_id.uuidString
+        }
+        guard !identities.isEmpty else { return .notLinked }
+        struct Failure: Decodable {
+            let code: String?
+            let error_code: String?
+            enum CodingKeys: String, CodingKey { case code, error_code }
+            init(from decoder: any Decoder) throws {
+                let fields = try decoder.container(keyedBy: CodingKeys.self)
+                code = try? fields.decode(String.self, forKey: .code)
+                error_code = try? fields.decode(String.self, forKey: .error_code)
+            }
+        }
+        for identity in identities {
+            let unlink = try AuthRequest(path: "user/identities/" + identity.identity_id.uuidString.lowercased(),
+                                         method: "DELETE", body: Data())
+            let deleted = try await authenticatedAuth(unlink, authorization: authorization)
+            if (200..<300).contains(deleted.statusCode) { continue }
+            if [400, 422].contains(deleted.statusCode),
+               let failure = try? JSONDecoder().decode(Failure.self, from: deleted.data),
+               (failure.error_code ?? failure.code) == "single_identity_not_deletable" { return .lastIdentityRetained }
+            throw BackendError.httpFailure(statusCode: deleted.statusCode)
+        }
+        return .unlinked
     }
 
     private func authenticatedAuth(_ auth: AuthRequest, authorization: Authorization) async throws -> HTTPResponse {

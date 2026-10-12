@@ -8,6 +8,28 @@ import XCTest
 
 @MainActor
 final class LinkAdapterTests: XCTestCase {
+    func testUnauthorizedLinkActionsSignOutWhenRefreshClearsCredentialsAndReadiness() async throws {
+        let actions: [@MainActor (LinkActions) async throws -> Void] = [
+            { _ = try await $0.loadLinks() }, { _ = try await $0.listRepositories(1) },
+            { _ = try await $0.connectGitHub() }]
+        for action in actions {
+            let store = InMemorySessionStore(session: try appBackendTestSession())
+            let transport = AppBackendTransport([appAccountOK(), HTTPResponse(data: Data(), statusCode: 401),
+                linkResponse(["code": 400, "error_code": "refresh_token_not_found"], status: 400)])
+            let composition = try linkComposition(transport: transport, store: store)
+            await composition.waitForRestoration()
+            XCTAssertTrue(composition.account.canRefreshSession())
+            do { try await action(composition.linkAdapter.actions()); XCTFail("Dead refresh must reject action") }
+            catch { XCTAssertEqual(error as? LinkActionError, .init(code: .unavailable, details: ["not_authenticated"])) }
+            XCTAssertEqual(composition.account.state, .signedOut)
+            let saved = try await store.load()
+            XCTAssertNil(saved)
+            let requests = await transport.recorded()
+            XCTAssertEqual(requests.count, 3)
+            XCTAssertEqual(requests.last?.url?.lastPathComponent, "token")
+        }
+    }
+
     func testAllActionsMapWireValuesAndSendOnlyContractParameters() async throws {
         let transport = AppBackendTransport([appAccountOK(), linkResponse([linkJSON()]),
             linkResponse(connectionJSON()), linkResponse(["repositories": [repositoryJSON()], "next_page": 2]),

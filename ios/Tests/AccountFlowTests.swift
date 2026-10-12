@@ -102,6 +102,61 @@ final class AccountFlowTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(flow.settings).canEnableDiscovery)
     }
 
+    func testReadinessChangeRetainsSettingsDraftsCatalogueAndSaveInFlight() async throws {
+        let profile = appLinkedPresentationProfile()
+        var unready = profile
+        unready.declarationsRecorded = false
+        var saved = unready
+        saved.minimumSharedInterests = 5
+        let catalogue = HTTPResponse(data: Data(#"[{"interest_id":"a","label_ja":"技術","label_en":"Technology","display_order":1}]"#.utf8), statusCode: 200)
+        let transport = ControlledAppBackendTransport([
+            "register_time_zone": [.response(appAccountOK())],
+            "get_own_profile": [.response(appOwnProfileResponse(profile)), .response(appOwnProfileResponse(saved))],
+            "list_interests": [.response(catalogue)],
+            "set_minimum_shared_interests": [.held]
+        ])
+        let composition = appFlowComposition(transport: transport, session: try appBackendTestSession())
+        let flow = AccountFlowModel(composition: composition)
+        await flow.start()
+        let settings = try XCTUnwrap(flow.settings)
+        await settings.loadInterests()
+        let interests = settings.interests
+        XCTAssertTrue(settings.hasLoadedInterests)
+        XCTAssertEqual(interests.count, 1)
+        settings.introduction = "Unsaved introduction"
+        settings.visibility[.introduction] = .private
+        settings.minimumSharedInterests = 5
+        let saving = Task { await settings.saveMatching() }
+        try await appBackendEventually { await transport.isHeld("set_minimum_shared_interests") }
+        composition.account.publishProfile(unready, stale: false)
+        XCTAssertTrue(flow.settings === settings)
+        XCTAssertFalse(settings.allowsDiscoveryActivation)
+        XCTAssertTrue(settings.isSaving)
+        XCTAssertEqual(settings.introduction, "Unsaved introduction")
+        XCTAssertEqual(settings.visibility[.introduction], .private)
+        XCTAssertEqual(settings.interests, interests)
+        await transport.release("set_minimum_shared_interests", with: appAccountOK())
+        await saving.value
+        XCTAssertTrue(flow.settings === settings)
+        XCTAssertFalse(settings.isSaving)
+        XCTAssertEqual(settings.profile.minimumSharedInterests, 5)
+        XCTAssertNil(settings.errors[.discovery])
+        XCTAssertNil(settings.failedOperations[.discovery])
+        var ready = saved
+        ready.declarationsRecorded = true
+        ready.prerequisites.link = false
+        composition.account.publishProfile(ready, stale: false)
+        XCTAssertTrue(flow.settings === settings)
+        XCTAssertTrue(settings.allowsDiscoveryActivation)
+        XCTAssertFalse(settings.canEnableDiscovery)
+        XCTAssertEqual(settings.introduction, "Unsaved introduction")
+        XCTAssertEqual(settings.visibility[.introduction], .private)
+        XCTAssertEqual(settings.interests, interests)
+        XCTAssertTrue(settings.hasLoadedInterests)
+        let writes = await transport.count("set_minimum_shared_interests")
+        XCTAssertEqual(writes, 1)
+    }
+
     func testProfileLoadFailureRetriesWithoutLosingTheSession() async throws {
         let transport = AppBackendTransport([appAccountOK(), HTTPResponse(data: Data(), statusCode: 503), appOwnProfileResponse()])
         let composition = appFlowComposition(transport: transport, session: try appBackendTestSession())

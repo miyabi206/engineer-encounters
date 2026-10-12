@@ -280,6 +280,8 @@ final class GitHubLinkSessionTests: XCTestCase {
         """)
         for deletion in [jsonResponse("{}", status: 204),
                          jsonResponse(#"{"code":"single_identity_not_deletable"}"#, status: 422),
+                         jsonResponse(#"{"code":422,"error_code":"single_identity_not_deletable","msg":"Cannot remove last identity"}"#, status: 422),
+                         jsonResponse(#"{"code":422,"error_code":"identity_not_found"}"#, status: 422),
                          jsonResponse(#"{"code":"unexpected"}"#, status: 500),
                          jsonResponse(#"{"code":"bad_jwt"}"#, status: 401)] {
             let original = try testSession()
@@ -288,10 +290,15 @@ final class GitHubLinkSessionTests: XCTestCase {
             let manager = testManager(transport: transport, store: store)
             do {
                 let outcome = try await manager.unlinkGitHubIdentity()
+                if String(decoding: deletion.data, as: UTF8.self).contains("identity_not_found") {
+                    XCTFail("Other 422 failures must throw")
+                }
                 XCTAssertEqual(outcome, deletion.statusCode == 204 ? .unlinked : .lastIdentityRetained)
                 XCTAssertTrue([204, 422].contains(deletion.statusCode))
             } catch {
-                XCTAssertEqual(error as? BackendError, deletion.statusCode == 401 ? .notAuthenticated : .httpFailure(statusCode: 500))
+                XCTAssertFalse(deletion.statusCode == 204 || String(decoding: deletion.data, as: UTF8.self).contains("single_identity_not_deletable"),
+                               "Success and last-identity refusal must return an outcome")
+                XCTAssertEqual(error as? BackendError, deletion.statusCode == 401 ? .notAuthenticated : .httpFailure(statusCode: deletion.statusCode))
             }
             let requests = await transport.recorded()
             XCTAssertEqual(requests.map(\.httpMethod), ["GET", "DELETE"])
@@ -309,6 +316,79 @@ final class GitHubLinkSessionTests: XCTestCase {
         XCTAssertEqual(outcome, .notLinked)
         let requests = await transport.recorded()
         XCTAssertEqual(requests.count, 1)
+    }
+
+    func testUnlinkRemovesAllGitHubIdentitiesOldestFirstThenByIdentityID() async throws {
+        let first = "00000000-0000-0000-0000-000000000122"
+        let second = "00000000-0000-0000-0000-000000000121"
+        for secondCreatedAt in ["2026-01-02T00:00:00Z", "2026-01-01T00:00:00.000Z"] {
+            let ordered = secondCreatedAt.contains(".000") ? [second, first] : [first, second]
+            let user = jsonResponse("""
+            {"id":"\(testUserID.uuidString)","identities":[
+              {"identity_id":"\(second)","provider":"github","created_at":"\(secondCreatedAt)"},
+              {"identity_id":"00000000-0000-0000-0000-000000000120","provider":"apple","created_at":"2025-01-01T00:00:00Z"},
+              {"identity_id":"\(first)","provider":"github","created_at":"2026-01-01T00:00:00Z"}]}
+            """)
+            for status in [204, 503, 422] {
+                let original = try testSession()
+                let store = InMemorySessionStore(session: original)
+                let transport = StubTransport([.response(user),
+                    .response(jsonResponse(status == 422 ? #"{"code":422,"error_code":"single_identity_not_deletable"}"# : "{}", status: status)),
+                    .response(jsonResponse("{}", status: 204))])
+                let manager = testManager(transport: transport, store: store)
+                do {
+                    let result = try await manager.unlinkGitHubIdentity()
+                    XCTAssertNotEqual(status, 503)
+                    XCTAssertEqual(result, status == 204 ? .unlinked : .lastIdentityRetained)
+                } catch {
+                    XCTAssertEqual(status, 503)
+                    XCTAssertEqual(error as? BackendError, .httpFailure(statusCode: 503))
+                }
+                let requests = await transport.recorded()
+                XCTAssertEqual(requests.map { $0.url?.lastPathComponent }, ["user"] + (status == 204 ? ordered : Array(ordered.prefix(1))))
+                XCTAssertEqual(requests.dropFirst().map(\.httpMethod), status == 204 ? ["DELETE", "DELETE"] : ["DELETE"])
+                let saved = try await store.load()
+                XCTAssertEqual(saved, original)
+            }
+        }
+    }
+
+    func testUnlinkLastIdentityRefusalEndsLoopAfterEarlierRemoval() async throws {
+        let first = "00000000-0000-0000-0000-000000000121"
+        let second = "00000000-0000-0000-0000-000000000122"
+        let user = jsonResponse("""
+        {"id":"\(testUserID.uuidString)","identities":[
+          {"identity_id":"\(second)","provider":"github","created_at":"2026-01-02T00:00:00Z"},
+          {"identity_id":"\(first)","provider":"github","created_at":"2026-01-01T00:00:00Z"}]}
+        """)
+        let store = InMemorySessionStore(session: try testSession())
+        let transport = StubTransport([.response(user), .response(jsonResponse("{}", status: 204)),
+            .response(jsonResponse(#"{"code":422,"error_code":"single_identity_not_deletable"}"#, status: 422))])
+        let manager = testManager(transport: transport, store: store)
+        let result = try await manager.unlinkGitHubIdentity()
+        XCTAssertEqual(result, .lastIdentityRetained)
+        let requests = await transport.recorded()
+        XCTAssertEqual(requests.map { $0.url?.lastPathComponent }, ["user", first, second])
+        let saved = try await store.load()
+        XCTAssertEqual(saved, try testSession())
+    }
+
+    func testUnlinkOnlyIdentityNumericRefusalRetainsSession() async throws {
+        let identity = "00000000-0000-0000-0000-000000000121"
+        let user = jsonResponse("""
+        {"id":"\(testUserID.uuidString)","identities":[
+          {"identity_id":"\(identity)","provider":"github","created_at":"2026-01-01T00:00:00Z"}]}
+        """)
+        let store = InMemorySessionStore(session: try testSession())
+        let transport = StubTransport([.response(user),
+            .response(jsonResponse(#"{"code":422,"error_code":"single_identity_not_deletable"}"#, status: 422))])
+        let manager = testManager(transport: transport, store: store)
+        let result = try await manager.unlinkGitHubIdentity()
+        XCTAssertEqual(result, .lastIdentityRetained)
+        let requests = await transport.recorded()
+        XCTAssertEqual(requests.map { $0.url?.lastPathComponent }, ["user", identity])
+        let saved = try await store.load()
+        XCTAssertEqual(saved, try testSession())
     }
 
     func testSecondCallbackWhileFirstExchangeIsPendingSendsNoRequest() async throws {

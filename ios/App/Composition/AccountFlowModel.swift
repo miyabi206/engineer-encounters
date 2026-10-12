@@ -196,10 +196,8 @@ final class AccountFlowModel: ObservableObject {
     private func receive(profile: OwnProfileState) {
         guard let id = accountID, composition.account.state == .signedIn(id) else { return }
         onboarding?.receive(profile: profile, bluetooth: bluetooth)
-        if let settings, settings.allowsDiscoveryActivation != Self.allowsDiscoveryActivation(profile) {
-            self.settings = SettingsModel(profile: profile, actions: profileActions(), bluetooth: bluetooth,
-                onboardingExplanationCompleted: completion.contains(id), allowsDiscoveryActivation: Self.allowsDiscoveryActivation(profile))
-        } else { settings?.receive(profile: profile, bluetooth: bluetooth) }
+        settings?.receive(allowsDiscoveryActivation: Self.allowsDiscoveryActivation(profile))
+        settings?.receive(profile: profile, bluetooth: bluetooth)
         links?.discoveryOn = profile.discoveryOn
     }
 

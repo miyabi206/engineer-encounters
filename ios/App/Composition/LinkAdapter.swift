@@ -164,7 +164,8 @@ final class LinkAdapter: ObservableObject {
 
     private func rejectIfDead(_ error: any Error, epoch: UUID) async {
         guard error as? BackendError == .notAuthenticated,
-              (try? requireSession(epoch: epoch)) != nil else { return }
+              account.hasCurrentSessionContext, account.sessionGeneration == epoch,
+              case .signedIn = account.state else { return }
         await account.rejectDeadSession(generation: epoch)
     }
 
