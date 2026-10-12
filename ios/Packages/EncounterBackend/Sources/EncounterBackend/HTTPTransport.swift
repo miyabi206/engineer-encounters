@@ -17,6 +17,13 @@ public struct HTTPResponse: Sendable, CustomStringConvertible, CustomDebugString
 /// Injected HTTP seam for Auth and remote procedures.
 public protocol HTTPTransport: Sendable {
     func send(_ request: URLRequest) async throws -> HTTPResponse
+    /// Auth authorization requests must return redirects without following them.
+    func sendWithoutRedirects(_ request: URLRequest) async throws -> HTTPResponse
+}
+
+public extension HTTPTransport {
+    // In-memory transports have no redirect handling. Network transports must override this.
+    func sendWithoutRedirects(_ request: URLRequest) async throws -> HTTPResponse { try await send(request) }
 }
 
 /// Foundation transport with no provider SDK dependency.
@@ -24,9 +31,17 @@ public struct URLSessionHTTPTransport: HTTPTransport {
     private let session: URLSession
     public init(session: URLSession = .shared) { self.session = session }
 
+    public func sendWithoutRedirects(_ request: URLRequest) async throws -> HTTPResponse {
+        try await send(request, delegate: RefuseRedirects())
+    }
+
     public func send(_ request: URLRequest) async throws -> HTTPResponse {
+        try await send(request, delegate: nil)
+    }
+
+    private func send(_ request: URLRequest, delegate: (any URLSessionTaskDelegate)?) async throws -> HTTPResponse {
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await session.data(for: request, delegate: delegate)
             guard let response = response as? HTTPURLResponse else { throw BackendError.invalidResponse }
             return HTTPResponse(data: data, statusCode: response.statusCode)
         } catch is CancellationError {
@@ -36,5 +51,12 @@ public struct URLSessionHTTPTransport: HTTPTransport {
         } catch {
             throw BackendError.transportFailure
         }
+    }
+}
+
+private final class RefuseRedirects: NSObject, URLSessionTaskDelegate, Sendable {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        completionHandler(nil)
     }
 }

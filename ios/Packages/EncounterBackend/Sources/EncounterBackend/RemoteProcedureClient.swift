@@ -36,8 +36,10 @@ public actor RemoteProcedureClient: CustomStringConvertible, CustomDebugStringCo
         }
         let data: Data
         do { data = try JSONEncoder().encode(parameters) } catch { throw BackendError.invalidRequest }
-        var session = try await sessions.session()
+        let authorization = try await sessions.authorization(for: configuration)
+        var session = authorization.session
         for attempt in 0...1 {
+            try await sessions.validate(authorization)
             var request = URLRequest(url: configuration.endpoint("rest/v1/rpc/" + name))
             request.httpMethod = "POST"
             request.httpBody = data
@@ -49,15 +51,17 @@ public actor RemoteProcedureClient: CustomStringConvertible, CustomDebugStringCo
             do { response = try await transport.send(request) }
             catch is CancellationError { throw CancellationError() }
             catch { throw BackendError.transportFailure }
+            try await sessions.validate(authorization)
             if (200..<300).contains(response.statusCode) { return response }
             let error: BackendError
             switch response.statusCode {
             case 408, 500..<600: error = .httpFailure(statusCode: response.statusCode)
             case 429: error = .rateLimited
-            default: error = BackendError.response(response)
+            default: error = BackendError.response(response, procedure: name, parameters: data)
             }
             if attempt == 0, response.statusCode == 401 || error == .notAuthenticated {
                 let refreshed = try await sessions.refresh(after: session)
+                try await sessions.validate(authorization)
                 guard refreshed.userID == session.userID else { throw BackendError.notAuthenticated }
                 session = refreshed
             } else { throw error }
