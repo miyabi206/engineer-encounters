@@ -471,7 +471,7 @@ private func appFlowComposition(configuration: BackendConfiguration? = appBacken
     transport: any HTTPTransport = AppBackendTransport(), session: BackendSession? = nil,
     sessionStore: (any SessionStore)? = nil, defaults: UserDefaults? = nil,
     transportFactory: @escaping @MainActor () async -> any BluetoothTransport = { ConsentTestTransport() }) -> AppComposition {
-    AppComposition(configuration: configuration, defaults: defaults ?? appBackendDefaults(), transport: transport,
+    AppComposition(configuration: configuration, defaults: defaults ?? appBackendDefaults(userID: session?.userID ?? appBackendTestUser), transport: transport,
         sessionStore: sessionStore ?? InMemorySessionStore(session: session), serverTokenStore: InMemoryTokenBatchStore(),
         signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { InMemoryReceiptQueue() },
         transportFactory: transportFactory, now: { appBackendTestNow }, timeZone: { "Asia/Tokyo" })

@@ -51,8 +51,8 @@ struct DiagnosticsView: View {
                             catch { signOutFailed = true }
                         }
                     }.disabled(isLoading)
-                    if signOutFailed { Text(text("signOutFailed")) }
                 }
+                if signOutFailed || account.sessionCleanupFailed { Text(text("signOutFailed")) }
             }
             Section {
                 Picker(text("approach"), selection: Binding(

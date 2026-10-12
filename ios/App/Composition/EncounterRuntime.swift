@@ -20,6 +20,7 @@ struct EncounterRuntimeStatus: Sendable, Equatable {
 final class EncounterRuntime: ObservableObject {
     @Published private(set) var status = EncounterRuntimeStatus()
     private static var receiptQueueTask: Task<SwiftDataReceiptQueue, any Error>?
+    private static var boundReceiptQueueTasks: [String: Task<SwiftDataReceiptQueue, any Error>] = [:]
     private var queue: (any ReceiptQueue)?
     private var engine: EncounterEngine?
     private var radioTransport: RuntimeBluetoothTransport?
@@ -81,6 +82,19 @@ final class EncounterRuntime: ObservableObject {
             receiptQueueTask = nil
             throw error
         }
+    }
+
+    static func openBoundQueue(namespace: String) async throws -> any ReceiptQueue {
+        if boundReceiptQueueTasks[namespace] == nil {
+            boundReceiptQueueTasks[namespace] = Task {
+                let directory = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                    appropriateFor: nil, create: true).appendingPathComponent("EngineerEncounters/BackendReceipts", isDirectory: true)
+                    .appendingPathComponent(namespace, isDirectory: true)
+                return try await SwiftDataReceiptQueue.fileBacked(directory: directory)
+            }
+        }
+        do { return try await boundReceiptQueueTasks[namespace]!.value }
+        catch { boundReceiptQueueTasks[namespace] = nil; throw error }
     }
 
     /// Synchronous subscribers share the broadcast without dropping measurements

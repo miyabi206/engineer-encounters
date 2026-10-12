@@ -129,7 +129,8 @@ final class SessionRecoveryTests: XCTestCase {
         let sessions = InMemorySessionStore(session: try appBackendTestSession(userID: other))
         let tokens = InMemoryTokenBatchStore(batch: try appBackendLongBatch())
         let queue = InMemoryReceiptQueue()
-        let composition = makeRecoveryComposition(transport: transport, sessions: sessions, tokens: tokens, queue: queue)
+        let composition = makeRecoveryComposition(transport: transport, sessions: sessions, tokens: tokens, queue: queue,
+            defaults: appBackendDefaults(userID: other))
         await composition.waitForRestoration()
         let oldRuntime = composition.runtime
         let receipt = EncounterSamples.receipt()
@@ -267,7 +268,7 @@ final class SessionRecoveryTests: XCTestCase {
         }
     }
 
-    func testSignInCleanupFailureRetainsSignedOutStateAndPersistenceFailureKeepsNewAccount() async throws {
+    func testSignInCleanupFailureRetainsSignedOutStateAndFreshPersistenceFailureKeepsNewAccount() async throws {
         for failingStore in ["tokens", "receipts", "clearSession", "saveSession"] {
             let transport = ControlledAppBackendTransport(["register_time_zone": [.response(appAccountOK()), .response(appAccountOK())],
                 "signin": [.response(appBackendAuthResponse())], "accept_declarations": [.response(appAccountOK())]])
@@ -282,7 +283,7 @@ final class SessionRecoveryTests: XCTestCase {
             await queue.setClearFailure(failingStore == "receipts")
             do { try await recoverySignIn(composition); XCTFail("Storage failure must surface") }
             catch { XCTAssertEqual(error as? BackendError, .storageFailure) }
-            if ["tokens", "receipts"].contains(failingStore) {
+            if ["tokens", "receipts", "clearSession"].contains(failingStore) {
                 XCTAssertEqual(composition.account.state, .signedOut)
                 do { _ = try await composition.account.sessions?.session(); XCTFail("Cleanup failure must retain signed-out storage") }
                 catch { XCTAssertEqual(error as? BackendError, .notAuthenticated) }
@@ -292,7 +293,10 @@ final class SessionRecoveryTests: XCTestCase {
                 XCTAssertEqual(actualSession?.userID, appBackendTestUser)
                 XCTAssertTrue(composition.runtime?.tokenIssuer is ServerTokenIssuer)
             }
-            XCTAssertFalse(composition.runtime === oldRuntime)
+            if failingStore == "clearSession" {
+                let signIns = await transport.count("signin")
+                XCTAssertEqual(signIns, 0)
+            } else { XCTAssertFalse(composition.runtime === oldRuntime) }
             await composition.refreshLocalSummary()
             XCTAssertNotNil(composition.status.pendingReceiptCount)
             try await composition.requestBluetooth()

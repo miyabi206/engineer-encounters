@@ -29,7 +29,8 @@ extension AccountModel {
                         requestBluetooth: @escaping @MainActor () async throws -> BluetoothPermissionState) -> ProfileActions {
         let epoch = sessionGeneration
         let requireSession: @MainActor () throws -> Void = {
-            guard self.sessionGeneration == epoch, case .signedIn = self.state else {
+            guard self.hasCurrentSessionContext, !self.sessionCleanupPending, self.sessionGeneration == epoch,
+                  case .signedIn = self.state else {
                 throw ProfileActionError(code: .notAuthenticated)
             }
         }
@@ -116,11 +117,15 @@ extension AccountModel {
     }
 
     private func ownAccountOperation<Value>(_ operation: @MainActor (OwnAccountService) async throws -> Value) async throws -> Value {
-        guard case .signedIn(let user) = state, let service else { throw ProfileActionError(code: .notAuthenticated) }
+        guard hasCurrentSessionContext, !sessionCleanupPending, case .signedIn(let user) = state, let service else {
+            throw ProfileActionError(code: .notAuthenticated)
+        }
         let epoch = sessionGeneration
         do {
             let result = try await operation(service)
-            guard sessionGeneration == epoch, state == .signedIn(user) else { throw ProfileActionError(code: .notAuthenticated) }
+            guard hasCurrentSessionContext, !sessionCleanupPending, sessionGeneration == epoch, state == .signedIn(user) else {
+                throw ProfileActionError(code: .notAuthenticated)
+            }
             return result
         } catch is CancellationError { throw CancellationError() }
         catch {

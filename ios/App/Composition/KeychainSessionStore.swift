@@ -6,10 +6,15 @@ import Foundation
 struct KeychainSessionStore: SessionStore {
     static let service = "EngineerEncounters.Backend.Session"
     private let client: any KeychainClient
+    private let backendIdentity: String
 
-    init(client: any KeychainClient = SystemKeychainClient()) { self.client = client }
+    init(backendIdentity: String, client: any KeychainClient = SystemKeychainClient()) {
+        self.backendIdentity = backendIdentity
+        self.client = client
+    }
 
     private struct StoredSession: Codable {
+        let backendIdentity: String?
         let accessCredential: String
         let refreshCredential: String
         let expiresAt: Date
@@ -20,15 +25,18 @@ struct KeychainSessionStore: SessionStore {
         do {
             guard let data = try await client.read(service: Self.service, account: "current") else { return nil }
             let value = try JSONDecoder().decode(StoredSession.self, from: data)
+            guard value.backendIdentity == backendIdentity else { throw BackendError.notAuthenticated }
             return try BackendSession(accessCredential: value.accessCredential,
                                       refreshCredential: value.refreshCredential,
                                       expiresAt: value.expiresAt, userID: value.userID)
-        } catch { throw BackendError.storageFailure }
+        } catch BackendError.notAuthenticated { throw BackendError.notAuthenticated }
+        catch { throw BackendError.storageFailure }
     }
 
     func save(_ session: BackendSession) async throws {
         do {
             let data = try JSONEncoder().encode(StoredSession(
+                backendIdentity: backendIdentity,
                 accessCredential: session.accessCredential, refreshCredential: session.refreshCredential,
                 expiresAt: session.expiresAt, userID: session.userID
             ))

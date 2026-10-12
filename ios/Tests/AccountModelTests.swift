@@ -51,7 +51,7 @@ final class AccountModelTests: XCTestCase {
 
     func testKeychainSessionRoundTripCorruptionAndSeparationFromServerTokens() async throws {
         let keychain = AppMemoryKeychain()
-        let store = KeychainSessionStore(client: keychain)
+        let store = KeychainSessionStore(backendIdentity: BackendStorageBinding.identity(appBackendTestConfiguration()), client: keychain)
         let tokens = KeychainTokenBatchStore(service: AppComposition.serverTokenService, client: keychain)
         let session = try appBackendTestSession()
         try await store.save(session)
@@ -96,7 +96,9 @@ final class AccountModelTests: XCTestCase {
 
     func testSignedOutIssuerSelectionForThisBuildAndSignOutClearsOnlyServerStore() async throws {
         let keychain = AppMemoryKeychain()
-        let server = KeychainTokenBatchStore(service: AppComposition.serverTokenService, client: keychain)
+        let owner = BackendStorageOwner(backend: BackendStorageBinding.identity(appBackendTestConfiguration()), account: appBackendTestUser)
+        let service = AppComposition.serverTokenService(owner: owner)
+        let server = KeychainTokenBatchStore(service: service, client: keychain)
         let queue = InMemoryReceiptQueue()
         let store = InMemorySessionStore(session: try appBackendTestSession())
         let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(),
@@ -124,7 +126,7 @@ final class AccountModelTests: XCTestCase {
         XCTAssertTrue(pending.isEmpty)
         // An issuer retained by an old operation cannot refill cleared storage after invalidation.
         let transportRequestsBefore = await keychain.services
-        XCTAssertTrue(transportRequestsBefore.contains(AppComposition.serverTokenService))
+        XCTAssertTrue(transportRequestsBefore.contains(service))
         await oldRuntime.refresh()
         await composition.refreshLocalSummary()
         XCTAssertFalse(oldRuntime === composition.runtime)

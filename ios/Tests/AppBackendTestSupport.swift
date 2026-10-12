@@ -48,17 +48,26 @@ actor AppMemoryKeychain: KeychainClient {
     private var values: [String: Data] = [:]
     private(set) var services: Set<String> = []
     private(set) var reads = 0
+    private var failSessionDeletion = false
+    private(set) var sessionDeletionAttempts = 0
+    private(set) var sessionWrites = 0
     func read(service: String, account: String) async throws -> Data? {
         reads += 1
         return values[service + ":" + account]
     }
     func writeOrReplace(_ data: Data, service: String, account: String) async throws {
         services.insert(service)
+        if service == KeychainSessionStore.service { sessionWrites += 1 }
         values[service + ":" + account] = data
     }
     func delete(service: String, account: String) async throws {
+        if service == KeychainSessionStore.service {
+            sessionDeletionAttempts += 1
+            if failSessionDeletion { throw BackendError.storageFailure }
+        }
         values[service + ":" + account] = nil
     }
+    func setSessionDeletionFailure(_ value: Bool) { failSessionDeletion = value }
     func corruptSession() { values[KeychainSessionStore.service + ":current"] = Data("invalid".utf8) }
 }
 
@@ -94,8 +103,16 @@ func appBackendEventually(_ condition: @MainActor () async throws -> Bool) async
 enum AppBackendTestFailure: Error { case didNotSettle }
 
 @MainActor
-func appBackendDefaults() -> UserDefaults {
-    UserDefaults(suiteName: "EngineerEncounters.Backend.Tests.\(UUID().uuidString)")!
+func appBackendDefaults(userID: UUID? = appBackendTestUser, bound: Bool = true) -> UserDefaults {
+    let defaults = UserDefaults(suiteName: "EngineerEncounters.Backend.Tests.\(UUID().uuidString)")!
+    // Seed fakes with the binding that a preceding successful sign-in would have saved.
+    if bound {
+        let backend = BackendStorageBinding.identity(appBackendTestConfiguration())
+        defaults.set(backend, forKey: BackendStorageBinding.sessionBackendKey)
+        defaults.set(try! JSONEncoder().encode(BackendStorageOwner(backend: backend, account: userID)),
+                     forKey: BackendStorageBinding.ownerKey)
+    }
+    return defaults
 }
 
 @MainActor
