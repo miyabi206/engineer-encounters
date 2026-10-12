@@ -185,7 +185,7 @@ final class AppComposition: ObservableObject {
         qrAdapter.didRedeem = { [weak discoverAdapter] in await discoverAdapter?.foreground() }
         sessionAdapter.$state.map { state in
             if case .active = state { return true }; return false
-        }.removeDuplicates().sink { [weak discoverAdapter] _ in
+        }.removeDuplicates().dropFirst().sink { [weak discoverAdapter] _ in
             Task { await discoverAdapter?.foreground() }
         }.store(in: &productSubscriptions)
         sessionAdapter.$failure.sink { [weak discoverAdapter] failure in

@@ -39,10 +39,7 @@ final class DiscoverAdapter: ObservableObject {
         }
         self.backend = backend
         guard backend != nil else { clearAuthorization(); return }
-        if model == nil {
-            epoch = account.sessionGeneration
-            model = DiscoverModel(actions: actions(), discoveryOn: account.profile?.discoveryOn ?? false)
-        }
+        epoch = account.sessionGeneration
         receive(profile: account.profile)
     }
 
@@ -56,6 +53,15 @@ final class DiscoverAdapter: ObservableObject {
     }
 
     private func receive(profile: OwnProfileState?) {
+        if model == nil {
+            guard backend != nil, let profile else { return }
+            // Initial access belongs to the first screen load. An access-restoration
+            // task could otherwise reread a screen requested before that task runs.
+            model = DiscoverModel(actions: actions(), discoveryOn: profile.discoveryOn,
+                                  isAuthorized: backend?.isCurrent == true && profile.moderationState == "active")
+            lastProfile = profile
+            return
+        }
         guard let model else { return }
         if lastProfile != profile {
             // Changing prerequisites or authorization always drops old metadata before re-reading.

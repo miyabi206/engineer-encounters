@@ -54,7 +54,6 @@ struct AccountRootView: View {
         .task { await flow.start() }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
             Task {
-                await composition.refresh()
                 await flow.refresh()
             }
         }

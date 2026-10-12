@@ -21,6 +21,7 @@ final class AccountFlowModel: ObservableObject {
     private var restorationFinished = false
     private var startupTask: Task<Void, Never>?
     private var profileTask: (id: UUID, task: Task<Void, Never>)?
+    private var profileLoadVersion: UInt = 0
     private var subscriptions: Set<AnyCancellable> = []
     private var radioSubscription: AnyCancellable?
 
@@ -74,12 +75,15 @@ final class AccountFlowModel: ObservableObject {
     }
 
     func refresh() async {
-        guard started, composition.account.state.isSignedIn else { return }
+        guard started else { return }
+        let previousProfileLoadVersion = profileLoadVersion
         await composition.refresh()
         guard composition.account.state.isSignedIn else { return }
         receive(state: composition.account.state)
         if case .signedIn = composition.account.state {
-            beginProfileLoad()
+            // Recovery's state notification may already have loaded the profile,
+            // even if its task finished while composition was still refreshing.
+            if profileLoadVersion == previousProfileLoadVersion { beginProfileLoad() }
             await profileTask?.task.value
         }
     }
@@ -120,6 +124,7 @@ final class AccountFlowModel: ObservableObject {
 
     private func beginProfileLoad() {
         guard profileTask == nil else { return }
+        profileLoadVersion &+= 1
         let id = UUID()
         let epoch = composition.account.sessionGeneration
         let task = Task { [weak self] in
