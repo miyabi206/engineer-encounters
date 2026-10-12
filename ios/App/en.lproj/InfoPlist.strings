@@ -1,1 +1,2 @@
 "NSBluetoothAlwaysUsageDescription" = "Bluetooth is used to record encounters with other people nearby who use this app.";
+"NSCameraUsageDescription" = "Use the camera to scan QR codes.";

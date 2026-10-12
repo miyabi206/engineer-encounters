@@ -14,3 +14,6 @@
 
 "githubSyncPending" = "GitHubは連携済みです。同期を再試行してください。";
 "connectError" = "GitHubの連携または同期に失敗しました。再試行してください。";
+"discoverTab" = "発見";
+"profileTab" = "プロフィール";
+"settingsTab" = "設定";

@@ -14,3 +14,6 @@
 
 "githubSyncPending" = "GitHub is linked. Sync is still needed.";
 "connectError" = "GitHub could not be connected or synced. Try again.";
+"discoverTab" = "Discover";
+"profileTab" = "Profile";
+"settingsTab" = "Settings";

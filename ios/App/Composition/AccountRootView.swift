@@ -48,7 +48,7 @@ struct AccountRootView: View {
             case .onboarding:
                 if let model = flow.onboarding { OnboardingView(model: model) }
             case .settings:
-                if let model = flow.settings { AccountSettingsView(model: model, links: flow.links, composition: composition) }
+                if let model = flow.settings { ProductRootView(settings: model, links: flow.links, composition: composition) }
             }
         }
         .task { await flow.start() }
@@ -93,48 +93,8 @@ struct AccountRootView: View {
     }
 }
 
-private enum AccountSettingsRoute: Hashable { case profile, discovery, visibility, links }
-
 @MainActor
-private struct AccountSettingsView: View {
-    @ObservedObject var model: SettingsModel
-    let links: LinksModel?
-    let composition: AppComposition
-    @AccountViewState private var path: [AccountSettingsRoute] = []
-
-    private var navigation: SettingsNavigationActions {
-        SettingsNavigationActions(back: { if !path.isEmpty { path.removeLast() } },
-            editProfile: { path.append(.profile) }, discovery: { path.append(.discovery) },
-            visibility: { path.append(.visibility) }, links: { path.append(.links) }, bluetoothRecovery: AccountFlowModel.openBluetoothSettings)
-    }
-
-    var body: some View {
-        // The signed-in root is the Settings list until the later product roots exist.
-        NavigationStack(path: $path) {
-            SettingsListView(navigation: navigation) {
-                Button(AccountStrings.text("links")) { path.append(.links) }
-                #if DEVELOPMENT_BUILD || INTERNAL_BUILD
-                NavigationLink(DiagnosticsStrings.text("title")) { DiagnosticsView(composition: composition) }
-                #endif
-            }
-            .navigationDestination(for: AccountSettingsRoute.self) { screen in
-                switch screen {
-                case .profile: EditProfileView(model: model, navigation: navigation)
-                case .discovery: DiscoveryAndMatchingView(model: model, navigation: navigation)
-                case .visibility: VisibilitySettingsView(model: model, navigation: navigation)
-                case .links:
-                    if let links {
-                        AccountLinksView(model: links, adapter: composition.linkAdapter,
-                            back: navigation.back, discovery: navigation.discovery)
-                    }
-                }
-            }
-        }
-    }
-}
-
-@MainActor
-private struct AccountLinksView: View {
+struct AccountLinksView: View {
     @ObservedObject var model: LinksModel
     @ObservedObject var adapter: LinkAdapter
     let back: @MainActor () -> Void

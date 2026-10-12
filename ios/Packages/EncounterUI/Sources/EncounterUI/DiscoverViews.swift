@@ -117,6 +117,7 @@ public struct EncounterDetailView: View {
                 case .loaded:
                     if let detail = model.card, detail.card.id == encounterID {
                         let card = detail.card
+                        let deferred = EncounterDetailControls.availableDeferredControls(actions: model.actions, navigation: navigation)
                         DiscoverSurface {
                             EncounterIdentity(displayName: card.displayName)
                             if let introduction = card.introduction { Text(introduction) }
@@ -130,9 +131,9 @@ public struct EncounterDetailView: View {
                         if card.links.isEmpty { Text(DiscoverStrings.text(.noLinks)).foregroundStyle(.secondary) }
                         ForEach(card.links) { link in
                             EncounterLinkView(link: link, isSample: false, saved: detail.savedLinkIDs.contains(link.id),
-                                              disabled: model.isWriting, reportImpersonation: {
-                                EncounterDetailControls.report(card: card, linkID: link.id, navigation: navigation)
-                            }) {
+                                              disabled: model.isWriting, reportImpersonation: deferred.contains(.impersonation) ? navigation.reportImpersonation.map { report in
+                                { report(card, link.id) }
+                            } : nil) {
                                 Task { await model.setSaved(card.id, linkID: link.id,
                                                            saved: !detail.savedLinkIDs.contains(link.id)) }
                             }
@@ -141,11 +142,14 @@ public struct EncounterDetailView: View {
                             DiscoverSurface { DiscoverHeading(key: .contact); Text(contact) }
                         }
                         DiscoverWriteFailure(model: model)
-                        Button(DiscoverStrings.text(.safety)) { navigation.openReportOrBlock(card) }
-                            .disabled(model.isWriting)
-                        Button(DiscoverStrings.text(.deleteEncounter), role: .destructive) {
-                            model.requestDeletion(card.id)
-                        }.disabled(model.isWriting)
+                        if deferred.contains(.safety), let safety = navigation.openReportOrBlock {
+                            Button(DiscoverStrings.text(.safety)) { safety(card) }.disabled(model.isWriting)
+                        }
+                        if deferred.contains(.deletion) {
+                            Button(DiscoverStrings.text(.deleteEncounter), role: .destructive) {
+                                model.requestDeletion(card.id)
+                            }.disabled(model.isWriting)
+                        }
                     }
                 }
             }

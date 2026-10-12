@@ -108,6 +108,39 @@ final class DiscoverScreenTests: XCTestCase {
         XCTAssertEqual(spy.reportedLinks, ["link", "second"])
     }
 
+    @MainActor
+    func testDeferredControlsHideIndividuallyWhenAbsentAndShowWhenSupplied() {
+        let driver = DiscoverTestDriver()
+        var actions = driver.model().actions
+        var navigation = DiscoverNavigationSpy().actions()
+        XCTAssertEqual(EncounterDetailControls.availableDeferredControls(actions: actions, navigation: navigation),
+                       [.safety, .impersonation, .deletion])
+        navigation.openReportOrBlock = nil
+        XCTAssertEqual(EncounterDetailControls.availableDeferredControls(actions: actions, navigation: navigation),
+                       [.impersonation, .deletion])
+        navigation.reportImpersonation = nil
+        XCTAssertEqual(EncounterDetailControls.availableDeferredControls(actions: actions, navigation: navigation), [.deletion])
+        actions.deleteEncounter = nil
+        XCTAssertTrue(EncounterDetailControls.availableDeferredControls(actions: actions, navigation: navigation).isEmpty)
+        // A missing report action remains safe even for callers of the public helper.
+        EncounterDetailControls.report(card: DiscoverTestDriver.card().card, linkID: "link", navigation: navigation)
+    }
+
+    @MainActor
+    func testAbsentDeletionCannotEnterConfirmationOrMutateAnEncounter() async {
+        let driver = DiscoverTestDriver()
+        var actions = driver.model().actions
+        actions.deleteEncounter = nil
+        let model = DiscoverModel(actions: actions, discoveryOn: true)
+        await model.loadFeed()
+        model.requestDeletion("card")
+        XCTAssertEqual(model.deletion, .none)
+        let deleted = await model.confirmDeletion()
+        XCTAssertFalse(deleted)
+        XCTAssertTrue(driver.writes.isEmpty)
+        XCTAssertEqual(model.feed.count, 1)
+    }
+
     func testFeedSharedInterestIDsDistinguishOmissionFromEmptyIntersection() {
         let card = DiscoverTestDriver.card().card
         XCTAssertNil(EncounterFeedCard(card: card, favorite: false).sharedInterestIDs)

@@ -192,7 +192,7 @@ public struct DiscoverActions {
     public var setFavorite: @MainActor (String, Bool) async throws -> EncounterFavoriteResult
     public var saveLink: @MainActor (String, String) async throws -> EncounterSavedResult
     public var unsaveLink: @MainActor (String, String) async throws -> EncounterSavedResult
-    public var deleteEncounter: @MainActor (String) async throws -> Void
+    public var deleteEncounter: (@MainActor (String) async throws -> Void)?
     public var loadFavorites: @MainActor () async throws -> EncounterCardList
     public var loadSavedLinks: @MainActor () async throws -> EncounterSavedLinkList
 
@@ -201,7 +201,7 @@ public struct DiscoverActions {
                 setFavorite: @escaping @MainActor (String, Bool) async throws -> EncounterFavoriteResult,
                 saveLink: @escaping @MainActor (String, String) async throws -> EncounterSavedResult,
                 unsaveLink: @escaping @MainActor (String, String) async throws -> EncounterSavedResult,
-                deleteEncounter: @escaping @MainActor (String) async throws -> Void,
+                deleteEncounter: (@MainActor (String) async throws -> Void)? = nil,
                 loadFavorites: @escaping @MainActor () async throws -> EncounterCardList,
                 loadSavedLinks: @escaping @MainActor () async throws -> EncounterSavedLinkList) {
         self.loadFeed = loadFeed; self.loadCard = loadCard; self.setFavorite = setFavorite
@@ -219,8 +219,8 @@ public struct DiscoverNavigationActions {
     public var openQR: @MainActor () -> Void
     public var openDiscoverySettings: @MainActor () -> Void
     public var openProfileEditing: @MainActor () -> Void
-    public var openReportOrBlock: @MainActor (EncounterCard) -> Void
-    public var reportImpersonation: @MainActor (EncounterCard, String) -> Void
+    public var openReportOrBlock: (@MainActor (EncounterCard) -> Void)?
+    public var reportImpersonation: (@MainActor (EncounterCard, String) -> Void)?
     public var openSample: @MainActor () -> Void
     public var openOwnLinks: @MainActor () -> Void
     public var openSystemSettings: @MainActor () -> Void
@@ -234,8 +234,8 @@ public struct DiscoverNavigationActions {
                 openSession: @escaping @MainActor () -> Void, openQR: @escaping @MainActor () -> Void,
                 openDiscoverySettings: @escaping @MainActor () -> Void,
                 openProfileEditing: @escaping @MainActor () -> Void,
-                openReportOrBlock: @escaping @MainActor (EncounterCard) -> Void,
-                reportImpersonation: @escaping @MainActor (EncounterCard, String) -> Void,
+                openReportOrBlock: (@MainActor (EncounterCard) -> Void)? = nil,
+                reportImpersonation: (@MainActor (EncounterCard, String) -> Void)? = nil,
                 openSample: @escaping @MainActor () -> Void,
                 openOwnLinks: @escaping @MainActor () -> Void,
                 openSystemSettings: @escaping @MainActor () -> Void,

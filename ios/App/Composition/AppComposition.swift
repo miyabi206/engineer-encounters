@@ -3,6 +3,7 @@ import EncounterBackend
 import EncounterBluetooth
 import EncounterDomain
 import EncounterStorage
+import EncounterUI
 import Foundation
 
 /// One composition root survives scene creation and keeps one runtime per process.
@@ -14,6 +15,11 @@ final class AppComposition: ObservableObject {
     let linkAdapter: LinkAdapter
     let sessionHolder: SessionHolder
     let sessionAdapter: SessionAdapter
+    let discoverAdapter: DiscoverAdapter
+    let qrAdapter: QRAdapter
+    let productNavigation = ProductNavigationModel()
+    let sampleEncounter: SampleEncounterModel
+    private var productSubscriptions: Set<AnyCancellable> = []
     private(set) var sessionServices: SessionBackendServices?
     private let sessionNetwork: SessionNetworkAvailability
     private let linkServicesFactory: (@MainActor (SessionManager) -> (OwnLinkService, GitHubLinksService))?
@@ -135,6 +141,9 @@ final class AppComposition: ObservableObject {
             client = nil
             account = AccountModel(sessions: nil, service: nil, defaults: defaults, timeZone: timeZone)
         }
+        discoverAdapter = DiscoverAdapter(account: account)
+        qrAdapter = QRAdapter(account: account, clock: clock)
+        sampleEncounter = SampleEncounterModel(store: InstallationSampleDismissalStore(defaults: defaults), isNewUser: true)
         linkAdapter = LinkAdapter(account: account, runner: webAuthenticationRunner ?? SystemGitHubWebAuthenticationRunner())
         sessionHolder = SessionHolder(clock: clock, stops: PendingSessionStopStore(defaults: defaults))
         let sessionNetwork = sessionNetwork ?? SessionNetworkAvailability()
@@ -153,8 +162,17 @@ final class AppComposition: ObservableObject {
         #endif
         isParticipating = participation.isEnabled
         account.prepareForSessionChange = { [weak self] in try await self?.prepareForSessionChange() }
-        account.prepareToDiscardSession = { [weak self] in await self?.sessionAdapter.prepareToDiscardSession() }
-        account.authorizationWillBeDiscarded = { [weak self] in await self?.sessionAdapter.authorizationWillBeDiscarded() }
+        account.prepareToDiscardSession = { [weak self] in
+            self?.discoverAdapter.clearAuthorization()
+            self?.qrAdapter.hidePresentation()
+            await self?.sessionAdapter.prepareToDiscardSession()
+            await self?.qrAdapter.prepareToDiscardSession()
+        }
+        account.authorizationWillBeDiscarded = { [weak self] in
+            self?.discoverAdapter.clearAuthorization()
+            self?.qrAdapter.invalidate()
+            await self?.sessionAdapter.authorizationWillBeDiscarded()
+        }
         account.discoveryWillChange = { [weak self] enabled in try await self?.sessionAdapter.discoveryWillChange(enabled: enabled) }
         account.discoveryDidChange = { [weak self] enabled in await self?.sessionAdapter.discoveryDidChange(enabled: enabled) }
         account.sessionDidChange = { [weak self] force in await self?.recreateRuntime(force: force) }
@@ -164,6 +182,26 @@ final class AppComposition: ObservableObject {
             return self.account.state.isSignedIn ? binding.allowsAuthenticatedNetwork : binding.allowsNetwork
         }
         account.bindingGeneration = { binding?.generation }
+        qrAdapter.didRedeem = { [weak discoverAdapter] in await discoverAdapter?.foreground() }
+        sessionAdapter.$state.map { state in
+            if case .active = state { return true }; return false
+        }.removeDuplicates().sink { [weak discoverAdapter] _ in
+            Task { await discoverAdapter?.foreground() }
+        }.store(in: &productSubscriptions)
+        sessionAdapter.$failure.sink { [weak discoverAdapter] failure in
+            if failure == .accountNotReady { discoverAdapter?.clearAuthorization() }
+            if case .prerequisiteMissing(let fields) = failure, fields.contains("discovery") {
+                discoverAdapter?.model?.receiveAccess(discoveryOn: false, isAuthorized: true)
+            }
+        }.store(in: &productSubscriptions)
+        qrAdapter.$failure.sink { [weak discoverAdapter] failure in
+            if let failure, [.notAuthenticated, .accountNotReady, .declarationRequired].contains(failure.code) {
+                discoverAdapter?.clearAuthorization()
+            }
+            if failure?.code == .prerequisiteMissing, failure?.fields.contains("discovery") == true {
+                discoverAdapter?.model?.receiveAccess(discoveryOn: false, isAuthorized: true)
+            }
+        }.store(in: &productSubscriptions)
         binding?.onReplacement = { [weak self] in
             let runtime = self?.runtime
             let issuer = self?.serverIssuer
@@ -172,6 +210,9 @@ final class AppComposition: ObservableObject {
             let linkAdapter = self?.linkAdapter
             let sessionAdapter = self?.sessionAdapter
             let storagePreparation = self?.storagePreparationTask
+            self?.discoverAdapter.invalidate()
+            self?.qrAdapter.invalidate()
+            self?.productNavigation.reset()
             runtime?.suspendForAccountChange()
             return Task {
                 await sessionAdapter?.invalidate()
@@ -186,6 +227,8 @@ final class AppComposition: ObservableObject {
         // App.init constructs this even for a Bluetooth background relaunch.
         restorationTask = Task { [weak self] in
             await self?.boundSessionStore?.beforeClearingCredentials { [weak self] in
+                self?.discoverAdapter.clearAuthorization()
+                self?.qrAdapter.invalidate()
                 await self?.sessionAdapter.authorizationWillBeDiscarded()
             }
             await binding?.predecessorDrain?.value
@@ -243,6 +286,7 @@ final class AppComposition: ObservableObject {
         await sessionAdapter.foreground()
         guard !sessionChangeInProgress, !account.sessionChangeInProgress else { return }
         await runtime?.refresh()
+        await discoverAdapter.foreground()
         #if DEVELOPMENT_BUILD || INTERNAL_BUILD
         trialLog.prune()
         #endif
@@ -285,6 +329,9 @@ final class AppComposition: ObservableObject {
     }
 
     private func prepareForSessionChange() async throws {
+        discoverAdapter.invalidate()
+        qrAdapter.invalidate()
+        productNavigation.reset()
         sessionChangeInProgress = true
         storageReady = false
         sessionServices = nil
@@ -354,6 +401,8 @@ final class AppComposition: ObservableObject {
             sessionServices = SessionBackendServices(client: client, account: account, owner: owner)
         } else { sessionServices = nil }
         await sessionAdapter.configure(sessionServices)
+        discoverAdapter.configure(sessionServices)
+        qrAdapter.configure(sessionServices)
         sessionChangeInProgress = false
         guard binding?.isCurrent != false else { return }
         guard force || participation.isEnabled || account.state.isSignedIn else { return }

@@ -66,6 +66,8 @@ public enum DiscoverSessionDestination: Equatable, Sendable {
     }
 }
 
+public enum EncounterDeferredControl: Hashable, Sendable { case safety, impersonation, deletion }
+
 /// S07 actions are based exclusively on the amended single-card response.
 public struct EncounterDetailControls: Equatable, Sendable {
     public let favorite: Bool
@@ -73,6 +75,15 @@ public struct EncounterDetailControls: Equatable, Sendable {
 
     public init(detail: EncounterDetail) {
         favorite = detail.favorite; savedLinkIDs = detail.savedLinkIDs
+    }
+
+    @MainActor
+    public static func availableDeferredControls(actions: DiscoverActions, navigation: DiscoverNavigationActions) -> Set<EncounterDeferredControl> {
+        var controls: Set<EncounterDeferredControl> = []
+        if navigation.openReportOrBlock != nil { controls.insert(.safety) }
+        if navigation.reportImpersonation != nil { controls.insert(.impersonation) }
+        if actions.deleteEncounter != nil { controls.insert(.deletion) }
+        return controls
     }
 
     var favoriteLabel: DiscoverString { favorite ? .removeFavorite : .addFavorite }
@@ -83,6 +94,6 @@ public struct EncounterDetailControls: Equatable, Sendable {
     @MainActor
     public static func report(card: EncounterCard, linkID: String, navigation: DiscoverNavigationActions) {
         guard card.links.contains(where: { $0.id == linkID }) else { return }
-        navigation.reportImpersonation(card, linkID)
+        navigation.reportImpersonation?(card, linkID)
     }
 }

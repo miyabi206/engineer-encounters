@@ -199,7 +199,7 @@ public final class DiscoverModel: ObservableObject {
     }
 
     public func requestDeletion(_ id: String) {
-        guard canRead, !isWriting, find(id) != nil else { return }
+        guard actions.deleteEncounter != nil, canRead, !isWriting, find(id) != nil else { return }
         deletion = .confirming(id)
     }
 
@@ -342,11 +342,11 @@ public final class DiscoverModel: ObservableObject {
     }
 
     private func delete(_ id: String) async -> Bool {
-        guard canRead, !isWriting, find(id) != nil else { return false }
+        guard let deleteEncounter = actions.deleteEncounter, canRead, !isWriting, find(id) != nil else { return false }
         let token = epoch, removals = removalEpoch
         isWriting = true; failedOperation = nil; deletion = .deleting(id)
         do {
-            try await actions.deleteEncounter(id)
+            try await deleteEncounter(id)
             guard currentWrite(token, id: id, removals: removals) else { return false }
             remove(id); isWriting = false
             return true

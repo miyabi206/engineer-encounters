@@ -105,9 +105,17 @@ final class SessionAdapter: ObservableObject {
 
     func actions() -> SessionActions {
         let epoch = account.sessionGeneration
-        return SessionActions(startSession: { try await self.start(epoch: epoch) },
-                              stopSession: { try await self.stop(epoch: epoch) },
-                              refreshSession: { try await self.refresh(epoch: epoch) })
+        let fence = account.backendCallFence()
+        return SessionActions(startSession: {
+            guard fence.isCurrent() else { throw SessionActionError.unavailable }
+            return try await self.start(epoch: epoch)
+        }, stopSession: {
+            guard fence.isCurrent() else { throw SessionActionError.unavailable }
+            try await self.stop(epoch: epoch)
+        }, refreshSession: {
+            guard fence.isCurrent() else { throw SessionActionError.unavailable }
+            return try await self.refresh(epoch: epoch)
+        })
     }
 
     func foreground() async {

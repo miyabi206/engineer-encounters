@@ -1,1 +1,2 @@
 "NSBluetoothAlwaysUsageDescription" = "近くにいるほかの利用者とのすれちがいを記録するためにBluetoothを使用します。";
+"NSCameraUsageDescription" = "QRコードを読み取るためにカメラを使用します。";
