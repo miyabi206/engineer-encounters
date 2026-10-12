@@ -109,6 +109,12 @@ insert into unit3_rpc_signatures values
     ('public.issue_token_batch(bigint)'),
     ('public.submit_receipts(jsonb)'),
     ('public.get_encounter_card(uuid)'),
+    ('public.get_encounter_feed()'),
+    ('public.list_encounter_favorites()'),
+    ('public.set_encounter_favorite(uuid,boolean)'),
+    ('public.save_link(uuid,uuid)'),
+    ('public.unsave_link(uuid,uuid)'),
+    ('public.list_saved_links()'),
     ('public.list_own_links()'),
     ('public.update_own_link(uuid,text,text,text,text[],text,text)'),
     ('public.delete_own_link(uuid)'),
@@ -124,7 +130,7 @@ insert into unit3_rpc_signatures values
 
 select extensions.is((select pg_catalog.count(*) from unit3_rpc_signatures as f
     join pg_catalog.pg_proc as p on p.oid = pg_catalog.to_regprocedure(f.signature)
-    where p.pronamespace = 'public'::regnamespace), 25::bigint, 'all twenty-five Unit 3, Unit 4 and Unit 5 public RPCs exist');
+    where p.pronamespace = 'public'::regnamespace), 31::bigint, 'all thirty-one Unit 3, Unit 4 and Unit 5 public RPCs exist');
 
 select extensions.ok(not exists (
     select 1 from pg_catalog.pg_proc as p
@@ -145,7 +151,7 @@ select extensions.is((select pg_catalog.count(*) from pg_catalog.pg_proc as p
     where p.pronamespace = 'public'::regnamespace and not exists (
         select 1 from pg_catalog.pg_depend as d where d.classid = 'pg_catalog.pg_proc'::regclass and d.objid = p.oid
             and d.refclassid = 'pg_catalog.pg_extension'::regclass and d.deptype = 'e')),
-    25::bigint, 'no unlisted public functions or overloads');
+    31::bigint, 'no unlisted public functions or overloads');
 
 create temporary table service_rpc_signatures (signature text primary key);
 insert into service_rpc_signatures values ('service.get_github_identity(uuid)'),
