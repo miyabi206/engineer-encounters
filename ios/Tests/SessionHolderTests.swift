@@ -27,6 +27,249 @@ final class SessionHolderTests: XCTestCase {
         await assertFlag(composition, false)
     }
 
+    func testOfflineStopSurvivesRelaunchAndSuppressesMarkedActiveGetAfterStopSucceeds() async throws {
+        let defaults = appBackendDefaults()
+        let clock = ManualEncounterClock()
+        let firstTransport = sessionTransport(["start_session": [.response(sessionResponse())],
+            "stop_session": [.failure]])
+        let first = try sessionComposition(firstTransport, clock: clock, defaults: defaults)
+        await first.waitForRestoration()
+        _ = try await first.sessionAdapter.actions().startSession()
+        await assertFlag(first, true)
+        do { try await first.sessionAdapter.actions().stopSession(); XCTFail("Offline stop must remain queued") } catch { }
+        await assertFlag(first, false)
+        let keys = pendingStopKeys(defaults)
+        XCTAssertEqual(keys.count, 1)
+        let data = try XCTUnwrap(defaults.data(forKey: XCTUnwrap(keys.first)))
+        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(Set(fields.keys), ["sessionID", "expiresAt"])
+        XCTAssertFalse(keys[0].contains(appBackendTestUser.uuidString.lowercased()))
+        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("fixture-access"))
+        await clock.advance(by: 30)
+        let transport = sessionTransport(["stop_session": [.held],
+            "get_own_session": [.response(sessionResponse(server: 1030))],
+            "start_session": [.response(sessionResponse(server: 1030,
+                id: "00000000-0000-0000-0000-000000000445"))]])
+        let relaunched = try sessionComposition(transport, clock: clock, defaults: defaults)
+        await relaunched.waitForRestoration()
+        await assertFlag(relaunched, false)
+        XCTAssertTrue(relaunched.sessionAdapter.stopPending)
+        let getting = Task { try await relaunched.sessionAdapter.actions().refreshSession() }
+        try await appBackendEventually { await transport.isHeld("stop_session") }
+        let getCount = await transport.count("get_own_session")
+        XCTAssertEqual(getCount, 0)
+        await assertFlag(relaunched, false)
+        await transport.release("stop_session", with: sessionNull)
+        let state = try await getting.value
+        XCTAssertEqual(state, .none)
+        await assertFlag(relaunched, false)
+        XCTAssertFalse(relaunched.sessionAdapter.stopPending)
+        XCTAssertTrue(pendingStopKeys(defaults).isEmpty)
+        let paths = await transport.recorded().map { $0.url?.lastPathComponent }
+        XCTAssertEqual(Array(paths.suffix(2)), ["stop_session", "get_own_session"])
+        _ = try await relaunched.sessionAdapter.actions().startSession()
+        await assertFlag(relaunched, true)
+    }
+
+    func testPendingStopMarkerExpiresInProcessAndAcrossRelaunch() async throws {
+        for relaunch in [false, true] {
+            let defaults = appBackendDefaults()
+            let clock = ManualEncounterClock()
+            let transport = sessionTransport(["start_session": [.response(sessionResponse(expiry: 1005))],
+                "stop_session": [.failure]])
+            let first = try sessionComposition(transport, clock: clock, defaults: defaults)
+            await first.waitForRestoration()
+            _ = try await first.sessionAdapter.actions().startSession()
+            do { try await first.sessionAdapter.actions().stopSession(); XCTFail("Stop must remain queued") } catch { }
+            XCTAssertEqual(pendingStopKeys(defaults).count, 1)
+            try await appBackendEventually { await clock.pendingWaitCount > 0 }
+            if relaunch {
+                // Simulate process loss: cancel its timers while retaining durable state.
+                await first.sessionAdapter.invalidate()
+                let launchClock = ManualEncounterClock(monotonic: 0, wall: appBackendTestNow.addingTimeInterval(5))
+                let nextTransport = sessionTransport(["get_own_session": [.response(sessionNull)]])
+                let next = try sessionComposition(nextTransport, clock: launchClock, defaults: defaults)
+                await next.waitForRestoration()
+                XCTAssertFalse(next.sessionAdapter.stopPending)
+                XCTAssertTrue(pendingStopKeys(defaults).isEmpty)
+                _ = try await next.sessionAdapter.actions().refreshSession()
+                let stops = await nextTransport.count("stop_session")
+                XCTAssertEqual(stops, 0)
+                await assertFlag(next, false)
+            } else {
+                await clock.advance(by: 5)
+                try await appBackendEventually { pendingStopKeys(defaults).isEmpty && !first.sessionAdapter.stopPending }
+                await assertFlag(first, false)
+            }
+        }
+    }
+
+    func testPendingStopMarkerCannotTravelToAnotherAccountOrBackend() async throws {
+        for otherAccount in [true, false] {
+            let defaults = appBackendDefaults()
+            let first = try sessionComposition(sessionTransport(["start_session": [.response(sessionResponse())],
+                "stop_session": [.failure]]), defaults: defaults)
+            await first.waitForRestoration()
+            _ = try await first.sessionAdapter.actions().startSession()
+            do { try await first.sessionAdapter.actions().stopSession(); XCTFail("Stop must remain queued") } catch { }
+            let keys = pendingStopKeys(defaults)
+            let nextUser = otherAccount ? UUID() : appBackendTestUser
+            let configuration = otherAccount ? appBackendTestConfiguration() :
+                BackendConfiguration(address: "https://other.example", publicClientKey: "other-public")!
+            let nextTransport = sessionTransport(["get_own_session": [.response(sessionResponse())]])
+            let next = try sessionComposition(nextTransport,
+                store: InMemorySessionStore(session: appBackendTestSession(userID: nextUser)),
+                defaults: defaults, configuration: configuration)
+            await next.waitForRestoration()
+            XCTAssertFalse(next.sessionAdapter.stopPending)
+            _ = try await next.sessionAdapter.actions().refreshSession()
+            await assertFlag(next, true)
+            let stops = await nextTransport.count("stop_session")
+            XCTAssertEqual(stops, 0)
+            XCTAssertEqual(pendingStopKeys(defaults), keys)
+        }
+    }
+
+    func testSignOutAbandonsStalledActiveStopAtTwoSecondsAndClearsMarkerBeforeCredentials() async throws {
+        let defaults = appBackendDefaults()
+        let clock = ManualEncounterClock()
+        let store = SessionCredentialClearGate(session: try appBackendTestSession())
+        let transport = sessionTransport(["start_session": [.response(sessionResponse())], "stop_session": [.held]])
+        let composition = try sessionComposition(transport, clock: clock, store: store, defaults: defaults)
+        await composition.waitForRestoration()
+        _ = try await composition.sessionAdapter.actions().startSession()
+        await assertFlag(composition, true)
+        let signingOut = Task { try await composition.account.signOut() }
+        try await appBackendEventually { await transport.isHeld("stop_session") }
+        await assertFlag(composition, false)
+        XCTAssertEqual(pendingStopKeys(defaults).count, 1)
+        try await appBackendEventually { await clock.pendingWaitCount > 0 }
+        await clock.advance(by: 1.99)
+        let clearingEarly = await store.clearStarted
+        XCTAssertFalse(clearingEarly)
+        await clock.advance(by: 0.01)
+        try await appBackendEventually { await store.clearStarted }
+        XCTAssertTrue(defaults.bool(forKey: SessionCleanupMarker.key))
+        XCTAssertTrue(pendingStopKeys(defaults).isEmpty)
+        await store.releaseClear()
+        var finished = false
+        let completion = Task { try await signingOut.value; finished = true }
+        try await appBackendEventually { finished }
+        try await completion.value
+        XCTAssertEqual(composition.account.state, .signedOut)
+        let time = await clock.now()
+        XCTAssertEqual(time.monotonic, 2, accuracy: 0.0001)
+        await transport.release("stop_session", with: sessionResponse())
+        await assertFlag(composition, false)
+        XCTAssertTrue(pendingStopKeys(defaults).isEmpty)
+        try await appBackendEventually { await clock.pendingWaitCount == 0 }
+    }
+
+    func testSuccessfulAccountDeletionClearsPendingStopMarkerWithoutAnotherStopRequest() async throws {
+        let defaults = appBackendDefaults()
+        let transport = sessionTransport(["start_session": [.response(sessionResponse())],
+            "stop_session": [.failure], "delete_own_account": [.response(sessionJSON(["deleted": true]))]])
+        let composition = try sessionComposition(transport, defaults: defaults)
+        await composition.waitForRestoration()
+        _ = try await composition.sessionAdapter.actions().startSession()
+        do { try await composition.sessionAdapter.actions().stopSession(); XCTFail("Stop must remain queued") } catch { }
+        XCTAssertEqual(pendingStopKeys(defaults).count, 1)
+        let services = try XCTUnwrap(composition.sessionServices)
+        _ = try await services.call { try await $0.deletion.deleteOwnAccount() }
+        XCTAssertTrue(pendingStopKeys(defaults).isEmpty)
+        XCTAssertFalse(composition.sessionAdapter.stopPending)
+        await assertFlag(composition, false)
+        let stops = await transport.count("stop_session")
+        XCTAssertEqual(stops, 1)
+    }
+
+    func testDelayedStartAndGetAnswersUseRequestSendAnchorAndCannotExtendExpiry() async throws {
+        for procedure in ["start_session", "get_own_session"] {
+            for delay in [40.0, 100.0] {
+                let clock = ManualEncounterClock(monotonic: 50)
+                let transport = sessionTransport([procedure: [.held]])
+                let composition = try sessionComposition(transport, clock: clock)
+                await composition.waitForRestoration()
+                let actions = composition.sessionAdapter.actions()
+                let request = Task { () throws -> SessionState in
+                    if procedure == "start_session" { return .active(try await actions.startSession()) }
+                    return try await actions.refreshSession()
+                }
+                try await appBackendEventually { await transport.isHeld(procedure) }
+                await clock.advance(by: delay, wallBy: -90000, deliverWakeUps: false)
+                await transport.release(procedure, with: sessionResponse(expiry: 1100))
+                if delay == 100, procedure == "start_session" {
+                    do { _ = try await request.value; XCTFail("Expired start cannot be acknowledged active") } catch { }
+                } else {
+                    let state = try await request.value
+                    if delay == 100 { XCTAssertEqual(state, .none) }
+                    else {
+                        guard case .active(let value) = state else { return XCTFail("Unexpired answer must activate") }
+                        XCTAssertEqual(value.serverTime, Date(timeIntervalSince1970: 1040))
+                    }
+                }
+                let snapshot = await composition.sessionHolder.snapshot()
+                XCTAssertEqual(snapshot.remainingSeconds, delay == 40 ? 60 : 0)
+                await assertFlag(composition, delay == 40)
+                if delay == 40 {
+                    await clock.advance(by: 60, deliverWakeUps: false)
+                    await assertFlag(composition, false)
+                }
+            }
+        }
+    }
+
+    func testRealNetworkRecoveryCallbackRetriesPendingStopWithoutInjectedOnlineFlag() async throws {
+        let network = SessionNetworkAvailability(monitorsSystemPath: false)
+        let transport = sessionTransport(["start_session": [.response(sessionResponse())],
+            "stop_session": [.failure, .response(sessionNull)]])
+        let composition = try sessionComposition(transport, online: nil, network: network)
+        await composition.waitForRestoration()
+        _ = try await composition.sessionAdapter.actions().startSession()
+        network.receive(isOnline: false)
+        do { try await composition.sessionAdapter.actions().stopSession(); XCTFail("Stop must remain queued") } catch { }
+        await assertFlag(composition, false)
+        network.receive(isOnline: true)
+        try await appBackendEventually { !composition.sessionAdapter.stopPending }
+        let stops = await transport.count("stop_session")
+        XCTAssertEqual(stops, 2)
+        await assertFlag(composition, false)
+    }
+
+    func testForegroundHeldStopDoesNotDelayRuntimeRefreshTokenTopUpOrUpload() async throws {
+        let clock = ManualEncounterClock()
+        let defaults = appBackendDefaults()
+        ParticipationFlag(defaults: defaults).isEnabled = true
+        let tokens = InMemoryTokenBatchStore(batch: try appBackendLongBatch())
+        let queue = InMemoryReceiptQueue()
+        let transport = sessionTransport(["start_session": [.response(sessionResponse())],
+            "stop_session": [.failure, .held], "issue_token_batch": [.held], "submit_receipts": [.held]])
+        let composition = try sessionComposition(transport, clock: clock, defaults: defaults, tokens: tokens, queue: queue)
+        await composition.waitForRestoration()
+        _ = try await composition.sessionAdapter.actions().startSession()
+        do { try await composition.sessionAdapter.actions().stopSession(); XCTFail("Stop must remain queued") } catch { }
+        // Let the initial top-up/upload settle before introducing fresh runtime work.
+        try await appBackendEventually { composition.runtime?.uploadTask == nil }
+        try await tokens.clear()
+        try await queue.enqueue(appBackendFinalReceipt())
+        var refreshed = false
+        let refresh = Task { await composition.refresh(); refreshed = true }
+        try await appBackendEventually {
+            let stopHeld = await transport.isHeld("stop_session")
+            let tokensHeld = await transport.isHeld("issue_token_batch")
+            let uploadHeld = await transport.isHeld("submit_receipts")
+            return refreshed && stopHeld && tokensHeld && uploadHeld
+        }
+        await refresh.value
+        await assertFlag(composition, false)
+        await transport.release("stop_session", with: sessionNull)
+        let batch = try JSONEncoder().encode(TokenBatchTransfer(batchID: appBackendTestUser, batch: appBackendLongBatch()))
+        await transport.release("issue_token_batch", with: HTTPResponse(data: batch, statusCode: 200))
+        await transport.release("submit_receipts", with: HTTPResponse(data: Data("[]".utf8), statusCode: 200))
+        try await appBackendEventually { !composition.sessionAdapter.stopPending }
+        await composition.setParticipation(false)
+    }
+
     func testStartUsesServerTimeAndContinuousElapsedAndExpiresWithoutNetworkOrWakeup() async throws {
         let clock = ManualEncounterClock(monotonic: 50, wall: appBackendTestNow)
         let transport = sessionTransport(["start_session": [.response(sessionResponse(server: 1100, expiry: 1200))]])
@@ -92,6 +335,7 @@ final class SessionHolderTests: XCTestCase {
         await assertFlag(composition, false)
         XCTAssertTrue(composition.sessionAdapter.stopPending)
         await composition.refresh()
+        try await appBackendEventually { !composition.sessionAdapter.stopPending }
         XCTAssertFalse(composition.sessionAdapter.stopPending)
         XCTAssertEqual(composition.sessionAdapter.state, .none)
         await assertFlag(composition, false)
@@ -100,7 +344,7 @@ final class SessionHolderTests: XCTestCase {
     }
 
     func testPendingStopIsRetriedBeforeLaterStartAndFailureRefusesStartOrGet() async throws {
-        let transport = sessionTransport(["start_session": [.response(sessionResponse()), .response(sessionResponse())],
+        let transport = sessionTransport(["start_session": [.response(sessionResponse()), .response(sessionResponse(id: "00000000-0000-0000-0000-000000000445"))],
             "stop_session": [.failure, .failure, .failure, .response(sessionNull)]])
         let composition = try sessionComposition(transport)
         await composition.waitForRestoration()
@@ -182,10 +426,11 @@ final class SessionHolderTests: XCTestCase {
         XCTAssertFalse(composition.sessionAdapter.stopPending)
     }
 
-    func testSignOutDuringPendingStartStopsBeforeDeletingCredentialsWithoutWaitingForStart() async throws {
+    func testSignOutDuringPendingStartBoundsStopBeforeDeletingCredentialsWithoutWaitingForStart() async throws {
+        let clock = ManualEncounterClock()
         let store = FailingAppSessionStore(session: try appBackendTestSession())
         let transport = sessionTransport(["start_session": [.held], "stop_session": [.held]])
-        let composition = try sessionComposition(transport, store: store)
+        let composition = try sessionComposition(transport, clock: clock, store: store)
         await composition.waitForRestoration()
         let actions = composition.sessionAdapter.actions()
         let starting = Task { try await actions.startSession() }
@@ -195,8 +440,13 @@ final class SessionHolderTests: XCTestCase {
         await assertFlag(composition, false)
         let before = await store.operations
         XCTAssertFalse(before.contains("clear"))
+        try await appBackendEventually { await clock.pendingWaitCount > 0 }
+        await clock.advance(by: 2)
+        var finished = false
+        let completion = Task { try await signingOut.value; finished = true }
+        try await appBackendEventually { finished }
+        try await completion.value
         await transport.release("stop_session", with: sessionNull)
-        try await signingOut.value
         XCTAssertEqual(composition.account.state, .signedOut)
         let stillHeld = await transport.isHeld("start_session")
         XCTAssertTrue(stillHeld)
@@ -210,19 +460,22 @@ final class SessionHolderTests: XCTestCase {
     }
 
     func testFailedOutgoingStopNeverTravelsWithReplacementAccount() async throws {
+        let defaults = appBackendDefaults()
         let next = UUID(uuidString: "00000000-0000-0000-0000-000000000222")!
         let transport = sessionTransport(["start_session": [.response(sessionResponse())],
             "stop_session": [.failure, .failure],
             "token": [.response(appBackendAuthResponse(userID: next))],
             "accept_declarations": [.response(appAccountOK())],
             "register_time_zone": [.response(appAccountOK()), .response(appAccountOK())]])
-        let composition = try sessionComposition(transport)
+        let composition = try sessionComposition(transport, defaults: defaults)
         await composition.waitForRestoration()
         let oldServices = try XCTUnwrap(composition.sessionServices)
         let oldActions = composition.sessionAdapter.actions()
         _ = try await oldActions.startSession()
         do { try await oldActions.stopSession(); XCTFail("Stop must remain queued") } catch { }
+        XCTAssertEqual(pendingStopKeys(defaults).count, 1)
         try await composition.account.signOut()
+        XCTAssertTrue(pendingStopKeys(defaults).isEmpty)
         XCTAssertFalse(composition.sessionAdapter.stopPending)
         try await composition.account.signIn(using: .init(path: "token", body: Data("{}".utf8)),
             isAdult: true, acceptsTermsAndPrivacy: true, termsVersion: "v1", privacyVersion: "v1")
@@ -237,7 +490,7 @@ final class SessionHolderTests: XCTestCase {
 
     func testObsoleteStopCannotChangeReplacementAccountsAcknowledgedSession() async throws {
         let next = UUID(uuidString: "00000000-0000-0000-0000-000000000222")!
-        let transport = sessionTransport(["start_session": [.response(sessionResponse()), .response(sessionResponse())],
+        let transport = sessionTransport(["start_session": [.response(sessionResponse()), .response(sessionResponse(id: "00000000-0000-0000-0000-000000000445"))],
             "stop_session": [.held, .response(sessionNull)],
             "token": [.response(appBackendAuthResponse(userID: next))],
             "accept_declarations": [.response(appAccountOK())],
@@ -263,9 +516,11 @@ final class SessionHolderTests: XCTestCase {
 
     func testBackendReplacementClearsFlagAndFencesLateResponseAndOldServices() async throws {
         let defaults = appBackendDefaults()
-        let oldTransport = sessionTransport(["get_own_session": [.held]])
+        let oldTransport = sessionTransport(["start_session": [.response(sessionResponse())], "get_own_session": [.held]])
         let old = try sessionComposition(oldTransport, defaults: defaults)
         await old.waitForRestoration()
+        _ = try await old.sessionAdapter.actions().startSession()
+        await assertFlag(old, true)
         let services = try XCTUnwrap(old.sessionServices)
         let getting = Task { try await old.sessionAdapter.actions().refreshSession() }
         try await appBackendEventually { await oldTransport.isHeld("get_own_session") }
@@ -331,6 +586,7 @@ final class SessionHolderTests: XCTestCase {
         let snapshot = await composition.sessionHolder.snapshot()
         XCTAssertTrue(snapshot.discoveryOffPending)
         await composition.refresh()
+        try await appBackendEventually { !composition.sessionAdapter.stopPending }
         XCTAssertFalse(composition.sessionAdapter.stopPending)
         await assertFlag(composition, false)
         let count = await transport.count("set_discovery")
@@ -338,7 +594,7 @@ final class SessionHolderTests: XCTestCase {
     }
 
     func testDiscoveryEnableFinishesQueuedDisableBeforeEnablingAndPermittingStart() async throws {
-        let transport = sessionTransport(["start_session": [.response(sessionResponse()), .response(sessionResponse())],
+        let transport = sessionTransport(["start_session": [.response(sessionResponse()), .response(sessionResponse(id: "00000000-0000-0000-0000-000000000445"))],
             "set_discovery": [.failure, .response(appAccountOK()), .response(appAccountOK())],
             "get_own_profile": [.response(appOwnProfileResponse(appPresentationProfile()))]])
         let composition = try sessionComposition(transport)
@@ -410,11 +666,12 @@ final class SessionHolderTests: XCTestCase {
     }
 
     func testAuthorizationLossClearsActiveFlagAndDiscardsCredentials() async throws {
+        let defaults = appBackendDefaults()
         let store = FailingAppSessionStore(session: try appBackendTestSession())
         let transport = sessionTransport(["start_session": [.response(sessionResponse())],
             "get_own_session": [.response(sessionError("not_authenticated", status: 401))],
             "token": [.response(HTTPResponse(data: Data("{\"error_code\":\"refresh_token_not_found\"}".utf8), statusCode: 400))]])
-        let composition = try sessionComposition(transport, store: store)
+        let composition = try sessionComposition(transport, store: store, defaults: defaults)
         await composition.waitForRestoration()
         let actions = composition.sessionAdapter.actions()
         _ = try await actions.startSession()
@@ -424,14 +681,18 @@ final class SessionHolderTests: XCTestCase {
         let stored = await store.stored
         XCTAssertNil(stored)
         XCTAssertFalse(composition.sessionAdapter.stopPending)
+        XCTAssertTrue(pendingStopKeys(defaults).isEmpty)
+        let stops = await transport.count("stop_session")
+        XCTAssertEqual(stops, 0)
     }
 
     func testAuthorizationLossOutsideAdapterClearsFlagBeforeCredentialDeletion() async throws {
+        let defaults = appBackendDefaults()
         let store = SessionCredentialClearGate(session: try appBackendTestSession())
         let transport = sessionTransport(["start_session": [.response(sessionResponse())],
             "get_own_session": [.response(sessionError("not_authenticated", status: 401))],
             "token": [.response(HTTPResponse(data: Data("{\"error_code\":\"refresh_token_not_found\"}".utf8), statusCode: 400))]])
-        let composition = try sessionComposition(transport, store: store)
+        let composition = try sessionComposition(transport, store: store, defaults: defaults)
         await composition.waitForRestoration()
         _ = try await composition.sessionAdapter.actions().startSession()
         let services = try XCTUnwrap(composition.sessionServices)
@@ -445,6 +706,9 @@ final class SessionHolderTests: XCTestCase {
         await composition.refresh()
         XCTAssertEqual(composition.account.state, .signedOut)
         XCTAssertFalse(composition.sessionAdapter.stopPending)
+        XCTAssertTrue(pendingStopKeys(defaults).isEmpty)
+        let stops = await transport.count("stop_session")
+        XCTAssertEqual(stops, 0)
     }
 
     func testAllUnitFourServicesAreAvailableThroughFencedBundle() async throws {
@@ -528,8 +792,9 @@ final class SessionHolderTests: XCTestCase {
 
 private let sessionNull = HTTPResponse(data: Data("null".utf8), statusCode: 200)
 
-private func sessionResponse(server: Int = 1000, expiry: Int = 8200) -> HTTPResponse {
-    sessionJSON(["session_id": "00000000-0000-0000-0000-000000000444", "starts_at": 1000,
+private func sessionResponse(server: Int = 1000, expiry: Int = 8200,
+    id: String = "00000000-0000-0000-0000-000000000444") -> HTTPResponse {
+    sessionJSON(["session_id": id, "starts_at": 1000,
                  "expires_at": expiry, "server_time": server])
 }
 
@@ -551,12 +816,17 @@ private func sessionTransport(_ plans: [String: [ControlledAppBackendTransport.R
 private func sessionComposition(_ transport: any HTTPTransport, clock: ManualEncounterClock = ManualEncounterClock(),
     store: (any SessionStore)? = nil, defaults: UserDefaults? = nil, keychain: AppMemoryKeychain = AppMemoryKeychain(),
     configuration: BackendConfiguration = appBackendTestConfiguration(),
-    online: @escaping @MainActor () -> Bool = { true }) throws -> AppComposition {
+    online: (@MainActor () -> Bool)? = { true },
+    network: SessionNetworkAvailability? = nil,
+    tokens: any TokenBatchStore = InMemoryTokenBatchStore(),
+    queue: any ReceiptQueue = InMemoryReceiptQueue()) throws -> AppComposition {
     AppComposition(configuration: configuration, defaults: defaults ?? appBackendDefaults(), transport: transport,
         keychain: keychain, sessionStore: try store ?? InMemorySessionStore(session: appBackendTestSession()),
-        serverTokenStore: InMemoryTokenBatchStore(), signedOutTokenStore: InMemoryTokenBatchStore(),
-        queueOpener: { InMemoryReceiptQueue() }, clock: clock, now: { appBackendTestNow },
-        sessionIsOnline: online, timeZone: { "Asia/Tokyo" })
+        serverTokenStore: tokens, signedOutTokenStore: InMemoryTokenBatchStore(),
+        queueOpener: { queue }, transportFactory: {
+            await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)
+        }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(), now: { appBackendTestNow },
+        sessionIsOnline: online, sessionNetwork: network, timeZone: { "Asia/Tokyo" })
 }
 
 private actor SessionCredentialClearGate: SessionStore {
@@ -574,4 +844,9 @@ private actor SessionCredentialClearGate: SessionStore {
         stored = nil
     }
     func releaseClear() { continuation?.resume(); continuation = nil }
+}
+
+@MainActor
+private func pendingStopKeys(_ defaults: UserDefaults) -> [String] {
+    defaults.dictionaryRepresentation().keys.filter { $0.hasPrefix(PendingSessionStopStore.prefix) }.sorted()
 }

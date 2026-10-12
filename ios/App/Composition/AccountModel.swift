@@ -49,6 +49,7 @@ final class AccountModel: ObservableObject {
     private var operationTask: Task<Void, any Error>?
     var prepareForSessionChange: @MainActor () async throws -> Void = {}
     var prepareToDiscardSession: @MainActor () async -> Void = {}
+    var authorizationWillBeDiscarded: @MainActor () async -> Void = {}
     var discoveryWillChange: @MainActor (Bool) async throws -> Void = { _ in }
     var discoveryDidChange: @MainActor (Bool) async -> Void = { _ in }
     var sessionDidChange: @MainActor (_ recreate: Bool) async -> Void = { _ in }
@@ -95,7 +96,7 @@ final class AccountModel: ObservableObject {
             guard epoch == generation, hasCurrentSessionContext else { return }
             guard let stored else {
                 if state.isSignedIn {
-                    await prepareToDiscardSession()
+                    await authorizationWillBeDiscarded()
                     guard epoch == generation, hasCurrentSessionContext else { return }
                     invalidateRefresh()
                     registeredTimeZone = nil
@@ -339,7 +340,7 @@ final class AccountModel: ObservableObject {
             if self.state == .signedOut { return }
             self.sessionChangeInProgress = true
             defer { self.sessionChangeInProgress = false }
-            await self.prepareToDiscardSession()
+            await self.authorizationWillBeDiscarded()
             guard self.hasCurrentSessionContext else { return }
             do { try self.cleanup.begin() }
             catch { self.sessionCleanupFailed = true; self.profile = nil; return }

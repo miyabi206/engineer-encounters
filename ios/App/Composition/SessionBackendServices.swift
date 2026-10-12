@@ -1,6 +1,18 @@
 import EncounterBackend
 import Foundation
 
+/// Clear local session intent only after a current account's deletion succeeds.
+struct SessionAccountDeletionService: Sendable {
+    let service: AccountDeletionService
+    let didDelete: @MainActor @Sendable () async -> Void
+
+    func deleteOwnAccount() async throws -> DeletedTransfer {
+        let result = try await service.deleteOwnAccount()
+        await didDelete()
+        return result
+    }
+}
+
 /// Adapters get the service bundle only inside an account/backend-fenced operation.
 @MainActor
 final class SessionBackendServices {
@@ -10,16 +22,16 @@ final class SessionBackendServices {
         let encounter: EncounterService
         let report: ReportService
         let safety: SafetyService
-        let deletion: AccountDeletionService
+        let deletion: SessionAccountDeletionService
         let ownAccount: OwnAccountService
 
-        init(client: RemoteProcedureClient) {
+        init(client: RemoteProcedureClient, didDelete: @escaping @MainActor @Sendable () async -> Void) {
             session = EncounterSessionService(client: client)
             qr = QRService(client: client)
             encounter = EncounterService(client: client)
             report = ReportService(client: client)
             safety = SafetyService(client: client)
-            deletion = AccountDeletionService(client: client)
+            deletion = SessionAccountDeletionService(service: AccountDeletionService(client: client), didDelete: didDelete)
             ownAccount = OwnAccountService(client: client)
         }
     }
@@ -31,9 +43,13 @@ final class SessionBackendServices {
 
     init(client: RemoteProcedureClient, account: AccountModel, owner: BackendStorageOwner) {
         self.account = account; self.owner = owner
-        epoch = account.sessionGeneration
-        fence = account.backendCallFence()
-        services = Services(client: client)
+        let epoch = account.sessionGeneration
+        let fence = account.backendCallFence()
+        self.epoch = epoch; self.fence = fence
+        services = Services(client: client) { [weak account] in
+            guard fence.isCurrent(), let account, account.sessionGeneration == epoch else { return }
+            await account.authorizationWillBeDiscarded()
+        }
     }
 
     var isCurrent: Bool { fence.isCurrent() && account.sessionGeneration == epoch }

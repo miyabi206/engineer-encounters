@@ -1,27 +1,41 @@
 import Combine
 import EncounterBackend
+import EncounterDomain
 import EncounterUI
 import Foundation
 import Network
 
 @MainActor
 final class SessionNetworkAvailability {
-    private let monitor = NWPathMonitor()
+    private let monitor: NWPathMonitor?
     private(set) var isOnline = true // Unknown reachability is not an offline refusal.
     var onOnline: (@MainActor () -> Void)?
-    init() {
+    init(monitorsSystemPath: Bool = true) {
+        monitor = monitorsSystemPath ? NWPathMonitor() : nil
+        guard let monitor else { return }
         monitor.pathUpdateHandler = { [weak self] path in
             let online = path.status != .unsatisfied
             Task { @MainActor in
                 guard let self else { return }
-                let recovered = online && !self.isOnline
-                self.isOnline = online
-                if recovered { self.onOnline?() }
+                self.receive(isOnline: online)
             }
         }
         monitor.start(queue: DispatchQueue(label: "EngineerEncounters.SessionNetwork"))
     }
-    deinit { monitor.cancel() }
+    func receive(isOnline online: Bool) {
+        let recovered = online && !isOnline
+        isOnline = online
+        if recovered { onOnline?() }
+    }
+    deinit { monitor?.cancel() }
+}
+
+/// A race that does not join an uncooperative network task after the deadline.
+@MainActor
+private final class SessionStopCompletion {
+    private var continuation: CheckedContinuation<Void, Never>?
+    init(_ continuation: CheckedContinuation<Void, Never>) { self.continuation = continuation }
+    func finish() { continuation?.resume(); continuation = nil }
 }
 
 /// Retains precise adapter failures without expanding the package's S08 error API.
@@ -45,19 +59,23 @@ final class SessionAdapter: ObservableObject {
     @Published private(set) var failure: SessionAdapterFailure?
     private let account: AccountModel
     private let isOnline: @MainActor () -> Bool
+    private let clock: any EncounterClock
     private var backend: SessionBackendServices?
     private var configuredEpoch: UUID?
     private var version: UInt64 = 0
     private var read: (id: UUID, task: Task<SessionTransfer?, any Error>)?
     private var upload: (id: UUID, task: Task<Void, any Error>)?
     private var discoveryStop: SessionHolder.Stop?
+    private var retry: (id: UUID, task: Task<Void, Never>)?
 
-    init(account: AccountModel, holder: SessionHolder, isOnline: @escaping @MainActor () -> Bool) {
-        self.account = account; self.holder = holder; self.isOnline = isOnline
+    init(account: AccountModel, holder: SessionHolder, clock: any EncounterClock,
+         isOnline: @escaping @MainActor () -> Bool) {
+        self.account = account; self.holder = holder; self.clock = clock; self.isOnline = isOnline
     }
 
     func configure(_ backend: SessionBackendServices?) async {
         if self.backend !== backend {
+            retry?.task.cancel(); retry = nil
             read?.task.cancel(); read = nil
             upload?.task.cancel(); upload = nil
             await holder.discardRequest()
@@ -77,6 +95,7 @@ final class SessionAdapter: ObservableObject {
     }
 
     func invalidate() async {
+        retry?.task.cancel(); retry = nil
         read?.task.cancel(); read = nil
         upload?.task.cancel(); upload = nil
         backend = nil; configuredEpoch = nil; discoveryStop = nil; failure = nil
@@ -94,10 +113,16 @@ final class SessionAdapter: ObservableObject {
     func foreground() async {
         // Foreground retries pending writes without claiming a restored session or changing
         // account restoration's existing request order. S08 explicitly loads get_own_session.
-        guard let backend, backend.isCurrent, !account.sessionChangeInProgress else { return }
-        do { try await flushStop(backend) }
-        catch { await handle(error, backend: backend, starting: false) }
-        await update()
+        guard let backend, backend.isCurrent, !account.sessionChangeInProgress, retry == nil else { return }
+        let id = UUID()
+        let task = Task { [weak self] in
+            guard let self else { return }
+            defer { if self.retry?.id == id { self.retry = nil } }
+            do { try await self.flushStop(backend) }
+            catch { await self.handle(error, backend: backend, starting: false) }
+            await self.update()
+        }
+        retry = (id, task)
     }
 
     func discoveryWillChange(enabled: Bool) async throws {
@@ -111,7 +136,7 @@ final class SessionAdapter: ObservableObject {
             }
             return
         }
-        discoveryStop = await holder.stop(owner: backend.owner, discoveryOff: true)
+        discoveryStop = try await holder.stop(owner: backend.owner, discoveryOff: true)
         await update()
     }
 
@@ -133,12 +158,34 @@ final class SessionAdapter: ObservableObject {
     /// Runs before the credential tombstone and runtime/storage cleanup. It does not retain
     /// outgoing credentials or wait for an outstanding start/get to drain.
     func prepareToDiscardSession() async {
-        guard let backend, backend.isCurrent else { await invalidate(); return }
-        let stop = await holder.stop(owner: backend.owner, force: false)
+        guard account.hasCurrentSessionContext else { await invalidate(); return }
+        guard let backend, backend.isCurrent else {
+            await holder.discardPendingStops()
+            await invalidate()
+            return
+        }
+        retry?.task.cancel(); retry = nil
+        upload?.task.cancel(); upload = nil
+        let stop = try? await holder.stop(owner: backend.owner, force: false)
         await update()
         if stop != nil {
-            _ = try? await backend.call(outgoing: true) { try await $0.session.stopSession() }
+            let deadline = await clock.now().monotonic + 2
+            var stopping: Task<Void, Never>?
+            var timeout: Task<Void, Never>?
+            await withCheckedContinuation { continuation in
+                let completion = SessionStopCompletion(continuation)
+                stopping = Task {
+                    _ = try? await backend.call(outgoing: true) { try await $0.session.stopSession() }
+                    completion.finish()
+                }
+                timeout = Task {
+                    try? await self.clock.wait(until: deadline)
+                    completion.finish()
+                }
+            }
+            stopping?.cancel(); timeout?.cancel()
         }
+        if backend.isCurrent { await holder.discardPendingStops() }
         await invalidate()
     }
 
@@ -147,14 +194,11 @@ final class SessionAdapter: ObservableObject {
     func authorizationWillBeDiscarded() async {
         guard account.hasCurrentSessionContext,
               configuredEpoch == nil || account.sessionGeneration == configuredEpoch else { return }
-        let backend = backend
-        let stop = await holder.stopForAuthorizationLoss()
+        retry?.task.cancel(); retry = nil
+        read?.task.cancel(); read = nil
+        upload?.task.cancel(); upload = nil
+        await holder.discardPendingStops()
         await update()
-        if stop != nil, let backend, account.sessionGeneration == backend.epoch {
-            // The manager may already have invalidated its cached authorization. That
-            // refusal is best effort too; never keep credentials to finish this stop.
-            _ = try? await backend.call(outgoing: true) { try await $0.session.stopSession() }
-        }
     }
 
     private func context(epoch: UUID) throws -> SessionBackendServices {
@@ -196,9 +240,11 @@ final class SessionAdapter: ObservableObject {
 
     private func stop(epoch: UUID) async throws {
         let backend = try context(epoch: epoch)
-        await holder.stop(owner: backend.owner)
-        await update()
-        do { try await flushStop(backend) }
+        do {
+            try await holder.stop(owner: backend.owner)
+            await update()
+            try await flushStop(backend)
+        }
         catch {
             await handle(error, backend: backend, starting: false)
             if error is CancellationError { throw CancellationError() }
@@ -214,6 +260,7 @@ final class SessionAdapter: ObservableObject {
         let task = Task {
             guard await self.holder.isCurrent(request) else { throw SessionActionError.unavailable }
             return try await backend.call { services -> SessionTransfer? in
+                guard await self.holder.markSent(request) else { throw SessionActionError.unavailable }
                 if starting { return try await services.session.startSession() }
                 return try await services.session.getOwnSession()
             }
@@ -224,7 +271,7 @@ final class SessionAdapter: ObservableObject {
         do {
             let response = try await task.value
             guard backend.isCurrent else { throw SessionActionError.unavailable }
-            guard await holder.receive(response, for: request) else { throw SessionActionError.unavailable }
+            guard try await holder.receive(response, for: request) else { throw SessionActionError.unavailable }
             failure = nil
             let snapshot = await holder.snapshot()
             publish(snapshot)
@@ -237,7 +284,7 @@ final class SessionAdapter: ObservableObject {
     }
 
     private func flushStop(_ backend: SessionBackendServices) async throws {
-        guard let stop = await holder.pendingStop(owner: backend.owner) else { return }
+        guard let stop = try await holder.pendingStop(owner: backend.owner) else { return }
         if let upload {
             try await upload.task.value
             if self.upload?.id == upload.id { self.upload = nil }
@@ -249,7 +296,8 @@ final class SessionAdapter: ObservableObject {
         let task = Task {
             // A stop after an in-flight start must reach the server after that start finishes.
             _ = await read?.result
-            guard backend.isCurrent, await self.holder.pendingStop(owner: backend.owner) == stop else { return }
+            try Task.checkCancellation()
+            guard backend.isCurrent, try await self.holder.pendingStop(owner: backend.owner) == stop else { return }
             if await self.holder.needsDiscoveryOff(stop) {
                 try await backend.call { try await $0.ownAccount.setDiscovery(enabled: false) }
                 if var profile = self.account.profile {
@@ -259,6 +307,7 @@ final class SessionAdapter: ObservableObject {
             } else {
                 _ = try await backend.call { try await $0.session.stopSession() }
             }
+            try Task.checkCancellation()
             await self.holder.finish(stop)
         }
         upload = (id, task)
@@ -267,7 +316,7 @@ final class SessionAdapter: ObservableObject {
         await update()
         guard backend.isCurrent else { throw SessionActionError.unavailable }
         // A second stop/discovery-off request may have arrived during the upload.
-        if await holder.pendingStop(owner: backend.owner) != nil {
+        if try await holder.pendingStop(owner: backend.owner) != nil {
             if upload?.id == id { upload = nil }
             try await flushStop(backend)
         } else if self.backend === backend { failure = nil }

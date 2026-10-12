@@ -15,7 +15,7 @@ final class AppComposition: ObservableObject {
     let sessionHolder: SessionHolder
     let sessionAdapter: SessionAdapter
     private(set) var sessionServices: SessionBackendServices?
-    private let sessionNetwork = SessionNetworkAvailability()
+    private let sessionNetwork: SessionNetworkAvailability
     private let linkServicesFactory: (@MainActor (SessionManager) -> (OwnLinkService, GitHubLinksService))?
     private var client: RemoteProcedureClient?
     private let clientFactory: (@MainActor (SessionManager) -> RemoteProcedureClient)?
@@ -77,6 +77,7 @@ final class AppComposition: ObservableObject {
          now: @escaping @Sendable () -> Date = { Date() },
          webAuthenticationRunner: (any GitHubWebAuthenticationRunning)? = nil,
          sessionIsOnline: (@MainActor () -> Bool)? = nil,
+         sessionNetwork: SessionNetworkAvailability? = nil,
          timeZone: @escaping @MainActor () -> String = { TimeZone.current.identifier }) {
         participation = ParticipationFlag(defaults: defaults)
         self.keychain = keychain
@@ -135,9 +136,10 @@ final class AppComposition: ObservableObject {
             account = AccountModel(sessions: nil, service: nil, defaults: defaults, timeZone: timeZone)
         }
         linkAdapter = LinkAdapter(account: account, runner: webAuthenticationRunner ?? SystemGitHubWebAuthenticationRunner())
-        sessionHolder = SessionHolder(clock: clock)
-        let sessionNetwork = sessionNetwork
-        sessionAdapter = SessionAdapter(account: account, holder: sessionHolder,
+        sessionHolder = SessionHolder(clock: clock, stops: PendingSessionStopStore(defaults: defaults))
+        let sessionNetwork = sessionNetwork ?? SessionNetworkAvailability()
+        self.sessionNetwork = sessionNetwork
+        sessionAdapter = SessionAdapter(account: account, holder: sessionHolder, clock: clock,
             isOnline: sessionIsOnline ?? { sessionNetwork.isOnline })
         if sessionIsOnline == nil {
             sessionNetwork.onOnline = { [weak sessionAdapter] in
@@ -152,6 +154,7 @@ final class AppComposition: ObservableObject {
         isParticipating = participation.isEnabled
         account.prepareForSessionChange = { [weak self] in try await self?.prepareForSessionChange() }
         account.prepareToDiscardSession = { [weak self] in await self?.sessionAdapter.prepareToDiscardSession() }
+        account.authorizationWillBeDiscarded = { [weak self] in await self?.sessionAdapter.authorizationWillBeDiscarded() }
         account.discoveryWillChange = { [weak self] enabled in try await self?.sessionAdapter.discoveryWillChange(enabled: enabled) }
         account.discoveryDidChange = { [weak self] enabled in await self?.sessionAdapter.discoveryDidChange(enabled: enabled) }
         account.sessionDidChange = { [weak self] force in await self?.recreateRuntime(force: force) }
