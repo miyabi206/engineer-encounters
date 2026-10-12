@@ -93,7 +93,9 @@ returns jsonb language sql stable set search_path = '' as $$
         'start', pg_catalog.jsonb_build_object(
             'own_token', (select r.value->'windows'->0->>'token' from sessions_qr_test.results as r where r.label = 'tokens-' || side),
             'peer_token', (select r.value->'windows'->0->>'token' from sessions_qr_test.results as r where r.label = 'tokens-' || (3 - side)),
-            'observed_at', (select c.seconds from sessions_qr_test.clock as c)),
+            'observed_at', greatest(
+                (select (r.value->>'starts_at')::bigint from sessions_qr_test.results as r where r.label = 'new-start'),
+                (select (r.value->>'starts_at')::bigint from sessions_qr_test.results as r where r.label = 'peer-start'))),
         'observed_duration', 0, 'session_flag', true, 'is_final_evidence', true));
 $$;
 
@@ -116,8 +118,9 @@ from pg_catalog.generate_series(1, 11) as g(n) where n <> 3;
 delete from auth.users where id = sessions_qr_test.id(12);
 
 -- Every row-producing assertion below has a fixed cardinality. The plan is
--- 24 RPC metadata + 5 schema + 18 Live + 12 Ready + 3 Discovery + 114 behavior.
-select extensions.plan(176);
+-- 24 RPC metadata + 5 schema + 18 Live + 12 Ready + 3 Discovery +
+-- 114 existing behavior + 6 lock/clock predicates + 17 waiter regressions.
+select extensions.plan(199);
 
 select extensions.ok(p.prosecdef and 'search_path=""' = any(p.proconfig), f.signature || ' has the definer boundary')
 from sessions_qr_test.rpc as f join pg_catalog.pg_proc as p on p.oid = f.signature::regprocedure;
@@ -156,7 +159,7 @@ insert into sessions_qr_test.results values ('start', sessions_qr_test.as_caller
 select extensions.is((select pg_catalog.array_agg(k order by k) from sessions_qr_test.results as r,
     lateral pg_catalog.jsonb_object_keys(r.value) as k where r.label = 'start'),
     array['expires_at', 'server_time', 'session_id', 'starts_at'], 'Session has exactly the four required keys');
-select extensions.ok((select r.value = s.value from sessions_qr_test.results as r, sessions_qr_test.results as s
+select extensions.ok((select r.value - 'server_time' = s.value - 'server_time' from sessions_qr_test.results as r, sessions_qr_test.results as s
     where r.label = 'start' and s.label = 'start-again'), 'start returns the same active Session');
 select extensions.is((select (value->>'expires_at')::bigint - (value->>'starts_at')::bigint from sessions_qr_test.results where label = 'start'),
     7200::bigint, 'new session lasts 7200 seconds');
@@ -166,8 +169,8 @@ select extensions.ok((select pg_catalog.bool_and(pg_catalog.jsonb_typeof(r.value
 select extensions.ok((select s.starts_at = pg_catalog.date_trunc('second', s.starts_at)
     and s.expires_at = s.starts_at + interval '7200 seconds' from private.sessions as s where s.user_id = sessions_qr_test.id(1)),
     'session ledger starts and expires at whole seconds');
-select extensions.ok(sessions_qr_test.as_caller(sessions_qr_test.id(1), 'public.get_own_session()') =
-    (select value from sessions_qr_test.results where label = 'start'), 'get returns the active Session');
+select extensions.ok(sessions_qr_test.as_caller(sessions_qr_test.id(1), 'public.get_own_session()') - 'server_time' =
+    (select value - 'server_time' from sessions_qr_test.results where label = 'start'), 'get returns the active Session');
 do $$ begin
     for n in 1..18 loop perform sessions_qr_test.as_caller(sessions_qr_test.id(1), 'public.start_session()'); end loop;
 end; $$;
@@ -184,10 +187,10 @@ select extensions.lives_ok('select sessions_qr_test.as_caller(sessions_qr_test.i
 select extensions.is((select pg_catalog.count(*) from private.account_limit_events where user_id = sessions_qr_test.id(1) and bucket = 'start_session'),
     20::bigint, 'renewed start prunes the boundary event');
 update private.profiles set moderation_state = 'hidden' where user_id = sessions_qr_test.id(1);
-select extensions.ok(sessions_qr_test.as_caller(sessions_qr_test.id(1), 'public.get_own_session()') =
-    (select value from sessions_qr_test.results where label = 'start'), 'get needs only a live account');
+select extensions.ok(sessions_qr_test.as_caller(sessions_qr_test.id(1), 'public.get_own_session()') - 'server_time' =
+    (select value - 'server_time' from sessions_qr_test.results where label = 'start'), 'get needs only a live account');
 insert into sessions_qr_test.results values ('stop', sessions_qr_test.as_caller(sessions_qr_test.id(1), 'public.stop_session()'));
-select extensions.ok((select r.value = s.value from sessions_qr_test.results as r, sessions_qr_test.results as s
+select extensions.ok((select r.value - 'server_time' = s.value - 'server_time' from sessions_qr_test.results as r, sessions_qr_test.results as s
     where r.label = 'start' and s.label = 'stop'), 'unready stop returns original ID, start and expiry');
 select extensions.ok((select stopped_at is not null from private.sessions where user_id = sessions_qr_test.id(1)), 'stop stamps the ledger end');
 select extensions.is(sessions_qr_test.as_caller(sessions_qr_test.id(1), 'public.stop_session()'), 'null'::jsonb, 'repeated stop is JSON null');
@@ -216,6 +219,78 @@ select extensions.is((select kind from private.encounters where user_a = session
     'session', 'RPC session ledger supplies authoritative kind');
 select extensions.is((select pg_catalog.count(*) from private.encounter_views as v join private.encounters as e using (encounter_id)
     where e.user_a = sessions_qr_test.id(1) and e.user_b = sessions_qr_test.id(2) and v.revealed), 2::bigint, 'session confirmation reveals both views');
+
+-- pgTAP uses one transaction/session. Assert the lock/clock order as well as
+-- ledger rows whose starts follow transaction now, representing a lock waiter.
+select extensions.ok(pg_catalog.strpos(p.prosrc, 'server_time := pg_catalog.clock_timestamp()') >
+    pg_catalog.strpos(p.prosrc, 'for update;') and pg_catalog.strpos(p.prosrc, 'for update;') >
+    pg_catalog.strpos(p.prosrc, 'pg_catalog.pg_advisory_xact_lock'), f.signature || ' samples wall time after account/profile locks')
+from (values ('private.start_session()'), ('private.stop_session()')) as f(signature)
+join pg_catalog.pg_proc as p on p.oid = f.signature::regprocedure;
+select extensions.ok(p.prosrc ~ 's[.]stopped_at is null and s[.]expires_at > server_time'
+    and p.prosrc !~ 's[.]starts_at <=', f.signature || ' matches every unstopped unexpired session without a stale start bound')
+from (values ('private.start_session()'), ('private.stop_session()'), ('private.turn_discovery_off(uuid)')) as f(signature)
+join pg_catalog.pg_proc as p on p.oid = f.signature::regprocedure;
+select extensions.ok(pg_catalog.strpos(p.prosrc, 'private.turn_discovery_off(caller)') >
+    pg_catalog.strpos(p.prosrc, 'for update;') and pg_catalog.strpos(p.prosrc, 'for update;') >
+    pg_catalog.strpos(p.prosrc, 'pg_catalog.pg_advisory_xact_lock')
+    and (select h.prosrc ~ 'server_time timestamptz := pg_catalog.clock_timestamp[(][)]'
+        from pg_catalog.pg_proc as h where h.oid = 'private.turn_discovery_off(uuid)'::regprocedure),
+    'discovery off samples wall time in its helper after account/profile locks')
+from pg_catalog.pg_proc as p where p.oid = 'public.set_discovery(boolean)'::regprocedure;
+
+insert into private.sessions (session_id, user_id, starts_at, expires_at)
+values (sessions_qr_test.id(450), sessions_qr_test.id(8), pg_catalog.clock_timestamp(), pg_catalog.clock_timestamp() + interval '1 hour');
+select extensions.ok((select starts_at > pg_catalog.now() from private.sessions where session_id = sessions_qr_test.id(450)),
+    'waiter fixture begins after transaction now');
+insert into sessions_qr_test.results values ('waiter-start', sessions_qr_test.as_caller(sessions_qr_test.id(8), 'public.start_session()'));
+select extensions.is((select value->>'session_id' from sessions_qr_test.results where label = 'waiter-start'),
+    sessions_qr_test.id(450)::text, 'start reuses the row committed while a waiter was blocked');
+select extensions.is((select pg_catalog.count(*) from private.sessions where user_id = sessions_qr_test.id(8)),
+    1::bigint, 'waiting start does not create a second active row');
+select extensions.ok((select (r.value->>'server_time')::bigint >= pg_catalog.floor(extract(epoch from s.starts_at))::bigint
+    and (r.value->>'server_time')::bigint <= pg_catalog.floor(extract(epoch from pg_catalog.clock_timestamp()))::bigint
+    from sessions_qr_test.results as r join private.sessions as s on s.session_id = sessions_qr_test.id(450)
+    where r.label = 'waiter-start'), 'waiter response uses the current wall clock');
+insert into sessions_qr_test.results values ('waiter-stop', sessions_qr_test.as_caller(sessions_qr_test.id(8), 'public.stop_session()'));
+select extensions.is((select value->>'session_id' from sessions_qr_test.results where label = 'waiter-stop'),
+    sessions_qr_test.id(450)::text, 'stop finds a session begun after transaction now');
+select extensions.ok((select stopped_at >= starts_at and stopped_at <= pg_catalog.clock_timestamp()
+    from private.sessions where session_id = sessions_qr_test.id(450)), 'stop stamps a wall time after the new start');
+select extensions.is(sessions_qr_test.as_caller(sessions_qr_test.id(8), 'public.stop_session()'), 'null'::jsonb, 'waiter stop is idempotent');
+
+with clock as materialized (select pg_catalog.clock_timestamp() - interval '1 millisecond' as t)
+insert into private.sessions (session_id, user_id, starts_at, expires_at)
+select sessions_qr_test.id(450 + n), sessions_qr_test.id(8), t + n * interval '1 microsecond', t + interval '1 hour'
+from clock cross join pg_catalog.generate_series(1, 2) as g(n);
+insert into sessions_qr_test.results values ('duplicate-stop', sessions_qr_test.as_caller(sessions_qr_test.id(8), 'public.stop_session()'));
+select extensions.is((select value->>'session_id' from sessions_qr_test.results where label = 'duplicate-stop'),
+    sessions_qr_test.id(452)::text, 'stop returns the latest of two active ledgers without a cardinality error');
+select extensions.is((select pg_catalog.count(*) from private.sessions where session_id in (sessions_qr_test.id(451), sessions_qr_test.id(452))
+    and stopped_at >= starts_at), 2::bigint, 'stop stamps both active ledgers');
+select extensions.is((select pg_catalog.count(*) from private.sessions where user_id = sessions_qr_test.id(8)
+    and stopped_at is null and expires_at > pg_catalog.clock_timestamp()), 0::bigint, 'duplicate stop leaves no running ledger');
+select extensions.is(sessions_qr_test.as_caller(sessions_qr_test.id(8), 'public.stop_session()'), 'null'::jsonb, 'duplicate stop remains idempotent');
+
+with clock as materialized (select pg_catalog.clock_timestamp() as t)
+insert into private.sessions (session_id, user_id, starts_at, expires_at)
+select sessions_qr_test.id(452 + n), sessions_qr_test.id(8), t, t + interval '1 hour'
+from clock cross join pg_catalog.generate_series(1, 2) as g(n);
+select sessions_qr_test.issue(8, 'waiter-off');
+select sessions_qr_test.as_caller_void(sessions_qr_test.id(8), 'public.set_discovery(false)');
+select extensions.is((select pg_catalog.count(*) from private.sessions where session_id in (sessions_qr_test.id(453), sessions_qr_test.id(454))
+    and stopped_at >= starts_at), 2::bigint, 'discovery off stops both ledgers begun after transaction now');
+select extensions.is((select pg_catalog.count(*) from private.sessions where user_id = sessions_qr_test.id(8)
+    and stopped_at is null and expires_at > pg_catalog.clock_timestamp()), 0::bigint, 'waiting discovery off leaves no running session');
+select extensions.is((select pg_catalog.count(*) from private.qr_codes where issuer_id = sessions_qr_test.id(8)), 0::bigint, 'waiting discovery off cancels QR atomically');
+select extensions.is((select discovery_on from private.profiles where user_id = sessions_qr_test.id(8)), false, 'waiting discovery off persists the flag');
+with clock as materialized (select pg_catalog.clock_timestamp() as t)
+insert into private.sessions (session_id, user_id, starts_at, expires_at)
+select sessions_qr_test.id(455), sessions_qr_test.id(8), t - interval '1 hour', t from clock;
+select extensions.is(sessions_qr_test.as_caller(sessions_qr_test.id(8), 'public.stop_session()'), 'null'::jsonb, 'stop excludes an already expired unstopped ledger');
+select extensions.ok((select stopped_at is null from private.sessions where session_id = sessions_qr_test.id(455)), 'stop preserves an expired ledger unchanged');
+select sessions_qr_test.as_caller_void(sessions_qr_test.id(8), 'public.set_discovery(true)');
+delete from private.account_limit_events where user_id = sessions_qr_test.id(8) and bucket in ('start_session', 'issue_qr_code');
 
 -- Early stop, natural expiry and a stop after expiry all use the earlier end.
 insert into private.sessions (session_id, user_id, starts_at, expires_at, stopped_at)

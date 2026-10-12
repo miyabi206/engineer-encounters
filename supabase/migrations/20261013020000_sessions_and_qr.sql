@@ -9,6 +9,19 @@ create index qr_codes_expiry_idx on private.qr_codes (expires_at);
 alter table private.qr_codes enable row level security;
 revoke all on table private.qr_codes from public, anon, authenticated, service_role;
 
+-- Shared with stale GitHub cache recovery. Callers hold account/profile locks;
+-- sample the wall clock here, after every lock wait, rather than transaction now.
+create or replace function private.turn_discovery_off(account_id uuid)
+returns void language plpgsql security definer set search_path = '' as $$
+declare server_time timestamptz := pg_catalog.clock_timestamp();
+begin
+    update private.profiles as p set discovery_on = false where p.user_id = account_id;
+    update private.sessions as s set stopped_at = server_time
+    where s.user_id = account_id and s.stopped_at is null and s.expires_at > server_time;
+    delete from private.qr_codes as q where q.issuer_id = account_id;
+end;
+$$;
+
 create function private.session_json(session private.sessions, server_time timestamptz)
 returns jsonb language sql stable set search_path = '' as $$
     select case when (session).session_id is null then 'null'::jsonb else
@@ -22,12 +35,13 @@ create function private.start_session()
 returns jsonb language plpgsql security definer set search_path = '' as $$
 declare
     caller uuid := private.require_caller();
-    server_time timestamptz := pg_catalog.now();
+    server_time timestamptz;
     active_session private.sessions%rowtype;
 begin
     perform pg_catalog.pg_advisory_xact_lock(31001, pg_catalog.hashtext(caller::text));
     perform private.require_caller();
     perform 1 from private.profiles as p where p.user_id = caller for update;
+    server_time := pg_catalog.clock_timestamp();
     if not private.account_is_ready(caller) then
         perform private.raise_error('account_not_ready');
     end if;
@@ -38,9 +52,8 @@ begin
         perform private.raise_error('rate_limited');
     end if;
     select s.* into active_session from private.sessions as s
-    where s.user_id = caller and s.starts_at <= server_time and server_time < s.expires_at
-      and s.stopped_at is null
-    order by s.starts_at desc limit 1 for update;
+    where s.user_id = caller and s.stopped_at is null and s.expires_at > server_time
+    order by s.starts_at desc, s.session_id limit 1 for update;
     if not found then
         insert into private.sessions (user_id, starts_at, expires_at)
         values (caller, pg_catalog.date_trunc('second', server_time),
@@ -58,15 +71,20 @@ create function private.stop_session()
 returns jsonb language plpgsql security definer set search_path = '' as $$
 declare
     caller uuid := private.require_caller();
-    server_time timestamptz := pg_catalog.now();
+    server_time timestamptz;
     active_session private.sessions%rowtype;
 begin
     perform pg_catalog.pg_advisory_xact_lock(31001, pg_catalog.hashtext(caller::text));
     perform private.require_caller();
-    update private.sessions as s set stopped_at = server_time
-    where s.user_id = caller and s.starts_at <= server_time and server_time < s.expires_at
-      and s.stopped_at is null
-    returning s.* into active_session;
+    perform 1 from private.profiles as p where p.user_id = caller for update;
+    server_time := pg_catalog.clock_timestamp();
+    -- Stop every active ledger left by an older race, returning one stable row.
+    with stopped as (
+        update private.sessions as s set stopped_at = server_time
+        where s.user_id = caller and s.stopped_at is null and s.expires_at > server_time
+        returning s.*
+    ) select s.* into active_session from stopped as s
+        order by s.starts_at desc, s.session_id limit 1;
     return private.session_json(active_session, server_time);
 end;
 $$;
@@ -75,13 +93,14 @@ create function private.get_own_session()
 returns jsonb language plpgsql security definer set search_path = '' as $$
 declare
     caller uuid := private.require_caller();
+    server_time timestamptz := pg_catalog.clock_timestamp();
     active_session private.sessions%rowtype;
 begin
     select s.* into active_session from private.sessions as s
-    where s.user_id = caller and s.starts_at <= pg_catalog.now() and pg_catalog.now() < s.expires_at
+    where s.user_id = caller and s.starts_at <= server_time and server_time < s.expires_at
       and s.stopped_at is null
     order by s.starts_at desc limit 1;
-    return private.session_json(active_session, pg_catalog.now());
+    return private.session_json(active_session, server_time);
 end;
 $$;
 
@@ -284,11 +303,7 @@ begin
     end if;
     select p.* into profile from private.profiles as p where p.user_id = caller for update;
     if not enabled then
-        update private.profiles as p set discovery_on = false where p.user_id = caller;
-        update private.sessions as s set stopped_at = pg_catalog.now()
-        where s.user_id = caller and s.starts_at <= pg_catalog.now() and pg_catalog.now() < s.expires_at
-          and s.stopped_at is null;
-        delete from private.qr_codes as q where q.issuer_id = caller;
+        perform private.turn_discovery_off(caller);
         return;
     end if;
     if not private.account_is_ready(caller) then
@@ -335,7 +350,7 @@ $$;
 revoke all on function private.session_json(private.sessions, timestamptz), private.start_session(),
     private.stop_session(), private.get_own_session(), private.issue_qr_code(), private.cancel_qr_code(),
     private.confirm_encounter(uuid, uuid, text, bigint, bigint, timestamptz), private.redeem_qr_code(text),
-    private.cleanup_expired_data(timestamptz) from public, anon, authenticated, service_role;
+    private.cleanup_expired_data(timestamptz), private.turn_discovery_off(uuid) from public, anon, authenticated, service_role;
 revoke all on function public.start_session(), public.stop_session(), public.get_own_session(),
     public.issue_qr_code(), public.cancel_qr_code(), public.redeem_qr_code(text), public.set_discovery(boolean)
     from public, anon, authenticated, service_role;

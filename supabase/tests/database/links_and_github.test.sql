@@ -98,6 +98,14 @@ returns jsonb language sql stable set search_path = '' as $$
         'references', (select coalesce(pg_catalog.jsonb_agg(pg_catalog.to_jsonb(r) order by r.reference_id), '[]'::jsonb)
             from links_github_test.saved_references as r));
 $$;
+create function links_github_test.auth_snapshot()
+returns jsonb language sql stable set search_path = '' as $$
+    select pg_catalog.jsonb_build_object(
+        'users', (select pg_catalog.jsonb_agg(pg_catalog.to_jsonb(u) order by u.id) from auth.users as u
+            where u.id in (links_github_test.id(1), links_github_test.id(2), links_github_test.id(3))),
+        'identities', (select pg_catalog.jsonb_agg(pg_catalog.to_jsonb(i) order by i.id) from auth.identities as i
+            where i.user_id in (links_github_test.id(1), links_github_test.id(2), links_github_test.id(3))));
+$$;
 create table links_github_test.rpcs (
     schema_name text, name text, signature text, argument_names text[], arguments text[], call text
 );
@@ -148,8 +156,8 @@ grant execute on all functions in schema links_github_test to anon, authenticate
 -- Catalog/roles: 67; Live errors: 20; invalid inputs: 101;
 -- reads/sync: 14; resources: 4; update/reorder/bounds: 9; save: 12;
 -- inclusive sync/ID bounds: 3; link cap: 7; fetch budget: 8;
--- delete/disconnect/cache/cascade: 32. Total: 277.
-select extensions.plan(277);
+-- delete/disconnect/cache/cascade: 38. Total: 283.
+select extensions.plan(283);
 
 select extensions.ok((select relrowsecurity from pg_catalog.pg_class
     where oid = 'private.linked_identities'::regclass), 'linked identity cache has RLS');
@@ -287,7 +295,7 @@ select extensions.is(links_github_test.as_caller(links_github_test.id(1), 'publi
     pg_catalog.jsonb_build_array(links_github_test.expected_link(201,4), links_github_test.expected_link(202,4)), 'own list includes private links and UUID tie order');
 select extensions.is(links_github_test.as_caller(links_github_test.id(3), 'public.list_own_links()'), '[]'::jsonb, 'no profile returns empty links');
 select extensions.is(links_github_test.as_caller(links_github_test.id(1), 'public.get_github_connection()'),
-    '{"connected":true,"handle":null}'::jsonb, 'live unsynced identity is connected');
+    '{"connected":false,"handle":null}'::jsonb, 'live unsynced identity needs a cache to connect');
 select extensions.is(links_github_test.as_caller(links_github_test.id(4), 'public.get_github_connection()'),
     '{"connected":false,"handle":null}'::jsonb, 'absent Auth identity is disconnected');
 select extensions.is(links_github_test.as_service('service.get_github_identity(links_github_test.id(4))'),
@@ -309,7 +317,7 @@ select extensions.is(links_github_test.as_service($call$service.sync_github_iden
     '{"connected":true,"handle":"new-owner"}'::jsonb, 'sync updates matching cache');
 update private.linked_identities set provider_user_id = '999' where user_id = links_github_test.id(1);
 select extensions.is(links_github_test.as_caller(links_github_test.id(1), 'public.get_github_connection()'),
-    '{"connected":true,"handle":null}'::jsonb, 'mismatched cache handle ignored');
+    '{"connected":false,"handle":null}'::jsonb, 'mismatched cache does not prove connection');
 select extensions.is(links_github_test.as_service('service.get_github_identity(links_github_test.id(1))')->'verified_addresses',
     '[]'::jsonb, 'mismatched cache addresses ignored');
 select links_github_test.expect_error($stmt$select links_github_test.as_service('service.sync_github_identity(links_github_test.id(1),''999'',''owner'',''{}''::text[])')$stmt$,
@@ -367,7 +375,7 @@ select links_github_test.expect_error($stmt$select links_github_test.as_service(
 update auth.identities set provider_id='777',identity_data='{"sub":"777"}' where user_id=links_github_test.id(1) and provider='github';
 select links_github_test.expect_error($stmt$select links_github_test.as_service('service.save_github_link(links_github_test.id(1),''204'',''101'',''https://github.com/owner-1/repo'',''Title'','''',null,''{}''::text[],'''',''private'',false)')$stmt$,
     'not_found','','changed live identity refuses stale owner save');
-select extensions.is(links_github_test.as_caller(links_github_test.id(1),'public.get_github_connection()'),'{"connected":true,"handle":null}'::jsonb,'changed Auth identity hides stale cache');
+select extensions.is(links_github_test.as_caller(links_github_test.id(1),'public.get_github_connection()'),'{"connected":false,"handle":null}'::jsonb,'changed Auth identity invalidates stale cache');
 update auth.identities set provider_id='101',identity_data='{"sub":"101"}' where user_id=links_github_test.id(1) and provider='github';
 
 insert into links_github_test.results values ('new',links_github_test.as_service(
@@ -454,17 +462,20 @@ select extensions.is((select pg_catalog.count(*) from links_github_test.saved_re
 select links_github_test.expect_error('select links_github_test.as_caller_void(links_github_test.id(1),''public.set_discovery(true)'')',
     'prerequisite_missing','link','identity/cache alone never satisfies the link prerequisite');
 
--- Disconnect removes the managed GitHub row and repository references while
--- preserving another provider and another account's links/cache.
+-- Disconnect removes repository references/cache and leaves all managed Auth
+-- rows intact for the client's subsequent Auth unlink request.
 insert into links_github_test.results values ('disconnect-link',links_github_test.as_service(
     $call$service.save_github_link(links_github_test.id(1),'601','101','https://github.com/owner-1/repo-601','Disconnect','',null,'{}'::text[],'','private',false)$call$));
 insert into links_github_test.saved_references values (3,
     (select (value->>'link_id')::uuid from links_github_test.results where label='disconnect-link'));
+insert into links_github_test.results values ('auth-before-disconnect', links_github_test.auth_snapshot());
 select extensions.is(links_github_test.as_caller(links_github_test.id(1),'public.disconnect_github()'),
     '{"connected":false,"handle":null}'::jsonb,'disconnect exact success shape');
 select extensions.is((select pg_catalog.count(*) from private.external_links where owner_id=links_github_test.id(1)),0::bigint,'disconnect removes own repository links');
 select extensions.is((select pg_catalog.count(*) from private.linked_identities where user_id=links_github_test.id(1)),0::bigint,'disconnect removes identity cache');
-select extensions.is((select pg_catalog.count(*) from auth.identities where user_id=links_github_test.id(1) and provider='github'),0::bigint,'disconnect removes Auth GitHub identity');
+select extensions.is((select pg_catalog.count(*) from auth.identities where user_id=links_github_test.id(1) and provider='github'),1::bigint,'disconnect leaves Auth GitHub identity');
+select extensions.is(links_github_test.auth_snapshot(),
+    (select value from links_github_test.results where label='auth-before-disconnect'), 'disconnect leaves auth.users and auth.identities entirely unchanged');
 select extensions.is((select pg_catalog.count(*) from auth.identities where user_id=links_github_test.id(1) and provider='apple' and provider_id='apple-1'),1::bigint,'disconnect leaves the Apple identity');
 select extensions.is((select pg_catalog.count(*) from auth.users where id=links_github_test.id(1)),1::bigint,'disconnect leaves the Auth account');
 select extensions.is((select pg_catalog.count(*) from links_github_test.saved_references),0::bigint,'disconnect cascades repository saved references');
@@ -472,6 +483,20 @@ select extensions.is((select pg_catalog.count(*) from private.external_links whe
 select extensions.is((select pg_catalog.count(*) from private.linked_identities where user_id=links_github_test.id(3)),1::bigint,'disconnect preserves another account cache');
 select extensions.is(links_github_test.as_caller(links_github_test.id(1),'public.disconnect_github()'),
     '{"connected":false,"handle":null}'::jsonb,'disconnect is idempotent');
+select extensions.is(links_github_test.as_caller(links_github_test.id(1),'public.get_github_connection()'),
+    '{"connected":false,"handle":null}'::jsonb,'disconnect remains disconnected while Auth unlink is pending');
+select extensions.is(links_github_test.as_service('service.get_github_identity(links_github_test.id(1))'),
+    '{"connected":true,"provider_user_id":"101","handle":null,"verified_addresses":[],"repository_links":[]}'::jsonb,
+    'service still sees the live identity after cache removal');
+select extensions.is(links_github_test.as_service($call$service.sync_github_identity(links_github_test.id(1),'101','owner-1','{}'::text[])$call$),
+    '{"connected":true,"handle":"owner-1"}'::jsonb,'sync reconnects without another authorization');
+select extensions.is(links_github_test.as_caller(links_github_test.id(1),'public.get_github_connection()'),
+    '{"connected":true,"handle":"owner-1"}'::jsonb,'resynced connection is visible');
+select extensions.is(links_github_test.auth_snapshot(),
+    (select value from links_github_test.results where label='auth-before-disconnect'), 'reconnect reuses the same untouched Auth identity');
+insert into links_github_test.results values ('disconnect-again',links_github_test.as_caller(links_github_test.id(1),'public.disconnect_github()'));
+-- Simulate the client's Auth unlink before a later authorization fixture.
+delete from auth.identities where user_id=links_github_test.id(1) and provider='github';
 
 -- An independently removed Auth identity makes even a populated cache inert.
 delete from auth.identities where user_id=links_github_test.id(3) and provider='github';

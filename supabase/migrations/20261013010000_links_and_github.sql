@@ -95,6 +95,59 @@ begin
 end;
 $$;
 
+-- Callers already hold the account and profile locks. Unit 4 extends this
+-- shared discovery-off operation to cancel outstanding QR codes as well.
+create function private.turn_discovery_off(account_id uuid)
+returns void language plpgsql security definer set search_path = '' as $$
+declare server_time timestamptz := pg_catalog.clock_timestamp();
+begin
+    update private.profiles as p set discovery_on = false where p.user_id = account_id;
+    update private.sessions as s set stopped_at = server_time
+    where s.user_id = account_id and s.stopped_at is null and s.expires_at > server_time;
+end;
+$$;
+
+-- GitHub sign-in may create an Auth account, but must never bootstrap an app
+-- profile. Renewing declarations on an existing linked account remains valid.
+create or replace function private.accept_declarations(input_age_18 boolean, input_terms_version text, input_privacy_version text)
+returns void language plpgsql security definer set search_path = '' as $$
+declare
+    caller uuid := private.require_caller();
+    invalid_fields text[] := '{}'::text[];
+begin
+    perform private.lock_link_account(caller);
+    if not exists (select 1 from private.profiles as p where p.user_id = caller)
+        and exists (select 1 from auth.identities as i where i.user_id = caller and i.provider = 'github') then
+        perform private.raise_error('account_not_ready');
+    end if;
+    if input_age_18 is distinct from true then
+        perform private.raise_error('declaration_required');
+    end if;
+    if input_terms_version is null or private.trim_input(input_terms_version) = '' or pg_catalog.char_length(private.trim_input(input_terms_version)) > 32 then
+        invalid_fields := pg_catalog.array_append(invalid_fields, 'terms_version');
+    end if;
+    if input_privacy_version is null or private.trim_input(input_privacy_version) = '' or pg_catalog.char_length(private.trim_input(input_privacy_version)) > 32 then
+        invalid_fields := pg_catalog.array_append(invalid_fields, 'privacy_version');
+    end if;
+    if pg_catalog.cardinality(invalid_fields) > 0 then
+        perform private.raise_error('invalid_input', invalid_fields);
+    end if;
+    insert into private.profiles as p (user_id, age_18_declared, terms_version, privacy_version)
+    values (caller, true, private.trim_input(input_terms_version), private.trim_input(input_privacy_version))
+    on conflict (user_id) do update set age_18_declared = true,
+        terms_version = excluded.terms_version, privacy_version = excluded.privacy_version;
+    insert into private.matching_preferences (user_id) values (caller)
+    on conflict (user_id) do nothing;
+    insert into private.field_visibility (owner_id, field, level)
+    values (caller, 'display_name', 'everyone_eligible'), (caller, 'introduction', 'everyone_eligible'),
+        (caller, 'interests', 'everyone_eligible'), (caller, 'purposes', 'everyone_eligible'),
+        (caller, 'contact_detail', 'private')
+    on conflict (owner_id, field) do nothing;
+exception when foreign_key_violation then
+    perform private.link_write_race(caller);
+end;
+$$;
+
 create function private.own_link_json(link private.external_links)
 returns jsonb language sql stable set search_path = '' as $$
     select pg_catalog.jsonb_build_object(
@@ -125,7 +178,8 @@ returns jsonb language sql stable set search_path = '' as $$
                 order by e.display_order, e.link_id limit 10) as l))
         from auth.identities as i left join private.linked_identities as c
             on c.user_id = i.user_id and c.provider = 'github' and c.provider_user_id = i.provider_id
-        where i.user_id = account_id and i.provider = 'github'),
+        where i.user_id = account_id and i.provider = 'github'
+        order by (c.user_id is not null) desc, i.created_at, i.id limit 1),
         pg_catalog.jsonb_build_object('connected', false, 'provider_user_id', null, 'handle', null,
             'verified_addresses', '[]'::jsonb, 'repository_links', '[]'::jsonb));
 $$;
@@ -250,7 +304,10 @@ returns jsonb language plpgsql security definer set search_path = '' as $$
 declare
     identity_value jsonb := private.github_identity_json(private.require_caller());
 begin
-    return pg_catalog.jsonb_build_object('connected', identity_value->'connected', 'handle', identity_value->'handle');
+    -- The service identity remains live without a cache, so sync can reconnect.
+    -- A public connection additionally needs a matching cache (handle NOT NULL).
+    return pg_catalog.jsonb_build_object('connected', identity_value->>'handle' is not null,
+        'handle', identity_value->'handle');
 end;
 $$;
 
@@ -267,7 +324,7 @@ begin
     -- Delete repository cards/cache even if Auth was independently unlinked.
     delete from private.external_links as l where l.owner_id = caller and l.source = 'github';
     delete from private.linked_identities as i where i.user_id = caller and i.provider = 'github';
-    delete from auth.identities as i where i.user_id = caller and i.provider = 'github';
+    -- The client unlinks the managed Auth identity through Auth after this RPC.
     return pg_catalog.jsonb_build_object('connected', false, 'handle', null);
 exception when foreign_key_violation then
     perform private.link_write_race(caller);
@@ -292,6 +349,8 @@ declare
     fields text[] := '{}'::text[];
     live_provider_id text;
     new_handle text := private.trim_input(handle);
+    cached_account_id uuid;
+    current_cached_account_id uuid;
 begin
     if account_id is null then fields := pg_catalog.array_append(fields, 'account_id'); end if;
     if not private.github_decimal_id(provider_user_id) then fields := pg_catalog.array_append(fields, 'provider_user_id'); end if;
@@ -300,16 +359,51 @@ begin
         fields := pg_catalog.array_append(fields, 'verified_addresses');
     end if;
     if pg_catalog.cardinality(fields) > 0 then perform private.raise_error('invalid_input', fields); end if;
-    perform private.lock_link_account(account_id);
+    -- Discover a possible stale owner before taking any account/profile lock.
+    select c.user_id into cached_account_id from private.linked_identities as c
+    where c.provider = 'github' and c.provider_user_id = sync_github_identity.provider_user_id
+        and c.user_id <> account_id;
+    if cached_account_id is not null then
+        perform pg_catalog.pg_advisory_xact_lock(31001, pg_catalog.hashtext(least(account_id, cached_account_id)::text));
+        perform pg_catalog.pg_advisory_xact_lock(31001, pg_catalog.hashtext(greatest(account_id, cached_account_id)::text));
+    else
+        perform pg_catalog.pg_advisory_xact_lock(31001, pg_catalog.hashtext(account_id::text));
+    end if;
+    if not exists (select 1 from auth.users as u where u.id = account_id) then
+        perform private.raise_error('not_authenticated');
+    end if;
+    -- A changed owner needs a fresh call, never an additional out-of-order lock.
+    select c.user_id into current_cached_account_id from private.linked_identities as c
+    where c.provider = 'github' and c.provider_user_id = sync_github_identity.provider_user_id
+        and c.user_id <> account_id;
+    if current_cached_account_id is not null and current_cached_account_id is distinct from cached_account_id then
+        perform private.raise_error('not_found');
+    end if;
+    perform p.user_id from private.profiles as p where p.user_id in (account_id, cached_account_id)
+        order by p.user_id for update;
     select i.provider_id into live_provider_id from auth.identities as i
-        where i.user_id = account_id and i.provider = 'github' for share;
-    if not found or live_provider_id <> provider_user_id then perform private.raise_error('not_found'); end if;
+        left join private.linked_identities as c on c.user_id = i.user_id and c.provider = 'github'
+            and c.provider_user_id = i.provider_id
+        where i.user_id = account_id and i.provider = 'github'
+        order by (c.user_id is not null) desc, i.created_at, i.id limit 1 for share of i;
+    if not found or live_provider_id is distinct from provider_user_id then perform private.raise_error('not_found'); end if;
+    if current_cached_account_id is not null then
+        perform 1 from auth.identities as i where i.user_id = current_cached_account_id
+            and i.provider = 'github' and i.provider_id = sync_github_identity.provider_user_id for share;
+        if found then perform private.raise_error('not_found'); end if;
+        delete from private.external_links as l where l.owner_id = current_cached_account_id and l.source = 'github';
+        delete from private.linked_identities as c where c.user_id = current_cached_account_id and c.provider = 'github';
+        if exists (select 1 from private.profiles as p where p.user_id = current_cached_account_id and p.discovery_on)
+            and not exists (select 1 from private.external_links as l where l.owner_id = current_cached_account_id) then
+            perform private.turn_discovery_off(current_cached_account_id);
+        end if;
+    end if;
     insert into private.linked_identities as c (user_id, provider, provider_user_id, handle, verified_addresses)
     values (account_id, 'github', provider_user_id, new_handle, private.normalized_link_tags(verified_addresses))
     on conflict (user_id, provider) do update set provider_user_id = excluded.provider_user_id,
         handle = excluded.handle, verified_addresses = excluded.verified_addresses;
     return pg_catalog.jsonb_build_object('connected', true, 'handle', new_handle);
-exception when foreign_key_violation then
+exception when unique_violation or foreign_key_violation then
     perform private.link_write_race(account_id);
     return null;
 end;
@@ -334,8 +428,11 @@ begin
     perform private.lock_link_account(account_id);
     if not private.account_is_ready(account_id) then perform private.raise_error('account_not_ready'); end if;
     select i.provider_id into live_provider_id from auth.identities as i
-        where i.user_id = account_id and i.provider = 'github' for share;
-    if not found or live_provider_id <> repository_owner_id then perform private.raise_error('not_found'); end if;
+        left join private.linked_identities as c on c.user_id = i.user_id and c.provider = 'github'
+            and c.provider_user_id = i.provider_id
+        where i.user_id = account_id and i.provider = 'github'
+        order by (c.user_id is not null) desc, i.created_at, i.id limit 1 for share of i;
+    if not found or live_provider_id is distinct from repository_owner_id then perform private.raise_error('not_found'); end if;
     select l.* into saved from private.external_links as l
         where l.owner_id = account_id and l.source = 'github' and l.source_item_id = repository_id for update;
     if found then
@@ -360,7 +457,7 @@ begin
         returning * into saved;
     end if;
     return private.own_link_json(saved);
-exception when foreign_key_violation then
+exception when unique_violation or foreign_key_violation then
     perform private.link_write_race(account_id);
     return null;
 end;
@@ -433,6 +530,8 @@ $$;
 
 revoke all on all functions in schema private from public, anon, authenticated, service_role;
 revoke all on all functions in schema service from public, anon, authenticated, service_role;
+revoke all on function public.accept_declarations(boolean, text, text) from public, anon, authenticated, service_role;
+grant execute on function public.accept_declarations(boolean, text, text) to authenticated;
 revoke all on function public.list_own_links() from public, anon, authenticated, service_role;
 grant execute on function public.list_own_links() to authenticated;
 revoke all on function public.update_own_link(uuid, text, text, text, text[], text, text) from public, anon, authenticated, service_role;
