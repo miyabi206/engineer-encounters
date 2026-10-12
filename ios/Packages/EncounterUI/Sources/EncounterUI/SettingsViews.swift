@@ -20,7 +20,7 @@ public struct SettingsListView<AdditionalRows: View>: View {
 
     public var body: some View {
         List {
-            ForEach(AccountSettingsListComposition.entries(hasDiagnostics: destinations.diagnostics != nil), id: \.self) { entry in
+            ForEach(AccountSettingsListComposition.entries(destinations: destinations), id: \.self) { entry in
                 switch entry {
                 case .discovery: row(.discoveryMatching, action: navigation.discovery)
                 case .visibility: row(.visibility, action: navigation.visibility)

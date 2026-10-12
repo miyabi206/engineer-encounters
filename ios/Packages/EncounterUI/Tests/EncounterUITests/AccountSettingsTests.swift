@@ -2,26 +2,29 @@ import XCTest
 @testable import EncounterUI
 
 final class AccountSettingsTests: XCTestCase {
-    func testDeletionStateRequiresAcknowledgementAndLocksAllFailurePaths() {
+    func testDeletionStateRequiresAcknowledgementAndOnlyLocksPending() {
         var state = AccountSettingsDeletionState.idle
         XCTAssertFalse(state.preventsSignedInDismissal)
         state.accept(deleted: true)
         XCTAssertEqual(state, .idle)
         XCTAssertTrue(state.begin())
         XCTAssertTrue(state.preventsSignedInDismissal)
+        XCTAssertFalse(state.cancel())
         XCTAssertFalse(state.begin())
         state.accept(deleted: false)
         XCTAssertEqual(state, .failed)
         XCTAssertTrue(state.canRetry)
-        XCTAssertTrue(state.preventsSignedInDismissal)
+        XCTAssertFalse(state.preventsSignedInDismissal)
         XCTAssertTrue(state.begin())
         state.fail(.init(code: .prerequisiteMissing, fields: ["deletion_safety_key"]))
         XCTAssertEqual(state, .configurationRequired)
         XCTAssertTrue(state.canRetry)
+        XCTAssertFalse(state.preventsSignedInDismissal)
         XCTAssertTrue(state.begin())
         state.accept(deleted: true)
         XCTAssertEqual(state, .deleted)
         XCTAssertFalse(state.begin())
+        XCTAssertFalse(state.cancel())
     }
 
     func testDeletionAuthExpiryAndOrdinaryPrerequisiteFailure() {
@@ -61,6 +64,7 @@ final class AccountSettingsTests: XCTestCase {
             await model.signOut()
             await model.disconnect()
             await model.deleteAccount()
+            model.cancelDeletion()
         }
         await model.deleteAccount()
         XCTAssertEqual(model.deletion, .deleted)
@@ -70,23 +74,69 @@ final class AccountSettingsTests: XCTestCase {
     }
 
     @MainActor
-    func testConfigurationFailureKeepsAccountLockedAndRetryCanComplete() async {
-        let driver = AccountSettingsTestDriver()
-        let model = driver.model()
-        driver.failure = ProfileActionError(code: .prerequisiteMissing, fields: ["deletion_safety_key"])
-        await model.deleteAccount()
-        XCTAssertEqual(model.deletion, .configurationRequired)
-        XCTAssertEqual(model.failedOperation, .delete)
-        XCTAssertNotNil(model.data)
-        XCTAssertFalse(model.canDismiss)
-        model.back()
-        await model.signOut()
-        await model.disconnect()
-        XCTAssertEqual(driver.calls, ["suspend", "delete"])
-        driver.failure = nil
-        await model.retry()
-        XCTAssertEqual(model.deletion, .deleted)
-        XCTAssertEqual(driver.calls, ["suspend", "delete", "suspend", "delete", "signedOut"])
+    func testDeletionFailuresAllowDismissalAndRetryCanComplete() async {
+        for configurationRequired in [false, true] {
+            let driver = AccountSettingsTestDriver()
+            let model = driver.model()
+            driver.failure = configurationRequired ?
+                ProfileActionError(code: .prerequisiteMissing, fields: ["deletion_safety_key"]) :
+                ProfileActionError(code: .unavailable)
+            await model.deleteAccount()
+            XCTAssertEqual(model.deletion, configurationRequired ? .configurationRequired : .failed)
+            XCTAssertEqual(model.failedOperation, .delete)
+            XCTAssertNotNil(model.data)
+            XCTAssertTrue(model.canDismiss)
+            XCTAssertTrue(model.deletion.canRetry)
+            await model.load()
+            XCTAssertEqual(model.failedOperation, .delete)
+            XCTAssertEqual(driver.calls, ["suspend", "delete"])
+            driver.failure = nil
+            await model.retry()
+            XCTAssertEqual(model.deletion, .deleted)
+            XCTAssertEqual(driver.calls, ["suspend", "delete", "suspend", "delete", "signedOut"])
+        }
+    }
+
+    @MainActor
+    func testCancelDeletionFailuresResumesParticipationAndClearsFailureOnce() async {
+        for configurationRequired in [false, true] {
+            let driver = AccountSettingsTestDriver()
+            let model = driver.model()
+            driver.failure = configurationRequired ?
+                ProfileActionError(code: .prerequisiteMissing, fields: ["deletion_safety_key"]) :
+                ProfileActionError(code: .unavailable)
+            await model.deleteAccount()
+            model.cancelDeletion()
+            model.cancelDeletion()
+            await model.retry()
+            XCTAssertEqual(model.deletion, .idle)
+            XCTAssertTrue(model.canDismiss)
+            XCTAssertNotNil(model.data)
+            XCTAssertNil(model.error)
+            XCTAssertNil(model.failedOperation)
+            XCTAssertEqual(driver.calls, ["suspend", "delete", "resume"])
+            model.back()
+            XCTAssertEqual(driver.calls, ["suspend", "delete", "resume", "back"])
+        }
+    }
+
+    @MainActor
+    func testBackAndSignOutAfterDeletionFailureCancelSuspension() async {
+        for configurationRequired in [false, true] {
+            for signOut in [false, true] {
+                let driver = AccountSettingsTestDriver()
+                let model = driver.model()
+                driver.failure = configurationRequired ?
+                    ProfileActionError(code: .prerequisiteMissing, fields: ["deletion_safety_key"]) :
+                    ProfileActionError(code: .unavailable)
+                await model.deleteAccount()
+                driver.failure = nil
+                if signOut { await model.signOut() } else { model.back() }
+                XCTAssertEqual(model.deletion, .idle)
+                XCTAssertEqual(driver.calls, ["suspend", "delete", "resume"] +
+                               (signOut ? ["signOut", "signedOut"] : ["back"]))
+            }
+        }
     }
 
     @MainActor
@@ -98,7 +148,7 @@ final class AccountSettingsTests: XCTestCase {
             let model = driver.model()
             await model.deleteAccount()
             XCTAssertEqual(model.deletion, .failed)
-            XCTAssertFalse(model.canDismiss)
+            XCTAssertTrue(model.canDismiss)
             XCTAssertEqual(driver.calls, ["suspend", "delete"])
             XCTAssertNotNil(model.error)
         }
@@ -157,6 +207,35 @@ final class AccountSettingsTests: XCTestCase {
         XCTAssertEqual(AccountSettingsListComposition.entries(hasDiagnostics: false), expected)
         XCTAssertEqual(AccountSettingsListComposition.entries(hasDiagnostics: true), expected + [.diagnostics])
     }
+
+    @MainActor
+    func testSettingsListOmitsEveryUnsuppliedDestinationAndKeepsProfileOffList() {
+        var destinations = AccountSettingsListNavigationActions()
+        XCTAssertEqual(AccountSettingsListComposition.entries(destinations: destinations), [.discovery, .visibility])
+        let rows: [AccountSettingsListEntry] = [.dailyReport, .blockedUsers, .account, .legal, .diagnostics]
+        for entry in rows {
+            let onlyDestination: AccountSettingsListNavigationActions
+            switch entry {
+            case .dailyReport: onlyDestination = .init(dailyReport: {})
+            case .blockedUsers: onlyDestination = .init(blockedUsers: {})
+            case .account: onlyDestination = .init(account: {})
+            case .legal: onlyDestination = .init(legal: {})
+            case .diagnostics: onlyDestination = .init(diagnostics: {})
+            default: return XCTFail("Unexpected optional row")
+            }
+            XCTAssertEqual(AccountSettingsListComposition.entries(destinations: onlyDestination), [.discovery, .visibility, entry])
+        }
+        var calls: [String] = []
+        destinations.dailyReport = { calls.append("report") }
+        destinations.blockedUsers = { calls.append("blocked") }
+        destinations.account = { calls.append("account") }
+        destinations.legal = { calls.append("legal") }
+        destinations.diagnostics = { calls.append("diagnostics") }
+        XCTAssertEqual(AccountSettingsListComposition.entries(destinations: destinations),
+                       [.discovery, .visibility, .dailyReport, .blockedUsers, .account, .legal, .diagnostics])
+        destinations.dailyReport(); destinations.blockedUsers(); destinations.account(); destinations.legal(); destinations.diagnostics?()
+        XCTAssertEqual(calls, ["report", "blocked", "account", "legal", "diagnostics"])
+    }
 }
 
 @MainActor
@@ -176,7 +255,8 @@ private final class AccountSettingsTestDriver {
             self.calls.append("signOut"); try self.check()
         }, deleteAccount: {
             self.calls.append("delete"); await self.duringDeletion?(); try self.check(); return self.deleted
-        }, suspendParticipation: { self.calls.append("suspend") }), navigation: .init(
+        }, resumeParticipation: { self.calls.append("resume") },
+        suspendParticipation: { self.calls.append("suspend") }), navigation: .init(
             back: { self.calls.append("back") }, signedOut: { self.calls.append("signedOut") }, discovery: {}))
     }
     private func check() throws { if let failure { throw failure } }

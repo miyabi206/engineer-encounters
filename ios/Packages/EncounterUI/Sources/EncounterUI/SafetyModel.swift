@@ -55,7 +55,12 @@ public final class SafetyBlockedModel: ObservableObject {
         do {
             try await actions.unblock(id)
             list?.blocks.removeAll { $0.id == id }; failedBlockID = nil
-        } catch { self.error = errorValue(error) }
+        } catch {
+            let failure = errorValue(error)
+            if failure.code == .notFound {
+                list?.blocks.removeAll { $0.id == id }; failedBlockID = nil
+            } else { self.error = failure }
+        }
     }
     public func retry() async {
         if let id = failedBlockID { await unblock(id) } else { await load() }
@@ -97,6 +102,9 @@ public enum SafetyReportState: Equatable, Sendable {
     case idle, submitting(SafetySubmission), failed(SafetySubmission), accepted(SafetySubmission)
     public var isBusy: Bool { if case .submitting = self { return true }; return false }
     public var isHidden: Bool { self != .idle }
+    public var isPending: Bool {
+        switch self { case .submitting, .failed: true; case .idle, .accepted: false }
+    }
     public var retry: SafetySubmission? { if case .failed(let request) = self { return request }; return nil }
     public mutating func begin(_ submission: SafetySubmission) -> Bool {
         guard self == .idle || retry != nil else { return false }
@@ -186,6 +194,7 @@ public final class SafetyReportModel: ObservableObject {
     }
     public func cancel() async {
         guard !isBusy else { return }
+        if state == .idle { navigation.reopenEncounter(); return }
         guard state.cancel() else { navigation.completed(); return }
         actions.clearPendingHide(); error = nil; isReopening = true
         defer { isReopening = false }

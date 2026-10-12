@@ -17,10 +17,12 @@ public struct ReportSettingsView: View {
                 }
                 if model.pushAvailable {
                     OnboardingCard {
-                        Toggle(ReportSettingsStrings.text(.notifications), isOn: Binding(
-                            get: { model.data?.notificationsEnabled == true },
-                            set: { enabled in Task { await model.setNotifications(enabled) } }))
-                            .disabled(model.isBusy)
+                        if model.showsNotificationSwitch {
+                            Toggle(ReportSettingsStrings.text(.notifications), isOn: Binding(
+                                get: { model.data?.notificationsEnabled == true },
+                                set: { enabled in Task { await model.setNotifications(enabled) } }))
+                                .disabled(model.isBusy)
+                        }
                         Text(ReportSettingsStrings.text(model.permission.stringKey)).foregroundStyle(.secondary)
                         if model.permission == .denied {
                             Button(ReportSettingsStrings.text(.systemSettings), action: model.navigation.systemSettings)

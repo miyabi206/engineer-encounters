@@ -20,18 +20,22 @@ final class SafetyTests: XCTestCase {
         var state = SafetyReportState.idle
         state.accept()
         XCTAssertEqual(state, .idle)
+        XCTAssertFalse(state.isPending)
         XCTAssertTrue(state.begin(submission))
         XCTAssertTrue(state.isHidden)
         XCTAssertTrue(state.isBusy)
+        XCTAssertTrue(state.isPending)
         XCTAssertFalse(state.begin(submission))
         XCTAssertFalse(state.cancel())
         state.fail()
         XCTAssertTrue(state.isHidden)
         XCTAssertFalse(state.isBusy)
+        XCTAssertTrue(state.isPending)
         XCTAssertEqual(state.retry, submission)
         XCTAssertTrue(state.begin(submission))
         state.accept()
         XCTAssertEqual(state, .accepted(submission))
+        XCTAssertFalse(state.isPending)
         XCTAssertFalse(state.cancel())
         XCTAssertFalse(state.begin(submission))
 
@@ -70,6 +74,7 @@ final class SafetyTests: XCTestCase {
         XCTAssertEqual(driver.requests.first?.linkID, "link")
         XCTAssertNil(model.error)
         guard case .accepted(.report) = model.state else { return XCTFail("Expected accepted report") }
+        XCTAssertFalse(model.state.isPending)
     }
 
     @MainActor
@@ -102,6 +107,7 @@ final class SafetyTests: XCTestCase {
         driver.failure = nil
         await model.retry()
         XCTAssertEqual(model.state, .accepted(.block("encounter")))
+        XCTAssertFalse(model.state.isPending)
         XCTAssertEqual(driver.blocks, ["encounter", "encounter"])
         XCTAssertEqual(driver.calls, ["conceal", "block", "conceal", "block", "completed"])
     }
@@ -131,14 +137,58 @@ final class SafetyTests: XCTestCase {
     func testAuthorizationFailureNeverReopensAndAcceptedCancelDoesNotClearHide() async {
         let driver = SafetyTestDriver()
         driver.authorizationFails = true
-        await driver.model().cancel()
-        XCTAssertEqual(driver.calls, ["clear", "authorize", "completed"])
-        driver.calls = []
         let model = driver.model()
         model.reason = .spam
+        driver.failure = .init(code: .unavailable)
+        await model.submit()
+        await model.cancel()
+        XCTAssertEqual(driver.calls, ["conceal", "report", "clear", "authorize", "completed"])
+        driver.calls = []
+        driver.failure = nil
         await model.submit()
         await model.cancel()
         XCTAssertEqual(driver.calls, ["conceal", "report", "completed", "completed"])
+    }
+
+    @MainActor
+    func testCancelIdleSheetOnlyClosesWithoutClearingHideOrAuthorizing() async {
+        for reason in [SafetyReportReason?.none, .spam] {
+            let driver = SafetyTestDriver()
+            driver.authorizationFails = true
+            let model = driver.model()
+            model.reason = reason
+            await model.cancel()
+            XCTAssertEqual(driver.calls, ["reopen"])
+            XCTAssertEqual(model.state, .idle)
+            XCTAssertFalse(model.isBusy)
+            XCTAssertNil(model.error)
+            XCTAssertTrue(driver.requests.isEmpty)
+            XCTAssertTrue(driver.blocks.isEmpty)
+        }
+    }
+
+    @MainActor
+    func testUnblockNotFoundAfterFailedAttemptRemovesOnlyItsRow() async {
+        let day = EncounterDay(year: 2026, month: 10, day: 12)
+        let block = SafetyBlock(id: "opaque", placedDay: day)
+        let other = SafetyBlock(id: "other", placedDay: day)
+        var failure = ProfileActionError(code: .unavailable)
+        var calls: [String] = []
+        let model = SafetyBlockedModel(list: .init(blocks: [block, other], truncated: true), actions: .init(
+            load: { XCTFail("Unblock must not reload"); return .init(blocks: []) }, unblock: { id in
+                calls.append(id); throw failure
+            }), navigation: .init(back: {}))
+        await model.unblock(block.id)
+        XCTAssertEqual(model.list?.blocks, [block, other])
+        XCTAssertEqual(model.failedBlockID, block.id)
+        failure = .init(code: .notFound)
+        await model.retry()
+        await model.unblock(block.id)
+        XCTAssertEqual(calls, ["opaque", "opaque"])
+        XCTAssertEqual(model.list?.blocks, [other])
+        XCTAssertEqual(model.list?.truncated, true)
+        XCTAssertNil(model.error)
+        XCTAssertNil(model.failedBlockID)
     }
 
     @MainActor

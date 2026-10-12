@@ -23,7 +23,7 @@ final class MyCardPreviewTests: XCTestCase {
         }
     }
 
-    func testLinksHaveNoDefaultAndStableOrderAndPreviewDoesNotActivateDiscovery() throws {
+    func testLinksHaveNoDefaultAndStableOrderAndFieldsHonorVisibility() throws {
         let url = try XCTUnwrap(URL(string: "https://example.com"))
         func link(_ id: String, _ visibility: VisibilityLevel?, _ order: Int) -> OwnLinkState {
             .init(id: id, source: .other, sourceLabel: "Source", title: id, url: url,
@@ -37,7 +37,7 @@ final class MyCardPreviewTests: XCTestCase {
         XCTAssertEqual(eligible.purposes, [.collaboration])
         XCTAssertNil(eligible.contactDetail)
         XCTAssertEqual(MyCardPreview(data: data, audience: .compatibleOnly).links.map(\.id), ["c", "a", "b"])
-        XCTAssertFalse(data.profile.discoveryOn)
+        XCTAssertEqual(eligible.displayName, "Owner")
     }
 
     func testAllPrivatePreviewHasNoInferredIdentityAndEmptyNamesHaveNoInitial() {

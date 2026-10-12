@@ -16,9 +16,29 @@ final class ReportSettingsTests: XCTestCase {
     func testUnavailablePushOmitsAllNotificationActions() async {
         let driver = ReportSettingsTestDriver()
         let model = driver.model(pushAvailable: false)
+        XCTAssertFalse(model.showsNotificationSwitch)
         await model.setNotifications(true); await model.setNotifications(false)
         XCTAssertTrue(driver.calls.isEmpty)
         XCTAssertFalse(model.data?.notificationsEnabled ?? true)
+    }
+
+    @MainActor
+    func testNotificationSwitchRequiresAvailablePushAndChangeablePermission() async {
+        for pushAvailable in [false, true] {
+            for permission in [ReportSettingsPermission.notRequested, .allowed, .denied, .unavailable] {
+                let driver = ReportSettingsTestDriver()
+                let model = driver.model(pushAvailable: pushAvailable)
+                model.receive(permission: permission)
+                let expected = pushAvailable && (permission == .notRequested || permission == .allowed)
+                XCTAssertEqual(model.showsNotificationSwitch, expected)
+                if !expected {
+                    await model.setNotifications(true); await model.setNotifications(false)
+                    XCTAssertTrue(driver.calls.isEmpty)
+                    XCTAssertEqual(model.permission, permission)
+                    XCTAssertEqual(model.data?.notificationsEnabled, false)
+                }
+            }
+        }
     }
 
     @MainActor
@@ -29,8 +49,10 @@ final class ReportSettingsTests: XCTestCase {
         await model.setNotifications(true); await model.setNotifications(true)
         XCTAssertEqual(driver.calls, ["permission"])
         XCTAssertEqual(model.permission, .denied)
+        XCTAssertFalse(model.showsNotificationSwitch)
         XCTAssertNil(model.error)
         model.receive(permission: .allowed)
+        XCTAssertTrue(model.showsNotificationSwitch)
         await model.setNotifications(true)
         XCTAssertEqual(driver.calls, ["permission", "notifications:true"])
         XCTAssertEqual(model.data?.notificationsEnabled, true)

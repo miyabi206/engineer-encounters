@@ -66,6 +66,9 @@ public final class ReportSettingsModel: ObservableObject {
         self.permission = permission; self.actions = actions; self.navigation = navigation
     }
     public var canSave: Bool { data != nil && time.isValid && !isBusy }
+    public var showsNotificationSwitch: Bool {
+        pushAvailable && (permission == .notRequested || permission == .allowed)
+    }
     public func receive(permission: ReportSettingsPermission) { self.permission = permission }
 
     public func load() async {
@@ -88,7 +91,7 @@ public final class ReportSettingsModel: ObservableObject {
         } catch { fail(error) }
     }
     public func setNotifications(_ enabled: Bool) async {
-        guard pushAvailable, data != nil, !isBusy else { return }
+        guard showsNotificationSwitch, data != nil, !isBusy else { return }
         begin(.notifications(enabled))
         defer { isBusy = false }
         do {

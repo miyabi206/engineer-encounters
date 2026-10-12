@@ -60,12 +60,13 @@ public struct AccountSettingsView: View {
             }
             if model.deletion.canRetry {
                 Button(SettingsStrings.text(.retry)) { Task { await model.retry() } }.disabled(model.isBusy)
-                if let support = model.navigation.support {
-                    Button(LegalStrings.text(.contact), action: support).disabled(model.isBusy)
-                }
+                Button(SettingsStrings.text(.cancel)) { model.cancelDeletion() }.disabled(model.isBusy)
             } else if let error = model.error {
                 SafetyFailure(error: error, fallback: model.failedOperation == .load ? .listError : .saveError,
                               disabled: model.isBusy) { await model.retry() }
+            }
+            if let support = model.navigation.support {
+                Button(LegalStrings.text(.contact), action: support).disabled(model.isBusy)
             }
         }
         .navigationBarBackButtonHidden(true)
@@ -101,5 +102,6 @@ public struct AccountSettingsView: View {
             }.presentationDetents([.large])
         }
         .task { await model.load() }
+        .onDisappear { model.cancelDeletion() }
     }
 }

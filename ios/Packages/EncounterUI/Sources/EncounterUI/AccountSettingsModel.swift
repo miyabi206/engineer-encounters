@@ -20,12 +20,16 @@ public struct AccountSettingsData: Equatable, Sendable {
     }
 }
 
-/// Failure leaves participation suspended and dismissal locked. Auth expiry routes
+/// Pending deletion suspends participation. Cancellation after failure resumes it. Auth expiry routes
 /// to sign-in without a deletion receipt; only an accepted deletion is success.
 public enum AccountSettingsDeletionState: Equatable, Sendable {
     case idle, pending, failed, configurationRequired, deleted, authenticationExpired
-    public var preventsSignedInDismissal: Bool { self != .idle }
+    public var preventsSignedInDismissal: Bool { self == .pending }
     public var canRetry: Bool { self == .failed || self == .configurationRequired }
+    public mutating func cancel() -> Bool {
+        guard canRetry else { return false }
+        self = .idle; return true
+    }
     public mutating func begin() -> Bool {
         guard self == .idle || canRetry else { return false }
         self = .pending; return true
@@ -51,13 +55,17 @@ public struct AccountSettingsActions {
     public var deleteAccount: @MainActor () async throws -> Bool
     /// Must synchronously suspend radio participation and protected reads before a deletion request.
     public var suspendParticipation: @MainActor () -> Void
+    /// Restore participation according to the current signed-in settings after a failed deletion is cancelled.
+    public var resumeParticipation: @MainActor () -> Void
     public init(load: @escaping @MainActor () async throws -> AccountSettingsData,
                 disconnectGitHub: @escaping @MainActor () async throws -> AccountSettingsData,
                 signOut: @escaping @MainActor () async throws -> Void,
                 deleteAccount: @escaping @MainActor () async throws -> Bool,
+                resumeParticipation: @escaping @MainActor () -> Void = {},
                 suspendParticipation: @escaping @MainActor () -> Void) {
         self.load = load; self.disconnectGitHub = disconnectGitHub; self.signOut = signOut
         self.deleteAccount = deleteAccount; self.suspendParticipation = suspendParticipation
+        self.resumeParticipation = resumeParticipation
     }
 }
 
@@ -93,9 +101,15 @@ public final class AccountSettingsModel: ObservableObject {
     public var lastLinkRefused: Bool {
         failedOperation == .disconnect && error?.code == .prerequisiteMissing && error?.fields.contains("link") == true
     }
-    public func back() { if canDismiss { navigation.back() } }
+    public func cancelDeletion() {
+        guard !isBusy, deletion.cancel() else { return }
+        succeeded(); actions.resumeParticipation()
+    }
+    public func back() {
+        if canDismiss { cancelDeletion(); navigation.back() }
+    }
     public func load() async {
-        guard canDismiss else { return }
+        guard canDismiss, deletion == .idle else { return }
         begin(.load); data = nil
         defer { isBusy = false }
         do { data = try await actions.load(); succeeded() }
@@ -104,6 +118,7 @@ public final class AccountSettingsModel: ObservableObject {
     /// All destructive methods are called only after the view/caller confirms.
     public func disconnect() async {
         guard canDismiss, let data, data.githubConnected else { return }
+        cancelDeletion()
         if data.disconnectRemovesLastLink {
             failedOperation = .disconnect; error = .init(code: .prerequisiteMissing, fields: ["link"]); return
         }
@@ -117,6 +132,7 @@ public final class AccountSettingsModel: ObservableObject {
     }
     public func signOut() async {
         guard canDismiss, allowsSignOut else { return }
+        cancelDeletion()
         begin(.signOut)
         defer { isBusy = false }
         do { try await actions.signOut(); succeeded(); navigation.signedOut() }
@@ -170,19 +186,52 @@ public enum AccountSettingsListComposition {
         [.discovery, .visibility, .dailyReport, .blockedUsers, .account, .legal] +
             (hasDiagnostics ? [.diagnostics] : [])
     }
+    @MainActor
+    public static func entries(destinations: AccountSettingsListNavigationActions) -> [AccountSettingsListEntry] {
+        entries(hasDiagnostics: destinations.diagnostics != nil).filter {
+            destinations.hasDestination(for: $0)
+        }
+    }
 }
 
 @MainActor
 public struct AccountSettingsListNavigationActions {
-    public var dailyReport: @MainActor () -> Void
-    public var blockedUsers: @MainActor () -> Void
-    public var account: @MainActor () -> Void
-    public var legal: @MainActor () -> Void
+    private var dailyReportDestination: (@MainActor () -> Void)?
+    private var blockedUsersDestination: (@MainActor () -> Void)?
+    private var accountDestination: (@MainActor () -> Void)?
+    private var legalDestination: (@MainActor () -> Void)?
+    public var dailyReport: @MainActor () -> Void {
+        get { dailyReportDestination ?? {} }
+        set { dailyReportDestination = newValue }
+    }
+    public var blockedUsers: @MainActor () -> Void {
+        get { blockedUsersDestination ?? {} }
+        set { blockedUsersDestination = newValue }
+    }
+    public var account: @MainActor () -> Void {
+        get { accountDestination ?? {} }
+        set { accountDestination = newValue }
+    }
+    public var legal: @MainActor () -> Void {
+        get { legalDestination ?? {} }
+        set { legalDestination = newValue }
+    }
     public var diagnostics: (@MainActor () -> Void)?
-    public init(dailyReport: @escaping @MainActor () -> Void = {}, blockedUsers: @escaping @MainActor () -> Void = {},
-                account: @escaping @MainActor () -> Void = {}, legal: @escaping @MainActor () -> Void = {},
+    public init(dailyReport: (@MainActor () -> Void)? = nil, blockedUsers: (@MainActor () -> Void)? = nil,
+                account: (@MainActor () -> Void)? = nil, legal: (@MainActor () -> Void)? = nil,
                 diagnostics: (@MainActor () -> Void)? = nil) {
-        self.dailyReport = dailyReport; self.blockedUsers = blockedUsers; self.account = account
-        self.legal = legal; self.diagnostics = diagnostics
+        dailyReportDestination = dailyReport; blockedUsersDestination = blockedUsers; accountDestination = account
+        legalDestination = legal; self.diagnostics = diagnostics
+    }
+    public func hasDestination(for entry: AccountSettingsListEntry) -> Bool {
+        switch entry {
+        // These destinations are required by SettingsNavigationActions.
+        case .discovery, .visibility: true
+        case .dailyReport: dailyReportDestination != nil
+        case .blockedUsers: blockedUsersDestination != nil
+        case .account: accountDestination != nil
+        case .legal: legalDestination != nil
+        case .diagnostics: diagnostics != nil
+        }
     }
 }

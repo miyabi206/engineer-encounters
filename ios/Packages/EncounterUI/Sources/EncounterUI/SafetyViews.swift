@@ -107,10 +107,8 @@ public struct SafetyReportSheet: View {
                     Text(SafetyStrings.text(.hidden)).foregroundStyle(.secondary)
                 }
                 if model.isBusy { ProgressView(SettingsStrings.text(.loading)) }
-                if model.state.isHidden {
-                    if case .accepted(.report) = model.state { Text(SafetyStrings.text(.submitted)) }
-                    else { Text(SafetyStrings.text(.pending)).foregroundStyle(.secondary) }
-                }
+                if case .accepted(.report) = model.state { Text(SafetyStrings.text(.submitted)) }
+                if model.state.isPending { Text(SafetyStrings.text(.pending)).foregroundStyle(.secondary) }
                 if let error = model.error {
                     SafetyFailure(error: error, disabled: model.isBusy) { await model.retry() }
                 }
@@ -129,7 +127,7 @@ public struct SafetyReportSheet: View {
                 Button(SettingsStrings.text(.cancel), role: .cancel) {}
             } message: { Text(SafetyStrings.text(.blockExplanation)) }
         }
-        // Every exit runs cancel() so protected content is freshly authorized before reopening.
+        // Cancelling a failed submission requires fresh authorization before reopening.
         .interactiveDismissDisabled(true)
     }
 }
