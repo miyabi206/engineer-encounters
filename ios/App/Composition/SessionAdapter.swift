@@ -237,6 +237,13 @@ final class SessionAdapter: ObservableObject {
     private func refresh(epoch: UUID) async throws -> SessionState {
         let backend = try context(epoch: epoch)
         do {
+            if await holder.needsStopCheck(owner: backend.owner) {
+                _ = try await fetch(backend, starting: false)
+                try await flushStop(backend)
+                let state = await presentationState()
+                guard backend.isCurrent else { throw SessionActionError.unavailable }
+                return state
+            }
             try await flushStop(backend)
             return try await fetch(backend, starting: false)
         } catch {
@@ -292,6 +299,9 @@ final class SessionAdapter: ObservableObject {
     }
 
     private func flushStop(_ backend: SessionBackendServices) async throws {
+        if await holder.needsStopCheck(owner: backend.owner) {
+            _ = try await fetch(backend, starting: false)
+        }
         guard let stop = try await holder.pendingStop(owner: backend.owner) else { return }
         if let upload {
             try await upload.task.value

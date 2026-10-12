@@ -1,7 +1,7 @@
 import EncounterBackend
 import Foundation
 
-/// Only a session ID and its conservative local expiry are retained. The key uses
+/// Only a session ID and its advisory local expiry are retained. The key uses
 /// the same installation-salted account/backend namespace as other bound storage.
 @MainActor
 final class PendingSessionStopStore {
@@ -16,8 +16,14 @@ final class PendingSessionStopStore {
 
     func load(owner: BackendStorageOwner) throws -> Marker? {
         guard defaults.synchronize() else { throw BackendError.storageFailure }
-        guard let data = defaults.data(forKey: Self.prefix + owner.namespace) else { return nil }
-        guard let marker = try? JSONDecoder().decode(Marker.self, from: data) else { throw BackendError.storageFailure }
+        let key = Self.prefix + owner.namespace
+        guard defaults.object(forKey: key) != nil else { return nil }
+        guard let data = defaults.data(forKey: key),
+              let marker = try? JSONDecoder().decode(Marker.self, from: data) else {
+            defaults.removeObject(forKey: key)
+            _ = defaults.synchronize()
+            return nil
+        }
         return marker
     }
 
