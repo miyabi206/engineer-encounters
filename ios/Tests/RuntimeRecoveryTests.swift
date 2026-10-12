@@ -166,12 +166,12 @@ final class RuntimeRecoveryTests: XCTestCase {
         let tokens = InMemoryTokenBatchStore()
         let clock = ManualEncounterClock()
         let scheduler = ManualReceiptUploadScheduler()
-        var ready = false
+        let ready = BackendReadiness()
         let runtime = EncounterRuntime(tokenIssuer: ServerTokenIssuer(client: client, store: tokens), sessionFlag: { false },
             transportFactory: { await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock) },
             queueOpener: { queue }, tokenStore: tokens, clock: clock,
             uploadFactory: { ReceiptUploader(client: client, queue: $0) }, uploadScheduler: scheduler,
-            canCallBackend: { ready })
+            canCallBackend: { ready.value })
         await runtime.start()
         try await appBackendEventually { scheduler.jobs.filter { !$0.cancelled }.count >= 2 }
         let before = await transport.recorded()
@@ -179,7 +179,7 @@ final class RuntimeRecoveryTests: XCTestCase {
         let retained = try await queue.pending()
         XCTAssertEqual(retained, [receipt])
         let retries = scheduler.jobs.filter { !$0.cancelled }
-        ready = true
+        ready.value = true
         await clock.advance(by: 5)
         for retry in retries { await retry.operation() }
         try await appBackendEventually {
@@ -318,4 +318,9 @@ final class RuntimeRecoveryTests: XCTestCase {
         XCTAssertEqual(builds, 0)
         XCTAssertEqual(composition.account.state, .unavailable)
     }
+}
+
+@MainActor
+private final class BackendReadiness {
+    var value = false
 }
