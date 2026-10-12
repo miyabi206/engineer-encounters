@@ -1,6 +1,7 @@
 import Combine
 import EncounterBackend
 import Foundation
+import EncounterUI
 
 enum AccountState: Equatable {
     case unavailable, signedOut, signedIn(UUID)
@@ -13,9 +14,12 @@ enum AccountState: Equatable {
 
 @MainActor
 final class AccountModel: ObservableObject {
-    @Published private(set) var state: AccountState
+    @Published private(set) var state: AccountState {
+        didSet { if state != oldValue { profile = nil } }
+    }
     private let sessions: SessionManager?
-    private let service: OwnAccountService?
+    let service: OwnAccountService?
+    @Published var profile: OwnProfileState?
     private let timeZone: @MainActor () -> String
     private var registeredTimeZone: String?
     private var operationTask: Task<Void, any Error>?
@@ -47,7 +51,9 @@ final class AccountModel: ObservableObject {
     }
 
     /// Provider-neutral entry point; provider request construction lives outside composition.
-    func signIn(using request: AuthRequest, termsVersion: String, privacyVersion: String) async throws {
+    func signIn(using request: AuthRequest, isAdult: Bool, acceptsTermsAndPrivacy: Bool,
+                termsVersion: String, privacyVersion: String) async throws {
+        guard isAdult && acceptsTermsAndPrivacy else { throw BackendError.declarationRequired }
         try await serialize {
             guard let sessions = self.sessions, let service = self.service else {
                 throw BackendError.invalidRequest
@@ -58,7 +64,7 @@ final class AccountModel: ObservableObject {
             self.registeredTimeZone = nil
             do {
                 let session = try await sessions.establish(using: request)
-                try await service.acceptDeclarations(age18: true, termsVersion: termsVersion,
+                try await service.acceptDeclarations(age18: isAdult, termsVersion: termsVersion,
                                                      privacyVersion: privacyVersion)
                 try await self.registerTimeZoneIfNeeded()
                 self.state = .signedIn(session.userID)
@@ -120,6 +126,12 @@ final class AccountModel: ObservableObject {
         // Even injectable I/O errors must never carry credential or response material.
         switch error as? BackendError {
         case .notAuthenticated: return .notAuthenticated
+        case .accountNotReady: return .accountNotReady
+        case .declarationRequired: return .declarationRequired
+        case .invalidInput(let fields): return .invalidInput(fields: fields)
+        case .prerequisiteMissing(let fields): return .prerequisiteMissing(fields: fields)
+        case .rateLimited: return .rateLimited
+        case .notFound: return .notFound
         case .storageFailure: return .storageFailure
         default: return .transportFailure
         }

@@ -15,6 +15,26 @@ final class WelcomeStringsTests: XCTestCase {
                        "Discover the work of engineers you encounter.")
     }
     @MainActor
+    func testSignInInitializerOmitsEachAbsentLegalLinkWithoutOmittingDeclarations() {
+        let declarations = Binding.constant(SignInDeclarations())
+        let noLinks = WelcomeView(declarations: declarations, onRetry: {}) { Text("Sign in") }
+        XCTAssertTrue(noLinks.showsSignInControls)
+        XCTAssertFalse(noLinks.showsTerms)
+        XCTAssertFalse(noLinks.showsPrivacy)
+        XCTAssertFalse(declarations.wrappedValue.canSignIn)
+        let termsOnly = WelcomeView(declarations: declarations, onTerms: {}, onRetry: {},
+            signIn: { Text("Sign in") }, trailing: { Text("Additional content") })
+        XCTAssertTrue(termsOnly.showsTerms)
+        XCTAssertFalse(termsOnly.showsPrivacy)
+        let privacyOnly = WelcomeView(declarations: declarations, onPrivacy: {}, onRetry: {}) { Text("Sign in") }
+        XCTAssertFalse(privacyOnly.showsTerms)
+        XCTAssertTrue(privacyOnly.showsPrivacy)
+        let both = WelcomeView(declarations: declarations, onTerms: {}, onPrivacy: {}, onRetry: {}) { Text("Sign in") }
+        XCTAssertTrue(both.showsTerms)
+        XCTAssertTrue(both.showsPrivacy)
+    }
+
+    @MainActor
     func testOnlySignInInitializersShowDeclarationsLegalLinksAndSignInControls() {
         XCTAssertFalse(WelcomeView().showsSignInControls)
         XCTAssertFalse(WelcomeView { Text("Additional content") }.showsSignInControls)

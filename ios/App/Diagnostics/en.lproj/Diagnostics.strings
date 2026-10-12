@@ -71,3 +71,6 @@
 "attemptReset" = "Ended by reset";
 "droppedExchangeCount" = "Exchange entries dropped beyond limit";
 "droppedEvidenceCount" = "Evidence entries dropped beyond limit";
+
+"signOut" = "Sign out";
+"signOutFailed" = "Could not sign out. Please try again.";

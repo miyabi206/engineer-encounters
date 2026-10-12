@@ -26,8 +26,8 @@ public struct WelcomeView<Trailing: View>: View {
     /// The caller supplies the sign-in control and owns its asynchronous operation and error state.
     public init<SignIn: View>(declarations: Binding<SignInDeclarations>, isSigningIn: Bool = false,
                              error: ProfileActionError? = nil,
-                             onTerms: @escaping @MainActor () -> Void,
-                             onPrivacy: @escaping @MainActor () -> Void,
+                             onTerms: (@MainActor () -> Void)? = nil,
+                             onPrivacy: (@MainActor () -> Void)? = nil,
                              onRetry: @escaping @MainActor () -> Void,
                              @ViewBuilder signIn: () -> SignIn,
                              @ViewBuilder trailing: () -> Trailing) {
@@ -42,6 +42,8 @@ public struct WelcomeView<Trailing: View>: View {
     }
 
     var showsSignInControls: Bool { suppliedDeclarations != nil }
+    var showsTerms: Bool { showsSignInControls && onTerms != nil }
+    var showsPrivacy: Bool { showsSignInControls && onPrivacy != nil }
 
     public var body: some View {
         ScrollView {
@@ -63,8 +65,8 @@ public struct WelcomeView<Trailing: View>: View {
                         }
                     }.disabled(isSigningIn)
                     VStack(alignment: .leading, spacing: 12) {
-                        Button(OnboardingStrings.text(.terms)) { onTerms?() }
-                        Button(OnboardingStrings.text(.privacy)) { onPrivacy?() }
+                        if let onTerms { Button(OnboardingStrings.text(.terms), action: onTerms) }
+                        if let onPrivacy { Button(OnboardingStrings.text(.privacy), action: onPrivacy) }
                     }
                     signIn.disabled(!declarations.wrappedValue.canSignIn || isSigningIn)
                     if isSigningIn { OnboardingProgress() }
@@ -89,8 +91,8 @@ extension WelcomeView where Trailing == EmptyView {
 
     public init<SignIn: View>(declarations: Binding<SignInDeclarations>, isSigningIn: Bool = false,
                              error: ProfileActionError? = nil,
-                             onTerms: @escaping @MainActor () -> Void,
-                             onPrivacy: @escaping @MainActor () -> Void,
+                             onTerms: (@MainActor () -> Void)? = nil,
+                             onPrivacy: (@MainActor () -> Void)? = nil,
                              onRetry: @escaping @MainActor () -> Void,
                              @ViewBuilder signIn: () -> SignIn) {
         self.init(declarations: declarations, isSigningIn: isSigningIn, error: error,

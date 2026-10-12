@@ -21,6 +21,7 @@ final class EncounterRuntime: ObservableObject {
     private static var receiptQueueTask: Task<SwiftDataReceiptQueue, any Error>?
     private var queue: (any ReceiptQueue)?
     private var engine: EncounterEngine?
+    private var radioTransport: RuntimeBluetoothTransport?
     private let tokenStore: any TokenBatchStore
     private let transportFactory: @MainActor () async -> any BluetoothTransport
     private let queueOpener: @MainActor () async throws -> any ReceiptQueue
@@ -84,6 +85,15 @@ final class EncounterRuntime: ObservableObject {
 
     deinit { eventTask?.cancel() }
 
+    /// Creates managers only on an explicit permission request, without starting participation.
+    func requestBluetooth() async throws {
+        var prepared = false
+        await serialize {
+            prepared = await self.prepare(requiresParticipation: false)
+        }
+        guard prepared else { throw BackendError.storageFailure }
+    }
+
     func start() async {
         guard validForAccount else { return }
         participationOn = true
@@ -145,6 +155,7 @@ final class EncounterRuntime: ObservableObject {
         scheduledUpload?.cancel()
         scheduledUpload = nil
         eventTask?.cancel()
+        radioTransport?.invalidate()
     }
 
     func invalidateForAccountChange() async {
@@ -208,8 +219,8 @@ final class EncounterRuntime: ObservableObject {
         await next.value
     }
 
-    private func prepare() async -> Bool {
-        guard validForAccount, await prepareQueue(), participationOn, let queue else { return false }
+    private func prepare(requiresParticipation: Bool = true) async -> Bool {
+        guard validForAccount, await prepareQueue(), !requiresParticipation || participationOn, let queue else { return false }
         do {
             _ = try await queue.pending()
             status.storageUnavailable = false
@@ -220,8 +231,14 @@ final class EncounterRuntime: ObservableObject {
         if engine != nil { return true }
         // Do not create either Bluetooth manager until consent and durable storage are ready.
         let transport = await transportFactory()
-        guard participationOn, validForAccount else { return false }
-        let engine = EncounterEngine(transport: transport, tokenProvider: TokenProvider(store: tokenStore),
+        guard (!requiresParticipation || participationOn), validForAccount else { return false }
+        let relay = RuntimeBluetoothTransport(underlying: transport) { [weak self] availability in
+            guard let self, self.validForAccount else { return }
+            self.status.radioAvailability = availability
+        }
+        radioTransport = relay
+        if !participationOn { await relay.execute(.stopDiscovery) }
+        let engine = EncounterEngine(transport: relay, tokenProvider: TokenProvider(store: tokenStore),
                                      receiptQueue: queue, clock: clock, approach: presenceApproach, sessionFlag: sessionFlag)
         self.engine = engine
         eventTask = Task { [weak self, engine] in

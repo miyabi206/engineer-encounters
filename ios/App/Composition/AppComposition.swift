@@ -110,6 +110,12 @@ final class AppComposition: ObservableObject {
         }
     }
 
+    func requestBluetooth() async throws {
+        await waitForRestoration()
+        guard !sessionChangeInProgress else { throw BackendError.notAuthenticated }
+        try await makeRuntime().requestBluetooth()
+    }
+
     func refresh() async {
         await waitForRestoration()
         await account.refresh()

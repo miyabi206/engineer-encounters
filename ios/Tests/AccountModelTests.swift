@@ -71,17 +71,17 @@ final class AccountModelTests: XCTestCase {
     func testRestoresWithoutUIAndRegistersChangedZoneOnForegroundOnly() async throws {
         let transport = AppBackendTransport(Array(repeating: HTTPResponse(data: Data(), statusCode: 204), count: 2))
         let store = InMemorySessionStore(session: try appBackendTestSession())
-        var zone = "Asia/Tokyo"
+        let zone = AppTestTimeZone("Asia/Tokyo")
         let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(),
             transport: transport, sessionStore: store, serverTokenStore: InMemoryTokenBatchStore(),
-            queueOpener: { InMemoryReceiptQueue() }, now: { appBackendTestNow }, timeZone: { zone })
+            queueOpener: { InMemoryReceiptQueue() }, now: { appBackendTestNow }, timeZone: { zone.value })
         var states: [AccountState] = []
         let subscription = composition.account.$state.sink { states.append($0) }
         await composition.waitForRestoration()
         XCTAssertEqual(states, [.signedOut, .signedIn(appBackendTestUser)])
         XCTAssertTrue(composition.runtime?.tokenIssuer is ServerTokenIssuer)
         await composition.refresh()
-        zone = "Europe/London"
+        zone.value = "Europe/London"
         await composition.refresh()
         await composition.refresh()
         let requests = await transport.recorded()
@@ -169,7 +169,7 @@ final class AccountModelTests: XCTestCase {
         let oldRuntime = try XCTUnwrap(composition.runtime)
         XCTAssertTrue(oldRuntime.tokenIssuer is LocalTestTokenIssuer)
         try await queue.enqueue(EncounterSamples.receipt())
-        try await composition.account.signInTemporaryAccount()
+        try await composition.account.signInTemporaryAccount(isAdult: true, acceptsTermsAndPrivacy: true)
         XCTAssertEqual(composition.account.state, .signedIn(appBackendTestUser))
         XCTAssertFalse(oldRuntime === composition.runtime)
         XCTAssertTrue(composition.runtime?.tokenIssuer is ServerTokenIssuer)
@@ -199,7 +199,7 @@ final class AccountModelTests: XCTestCase {
         await composition.waitForRestoration()
         var states: [AccountState] = []
         let subscription = composition.account.$state.sink { states.append($0) }
-        do { try await composition.account.signInTemporaryAccount(); XCTFail("Declaration failure must fail sign-in") }
+        do { try await composition.account.signInTemporaryAccount(isAdult: true, acceptsTermsAndPrivacy: true); XCTFail("Declaration failure must fail sign-in") }
         catch { XCTAssertEqual(error as? BackendError, .transportFailure) }
         XCTAssertTrue(states.allSatisfy { $0 == .signedOut })
         let remainingSession = try await sessions.load()

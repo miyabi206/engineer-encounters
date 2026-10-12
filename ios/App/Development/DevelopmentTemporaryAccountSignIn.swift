@@ -18,8 +18,9 @@ enum DevelopmentTemporaryAccountText {
 extension AccountModel {
     var temporarySignInTitle: String { DevelopmentTemporaryAccountText.title }
 
-    func signInTemporaryAccount() async throws {
+    func signInTemporaryAccount(isAdult: Bool, acceptsTermsAndPrivacy: Bool) async throws {
         try await signIn(using: DevelopmentTemporaryAccountSignIn.request(),
+                         isAdult: isAdult, acceptsTermsAndPrivacy: acceptsTermsAndPrivacy,
                          termsVersion: "development-draft", privacyVersion: "development-draft")
     }
 }

@@ -13,9 +13,9 @@ func appBackendTestConfiguration() -> BackendConfiguration {
     BackendConfiguration(address: "https://backend.example", publicClientKey: "public-test-key")!
 }
 
-func appBackendTestSession() throws -> BackendSession {
+func appBackendTestSession(userID: UUID = appBackendTestUser) throws -> BackendSession {
     try BackendSession(accessCredential: "fixture-access", refreshCredential: "fixture-refresh",
-                       expiresAt: appBackendTestNow.addingTimeInterval(3600), userID: appBackendTestUser)
+                       expiresAt: appBackendTestNow.addingTimeInterval(3600), userID: userID)
 }
 
 func appBackendAuthResponse() -> HTTPResponse {
@@ -114,4 +114,10 @@ func appBackendRuntime(transport: AppBackendTransport, queue: any ReceiptQueue,
         await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)
     }, queueOpener: { queue }, tokenStore: InMemoryTokenBatchStore(batch: try EncounterSamples.batch()),
         clock: clock, uploadFactory: factory, uploadScheduler: scheduler)
+}
+
+@MainActor
+final class AppTestTimeZone {
+    var value: String
+    init(_ value: String) { self.value = value }
 }

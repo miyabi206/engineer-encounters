@@ -12,15 +12,19 @@ enum DiagnosticsStrings {
     }
 }
 
+@MainActor
 struct DiagnosticsView: View {
     @ObservedObject private var composition: AppComposition
+    @ObservedObject private var account: AccountModel
     @ObservedObject private var log: TrialLog
     @ObservedObject private var demo: DemoSwitchSetting
     @DiagnosticsViewState private var isLoading = false
     @DiagnosticsViewState private var resetResult: Bool?
+    @DiagnosticsViewState private var signOutFailed = false
 
     init(composition: AppComposition) {
         self.composition = composition
+        account = composition.account
         log = composition.trialLog
         demo = composition.demoSwitch
     }
@@ -38,6 +42,7 @@ struct DiagnosticsView: View {
                 row("ownSession", text("unavailable"))
                 if composition.status.pausedForLackOfToken { Text(text("noTokenPause")) }
                 if composition.status.storageUnavailable { Text(text("storageUnavailable")) }
+                #if DEVELOPMENT_BUILD
                 Toggle(text("discovery"), isOn: Binding(
                     get: { composition.isParticipating },
                     set: { enabled in
@@ -45,6 +50,17 @@ struct DiagnosticsView: View {
                     }))
                     .accessibilityLabel(text("discovery"))
                     .disabled(isLoading)
+                #endif
+                if account.state.isSignedIn {
+                    Button(text("signOut")) {
+                        perform {
+                            signOutFailed = false
+                            do { try await account.signOut() }
+                            catch { signOutFailed = true }
+                        }
+                    }.disabled(isLoading)
+                    if signOutFailed { Text(text("signOutFailed")) }
+                }
             }
             Section {
                 Picker(text("approach"), selection: Binding(

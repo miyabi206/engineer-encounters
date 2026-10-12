@@ -33,11 +33,9 @@ for configuration in Development Internal Release; do
         strings -a "$resource" >> "$bundle_report"
     done < "$derived/$configuration-resources.txt"
 
-    for marker in DiagnosticsView TrialRecorder TrialLog DemoSwitchSetting LocalTestTokenIssuer DevelopmentDiagnosticsEntry LocalTestTokens DevelopmentTemporaryAccountSignIn DevelopmentTemporaryAccountText; do
+    for marker in DiagnosticsView TrialRecorder TrialLog DemoSwitchSetting LocalTestTokenIssuer DevelopmentDiagnosticsEntry LocalTestTokens DevelopmentTemporaryAccountSignIn DevelopmentTemporaryAccountText DevelopmentWelcomeView; do
         case "$marker:$configuration" in
-            # Require DiagnosticsView for Internal once the Settings list gives it a route to S22.
-            DiagnosticsView:Internal) continue ;;
-            LocalTestTokenIssuer:Internal|DevelopmentDiagnosticsEntry:Internal|LocalTestTokens:Internal|DevelopmentTemporaryAccountSignIn:Internal|DevelopmentTemporaryAccountText:Internal|*:Release) expected=absent ;;
+            LocalTestTokenIssuer:Internal|DevelopmentDiagnosticsEntry:Internal|LocalTestTokens:Internal|DevelopmentTemporaryAccountSignIn:Internal|DevelopmentTemporaryAccountText:Internal|DevelopmentWelcomeView:Internal|*:Release) expected=absent ;;
             *) expected=present ;;
         esac
         if [ "$expected" = present ]; then

@@ -37,7 +37,7 @@ for package in EncounterDomain EncounterBluetooth EncounterStorage EncounterBack
 done
 
 # Match project.yml exclusions anchored to $(SRCROOT)/App, regardless of checkout ancestors.
-# App/Development includes temporary account Auth construction and both DevelopmentDiagnostics
+# App/Development includes DevelopmentWelcomeView, temporary account Auth construction and both DevelopmentDiagnostics
 # and DevelopmentAccount string tables; neither source nor table ships in Internal/Release.
 # Collect arguments individually, preserving the package include paths above.
 case "$configuration" in
