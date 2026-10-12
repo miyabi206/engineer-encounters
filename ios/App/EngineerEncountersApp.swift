@@ -2,8 +2,8 @@ import EncounterUI
 import SwiftUI
 
 @main
+@MainActor
 struct EngineerEncountersApp: App {
-    @Environment(\.scenePhase) private var scenePhase
     private let composition: AppComposition
 
     init() {
@@ -13,18 +13,7 @@ struct EngineerEncountersApp: App {
 
     var body: some Scene {
         WindowGroup {
-            NavigationStack {
-                #if DEVELOPMENT_BUILD
-                WelcomeView { DevelopmentDiagnosticsEntry(composition: composition) }
-                #else
-                WelcomeView()
-                #endif
-            }
-                .onChange(of: scenePhase) { _, phase in
-                    if phase == .active {
-                        Task { await composition.refresh() }
-                    }
-                }
+            AccountRootView(composition: composition)
         }
     }
 }

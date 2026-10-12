@@ -1,0 +1,87 @@
+"back" = "Back";
+"retry" = "Retry";
+"loading" = "Loading…";
+"listError" = "Could not load";
+"displayName" = "Display name";
+"introduction" = "Introduction";
+"interests" = "Interests";
+"purposes" = "Purposes";
+"contactDetail" = "Contact detail";
+"discoveryPurpose" = "Discovery";
+"collaborationPurpose" = "Collaboration";
+"selectionGuidance" = "Choose at least one interest and purpose";
+"counter" = "%ld/%ld";
+"interestCounter" = "Selected interests: %ld/%ld";
+"requiredField" = "Enter a value";
+"tooLong" = "Enter no more than %ld characters";
+"invalidField" = "Check your input";
+"saveError" = "Could not save";
+"emptyInterests" = "No interests are available";
+"checklist" = "Discovery requirements";
+"link" = "Your first link";
+"linkRequired" = "Add at least one link to enable discovery";
+"met" = "Complete";
+"missing" = "Incomplete";
+"authenticationError" = "Sign in again";
+"accountError" = "Check your account setup";
+"declarationError" = "Confirm your age and agreement to the terms";
+"prerequisiteError" = "Complete the discovery requirements";
+"rateLimitError" = "Wait a moment and try again";
+"notFoundError" = "Information was not found";
+"bluetoothPurpose" = "Bluetooth is used to record encounters. Location is not used.";
+"bluetoothNotRequested" = "Bluetooth permission has not been checked";
+"bluetoothAvailable" = "Bluetooth is available";
+"bluetoothDenied" = "Bluetooth permission is denied";
+"bluetoothOff" = "Bluetooth is off";
+"bluetoothUnavailable" = "Bluetooth is unavailable";
+"bluetoothRecovery" = "Check Bluetooth settings";
+"allowBluetooth" = "Allow Bluetooth";
+"promise" = "When discovery is on for both of you and Bluetooth is available, an encounter is recorded after at least 2 minutes within Bluetooth range when at least one of you has the app open.";
+"background" = "Discovery may also work while phones are locked or the app is in the background.";
+"dailyReport" = "Ambient encounters appear together in your daily report, at 21:00 local time by default.";
+"alternatives" = "Encounters between two people in a session appear immediately after confirmation. QR encounters also appear immediately after confirmation.";
+"forceQuit" = "Force-quitting the app stops discovery until you reopen it.";
+"firstUnlock" = "After a restart, discovery cannot work until the phone is unlocked once.";
+"oneSided" = "A one-sided exchange does not display an encounter card.";
+"cancel" = "Cancel";
+"save" = "Save";
+"settings" = "Settings";
+"editProfile" = "Edit profile";
+"discoveryMatching" = "Discovery and matching";
+"visibility" = "Visibility";
+"visibilityInterests" = "Interests";
+"optionalContact" = "Contact detail (optional)";
+"contactPrivate" = "Your contact detail is private by default";
+"discardChanges" = "Discard changes";
+"discoveryRequired" = "Required fields cannot be empty while discovery is on";
+"discovery" = "Discovery";
+"requiredInformation" = "Complete the required information";
+"threshold" = "Shared-interest threshold";
+"thresholdCount" = "At least {count} shared interests";
+"matchingExplanation" = "Matching affects order and visibility. It does not hide encounters.";
+"saveMatching" = "Save matching settings";
+"linkVisibility" = "Link visibility";
+"appliesToPast" = "Changes also apply to past encounters and saved items";
+"saveVisibility" = "Save visibility";
+"everyoneEligible" = "Everyone eligible";
+"compatibleOnly" = "Compatible only";
+"privateLevel" = "Private";
+// Neutral copy: wording not supplied in ui.md.
+"everyoneExplanation" = "Requires a confirmed encounter, discovery on for both people and no block in either direction.";
+// Neutral copy: wording not supplied in ui.md.
+"compatibleExplanation" = "Also requires overlapping purposes and both people’s shared-interest thresholds.";
+// Neutral copy: wording not supplied in ui.md.
+"privateExplanation" = "No other user can see this field.";
+// Neutral copy: wording not supplied in ui.md.
+"purposeRequired" = "Choose at least one purpose";
+// Neutral copy: wording not supplied in ui.md.
+"discoveryOffExplanation" = "Turning discovery off hides cards without deleting encounters.";
+// Neutral copy: wording not supplied in ui.md.
+"interestLimit" = "Choose up to %ld interests";
+// Neutral copy: a partial save lists confirmed values beside the failed operation.
+"partialSave" = "Changes already in effect";
+"appliedChange" = "%@: %@";
+"labelStatus" = "%@ · %@";
+"fieldMessage" = "%@: %@";
+"listItem" = "%@, %@";
+"notSet" = "Not set";

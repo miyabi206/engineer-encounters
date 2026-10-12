@@ -7,9 +7,14 @@ let package = Package(
     products: [
         .library(name: "EncounterBackend", targets: ["EncounterBackend"])
     ],
+    dependencies: [
+        .package(path: "../EncounterDomain")
+    ],
     targets: [
-        .target(name: "EncounterBackend"),
-        .testTarget(name: "EncounterBackendTests", dependencies: ["EncounterBackend"])
+        .target(name: "EncounterBackend", dependencies: ["EncounterDomain"]),
+        .testTarget(name: "EncounterBackendTests", dependencies: [
+            "EncounterBackend", .product(name: "EncounterDomainTestSupport", package: "EncounterDomain")
+        ])
     ],
     swiftLanguageModes: [.v6]
 )

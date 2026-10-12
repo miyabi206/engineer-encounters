@@ -71,3 +71,6 @@
 "attemptReset" = "リセットによる終了";
 "droppedExchangeCount" = "上限を超えて記録しなかった交換の数";
 "droppedEvidenceCount" = "上限を超えて記録しなかった証拠の数";
+
+"signOut" = "サインアウト";
+"signOutFailed" = "サインアウトできませんでした。もう一度お試しください。";

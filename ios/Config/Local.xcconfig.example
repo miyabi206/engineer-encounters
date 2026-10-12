@@ -1,3 +1,14 @@
 // Copy to Local.xcconfig for local signing and bundle identifier overrides.
 DEVELOPMENT_TEAM = YOUR_TEAM_ID
 APP_BUNDLE_IDENTIFIER = io.github.your-account.EngineerEncounters
+
+// Optional backends: configure each build kind independently with a public client key.
+DEVELOPMENT_BACKEND_URL =
+DEVELOPMENT_BACKEND_PUBLIC_KEY =
+INTERNAL_BACKEND_URL =
+INTERNAL_BACKEND_PUBLIC_KEY =
+RELEASE_BACKEND_URL =
+RELEASE_BACKEND_PUBLIC_KEY =
+// In an address, use /$()/ between the scheme's colon and the host so xcconfig
+// preserves both slashes. Only Development accepts HTTP/local networking.
+// Internal and Release require HTTPS and have no ATS exceptions.

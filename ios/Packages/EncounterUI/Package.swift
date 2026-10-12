@@ -10,7 +10,7 @@ let package = Package(
     ],
     targets: [
         .target(name: "EncounterUI", resources: [.process("Resources")]),
-        .testTarget(name: "EncounterUITests", dependencies: ["EncounterUI"])
+        .testTarget(name: "EncounterUITests", dependencies: ["EncounterUI"], resources: [.process("Resources")])
     ],
     swiftLanguageModes: [.v6]
 )

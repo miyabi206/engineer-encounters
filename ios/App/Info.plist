@@ -29,6 +29,19 @@
     <string>$(CURRENT_PROJECT_VERSION)</string>
     <key>BuildConfiguration</key>
     <string>$(CONFIGURATION)</string>
+    <key>BackendURL</key>
+    <string>$(BACKEND_URL)</string>
+    <key>BackendPublicKey</key>
+    <string>$(BACKEND_PUBLIC_KEY)</string>
+#if DEVELOPMENT_BACKEND_NETWORKING
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>開発用バックエンドにローカルネットワークで接続します。</string>
+#endif
     <key>UIApplicationSceneManifest</key>
     <dict>
         <key>UIApplicationSupportsMultipleScenes</key>

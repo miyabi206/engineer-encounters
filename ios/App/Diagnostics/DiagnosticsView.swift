@@ -12,8 +12,10 @@ enum DiagnosticsStrings {
     }
 }
 
+@MainActor
 struct DiagnosticsView: View {
     @ObservedObject private var composition: AppComposition
+    @ObservedObject private var account: AccountModel
     @ObservedObject private var log: TrialLog
     @ObservedObject private var demo: DemoSwitchSetting
     @DiagnosticsViewState private var isLoading = false
@@ -21,6 +23,7 @@ struct DiagnosticsView: View {
 
     init(composition: AppComposition) {
         self.composition = composition
+        account = composition.account
         log = composition.trialLog
         demo = composition.demoSwitch
     }
@@ -33,18 +36,20 @@ struct DiagnosticsView: View {
                 row("app", "\(metadata.appVersion) (\(metadata.appBuild))")
                 row("ios", metadata.iOSVersion)
                 row("device", metadata.deviceModel)
-                row("bluetooth", availability(composition.status.radioAvailability))
+                row("bluetooth", composition.status.bluetoothPoweredOff ? text("off") : availability(composition.status.radioAvailability))
                 row("discovery", text(composition.status.discoveryOn ? "on" : "off"))
                 row("ownSession", text("unavailable"))
                 if composition.status.pausedForLackOfToken { Text(text("noTokenPause")) }
                 if composition.status.storageUnavailable { Text(text("storageUnavailable")) }
-                Toggle(text("discovery"), isOn: Binding(
-                    get: { composition.isParticipating },
-                    set: { enabled in
-                        perform { await composition.setParticipation(enabled) }
-                    }))
-                    .accessibilityLabel(text("discovery"))
-                    .disabled(isLoading)
+                DiagnosticsParticipationControl(composition: composition, isLoading: isLoading, perform: perform)
+                if account.state.isSignedIn {
+                    Button(text("signOut")) {
+                        perform {
+                            try? await account.signOut()
+                        }
+                    }.disabled(isLoading)
+                }
+                if account.sessionCleanupFailed { Text(text("signOutFailed")) }
             }
             Section {
                 Picker(text("approach"), selection: Binding(
@@ -203,6 +208,25 @@ struct DiagnosticsView: View {
             await action()
             isLoading = false
         }
+    }
+}
+
+@MainActor
+struct DiagnosticsParticipationControl: View {
+    @ObservedObject var composition: AppComposition
+    let isLoading: Bool
+    let perform: @MainActor (@escaping @MainActor () async -> Void) -> Void
+
+    var participation: Binding<Bool> {
+        Binding(get: { composition.isParticipating }, set: { enabled in
+            perform { await composition.setParticipation(enabled) }
+        })
+    }
+
+    var body: some View {
+        Toggle(DiagnosticsStrings.text("discovery"), isOn: participation)
+            .accessibilityLabel(DiagnosticsStrings.text("discovery"))
+            .disabled(isLoading)
     }
 }
 #endif

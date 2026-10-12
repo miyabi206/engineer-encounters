@@ -3,7 +3,7 @@ import EncounterDomain
 import Foundation
 
 /// Local test tokens never ship in Internal or Release artifacts.
-actor LocalTestTokenIssuer {
+actor LocalTestTokenIssuer: TokenIssuer {
     private let store: any TokenBatchStore
 
     init(store: any TokenBatchStore) { self.store = store }
@@ -28,6 +28,16 @@ actor LocalTestTokenIssuer {
             next = end
         }
         try await store.save(TokenBatch(windows: windows))
+    }
+}
+
+@MainActor
+extension EncounterRuntime {
+    /// Preserve radio-only Development startup without placing any server request in its chain.
+    func replenishLocalTokens(at now: Date) async -> Bool? {
+        guard let issuer = tokenIssuer as? LocalTestTokenIssuer else { return nil }
+        do { try await issuer.replenish(at: now); return true }
+        catch { return false }
     }
 }
 #endif
