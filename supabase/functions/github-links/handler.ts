@@ -219,13 +219,18 @@ function htmlText(value: string): string {
       else if (value[i] === '"' || value[i] === "'") quote = value[i];
       else if (value[i] === ">") return i;
     }
-    // Fail closed if an attribute quote swallowed the remaining markup.
-    return quote ? -1 : value.length;
+    // Fail closed for any tag left open at the bounded input's end.
+    return -1;
   }
   for (let i = 0; i < value.length;) {
     const start = value.indexOf("<", i);
     if (start < 0) { result.push(value.slice(i)); break; }
     result.push(value.slice(i, start));
+    if (!/[a-z/!?]/i.test(value[start + 1] ?? "")) {
+      result.push("<");
+      i = start + 1;
+      continue;
+    }
     if (value.startsWith("<!--", start)) {
       const end = value.indexOf("-->", start + 4);
       i = end < 0 ? value.length : end + 3;
@@ -234,7 +239,6 @@ function htmlText(value: string): string {
     }
     const end = tagEnd(start);
     if (end < 0) break;
-    if (end === value.length) { result.push(value.slice(start)); break; }
     const contents = value.slice(start + 1, end);
     const name = contents.match(/^([a-z][a-z0-9:-]*)\b/i)?.[1].toLowerCase();
     if (name === "script" || name === "style") {
@@ -343,6 +347,8 @@ function plain(value: string, cap: number): string {
     .replace(/^[ \t]{0,3}(?:#{1,6}[ \t]+|>[ \t]*|[-+*][ \t]+|\d+[.)][ \t]+)/gm, "")
     .replace(/^[ \t]{0,3}=+[ \t]*$/gm, "")
     .replace(/^[ \t]*(?:[-*_][ \t]*){3,}$/gm, ""));
+  // Decode entities after stripping: clients render the result as plain text,
+  // never markup, including any decoded less-than and greater-than characters.
   text = text.replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z][a-z0-9]+);/gi, (whole, entity: string) => {
     if (!entity.startsWith("#")) return Object.hasOwn(HTML_ENTITIES, entity) ? HTML_ENTITIES[entity] : whole;
     const cp = entity[1].toLowerCase() === "x"

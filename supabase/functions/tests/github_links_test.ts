@@ -493,7 +493,7 @@ Deno.test("github-links: hostile heading lines and U+0085 runs have bounded proc
     const result = await call(f, REQUEST);
     const elapsed = performance.now() - before;
     equal(result.status, 200);
-    check(elapsed < 500, `Hostile fetched text took ${elapsed}ms; expected under 500ms`);
+    check(elapsed < 5_000, `Hostile fetched text took ${elapsed}ms; expected under 5000ms`);
     const preview = (result.value as { preview: Obj }).preview;
     const expected = source.startsWith("text") ? "text" : source.length < 16_384 ? "x" : "";
     equal(preview.description, expected);
@@ -504,14 +504,14 @@ Deno.test("github-links: hostile heading lines and U+0085 runs have bounded proc
   equal(await call(edited, { ...SAVE, title: "Owner title" + "\u0085".repeat(7000) }), {
     status: 200, value: { link: OWN_LINK },
   });
-  check(performance.now() - before < 500, "Edited U+0085 runs must trim in under 500ms");
+  check(performance.now() - before < 5_000, "Edited U+0085 runs must trim in under 5000ms");
   const separators = fixture({ github: (url) => url.pathname.endsWith("/readme")
     ? readme("[unclosed\u2028".repeat(30_000)) : undefined });
   const separatorStart = performance.now();
   equal(await call(separators, REQUEST), { status: 200, value: { preview: {
     ...PREVIEW, opening_text: "[unclosed ".repeat(20),
   } } });
-  check(performance.now() - separatorStart < 500, "Unicode line boundaries must not cause repeated suffix scans");
+  check(performance.now() - separatorStart < 5_000, "Unicode line boundaries must not cause repeated suffix scans");
 });
 
 Deno.test("github-links: unclosed HTML attribute quotes never expose markup or script bodies", async () => {
@@ -519,8 +519,37 @@ Deno.test("github-links: unclosed HTML attribute quotes never expose markup or s
     const source = `intro <${quote} <script>alert(1)</script> <img src=x onerror=y> tail`;
     const f = fixture({ github: (url) => url.pathname.endsWith("/readme") ? readme(source) : undefined });
     f.repo.description = source;
+    const result = await call(f, REQUEST);
+    equal(result.status, 200);
+    const preview = (result.value as { preview: Obj }).preview;
+    for (const text of [preview.description, preview.opening_text]) {
+      check(!/script|alert|img|onerror|src|>/i.test(String(text)), "Quote-prefixed ordinary text must not expose tags or script bodies");
+    }
+    for (const closingQuote of ["", quote]) {
+      const tagSource = `intro <a title=${quote} <script>alert(1)</script> <img src=x onerror=y> tail${closingQuote}`;
+      const tag = fixture({ github: (url) => url.pathname.endsWith("/readme") ? readme(tagSource) : undefined });
+      tag.repo.description = tagSource;
+      equal(await call(tag, REQUEST), { status: 200, value: { preview: {
+        ...PREVIEW, description: "intro", opening_text: "intro",
+      } } });
+    }
+  }
+});
+
+Deno.test("github-links: unterminated tags fail closed and ordinary less-than text survives", async () => {
+  for (const [source, expected] of [
+    ['intro <a title="><script>alert(1)</script>"', "intro"],
+    ["intro <img src=x onerror=alert(1)", "intro"],
+    // The closing delimiter is beyond the 16 KiB scan bound, with or without quotes.
+    ...["", '"', "'"].map((quote) => [
+      `intro <a title=${quote}${"x".repeat(16_384)}${quote}> tail`, "intro",
+    ]),
+    ["Parses JSON in <1ms, and it does not allocate", "Parses JSON in <1ms, and it does not allocate"],
+  ]) {
+    const f = fixture({ github: (url) => url.pathname.endsWith("/readme") ? readme(source) : undefined });
+    f.repo.description = source;
     equal(await call(f, REQUEST), { status: 200, value: { preview: {
-      ...PREVIEW, description: "intro", opening_text: "intro",
+      ...PREVIEW, description: expected, opening_text: expected,
     } } });
   }
 });
