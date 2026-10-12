@@ -37,6 +37,7 @@ actor AppBackendTransport: HTTPTransport {
     private var requests: [URLRequest] = []
     private var responses: [HTTPResponse]
     init(_ responses: [HTTPResponse] = []) { self.responses = responses }
+    func sendWithoutRedirects(_ request: URLRequest) async throws -> HTTPResponse { try await send(request) }
     func send(_ request: URLRequest) async throws -> HTTPResponse {
         requests.append(request)
         guard !responses.isEmpty else { throw BackendError.transportFailure }
@@ -186,6 +187,7 @@ actor ControlledAppBackendTransport: HTTPTransport {
     private var held: [(String, CheckedContinuation<HTTPResponse, any Error>)] = []
 
     init(_ plans: [String: [Reply]]) { self.plans = plans }
+    func sendWithoutRedirects(_ request: URLRequest) async throws -> HTTPResponse { try await send(request) }
     func send(_ request: URLRequest) async throws -> HTTPResponse {
         requests.append(request)
         let path = request.url!.lastPathComponent

@@ -42,10 +42,64 @@ final class AccountFlowTests: XCTestCase {
             XCTAssertEqual(flow.onboarding?.step, step)
             XCTAssertEqual(flow.onboarding?.profile, profile)
             XCTAssertFalse(try XCTUnwrap(flow.onboarding).canEnableDiscovery)
-            XCTAssertFalse(try XCTUnwrap(flow.settings).allowsDiscoveryActivation)
+            XCTAssertTrue(try XCTUnwrap(flow.settings).allowsDiscoveryActivation)
             XCTAssertEqual(builds, 0)
             XCTAssertFalse(flow.usesSignInWelcome)
         }
+    }
+
+    func testSettingsDiscoveryActivationRequiresReadyAccountAndEachPrerequisite() async throws {
+        for missing in ["none", "display_name", "introduction", "interest", "link", "declarations", "time_zone", "moderation"] {
+            var profile = appLinkedPresentationProfile()
+            switch missing {
+            case "display_name": profile.prerequisites.displayName = false
+            case "introduction": profile.prerequisites.introduction = false
+            case "interest": profile.prerequisites.interest = false
+            case "link": profile.prerequisites.link = false
+            case "declarations": profile.declarationsRecorded = false
+            case "time_zone": profile.timeZone = ""
+            case "moderation": profile.moderationState = "suspended"
+            default: break
+            }
+            var enabled = profile; enabled.discoveryOn = true
+            let transport = ControlledAppBackendTransport([
+                "register_time_zone": [.response(appAccountOK())],
+                "get_own_profile": [.response(appOwnProfileResponse(profile)), .response(appOwnProfileResponse(enabled))],
+                "set_discovery": [.response(appAccountOK())]
+            ])
+            let defaults = appBackendDefaults()
+            OnboardingCompletionStore(defaults: defaults).finish(appBackendTestUser)
+            let composition = appFlowComposition(transport: transport, session: try appBackendTestSession(), defaults: defaults)
+            let flow = AccountFlowModel(composition: composition)
+            await flow.start()
+            XCTAssertEqual(flow.root, .settings)
+            let settings = try XCTUnwrap(flow.settings)
+            // Supply the radio observation independently from profile readiness.
+            composition.runtime?.receive(.radioAvailability(.available))
+            settings.receive(profile: profile, bluetooth: .available)
+            XCTAssertEqual(settings.canEnableDiscovery, missing == "none", missing)
+            let saved = await settings.setDiscovery(true)
+            XCTAssertEqual(saved, missing == "none", missing)
+            let count = await transport.count("set_discovery")
+            XCTAssertEqual(count, missing == "none" ? 1 : 0, missing)
+        }
+    }
+
+    func testSettingsActivationFollowsReadinessAndNewLinkProfileUpdates() async throws {
+        var unready = appLinkedPresentationProfile(); unready.declarationsRecorded = false
+        let composition = appFlowComposition(transport: AppBackendTransport([appAccountOK(), appOwnProfileResponse(unready)]),
+            session: try appBackendTestSession())
+        let flow = AccountFlowModel(composition: composition)
+        await flow.start()
+        XCTAssertFalse(try XCTUnwrap(flow.settings).allowsDiscoveryActivation)
+        composition.runtime?.receive(.radioAvailability(.available))
+        composition.account.publishProfile(appPresentationProfile(), stale: false)
+        let settings = try XCTUnwrap(flow.settings)
+        XCTAssertTrue(settings.allowsDiscoveryActivation)
+        settings.receive(profile: appPresentationProfile(), bluetooth: .available)
+        XCTAssertFalse(settings.canEnableDiscovery)
+        composition.account.publishProfile(appLinkedPresentationProfile(), stale: false)
+        XCTAssertTrue(try XCTUnwrap(flow.settings).canEnableDiscovery)
     }
 
     func testProfileLoadFailureRetriesWithoutLosingTheSession() async throws {
@@ -73,7 +127,7 @@ final class AccountFlowTests: XCTestCase {
         XCTAssertEqual(flow.root, .settings)
         XCTAssertTrue(flow.completion.contains(appBackendTestUser))
         XCTAssertFalse(try XCTUnwrap(flow.settings).showsDiscoveryExplanation)
-        XCTAssertFalse(try XCTUnwrap(flow.settings).allowsDiscoveryActivation)
+        XCTAssertTrue(try XCTUnwrap(flow.settings).allowsDiscoveryActivation)
         XCTAssertNil(flow.onboarding)
         let sameAccount = appFlowComposition(transport: AppBackendTransport([appAccountOK(), appOwnProfileResponse(appLinkedPresentationProfile())]),
             session: try appBackendTestSession())

@@ -11,3 +11,6 @@
 "disconnectError" = "GitHubの連携を解除できませんでした。もう一度お試しください。";
 "discoverySettings" = "発見の設定";
 "disconnectConfirmation" = "アプリ内のGitHubリンクを削除します。元のページやコピー済みのURLは削除されません。";
+
+"githubSyncPending" = "GitHubは連携済みです。同期を再試行してください。";
+"connectError" = "GitHubの連携または同期に失敗しました。再試行してください。";

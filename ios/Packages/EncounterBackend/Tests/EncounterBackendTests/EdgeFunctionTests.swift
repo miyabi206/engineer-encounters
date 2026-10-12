@@ -72,7 +72,7 @@ final class EdgeFunctionTests: XCTestCase {
             do { _ = try await gitHubService(StubTransport(steps)).syncIdentity(); XCTFail(code) }
             catch { XCTAssertEqual(error as? BackendError, expected, code) }
         }
-        for (status, expected) in [(404, BackendError.notFound), (429, .rateLimited),
+        for (status, expected) in [(404, BackendError.httpFailure(statusCode: 404)), (429, .rateLimited),
                                    (400, .httpFailure(statusCode: 400)), (408, .httpFailure(statusCode: 408)),
                                    (500, .httpFailure(statusCode: 500)), (502, .httpFailure(statusCode: 502))] {
             do { _ = try await gitHubService(StubTransport([.response(jsonResponse("secret-body", status: status))])).syncIdentity(); XCTFail() }

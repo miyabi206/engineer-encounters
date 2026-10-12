@@ -397,6 +397,7 @@ private actor StorageBoundaryTransport: HTTPTransport {
     let queue: any ReceiptQueue
     private(set) var crossedWithOldStorage = false
     init(tokens: any TokenBatchStore, queue: any ReceiptQueue) { self.tokens = tokens; self.queue = queue }
+    func sendWithoutRedirects(_ request: URLRequest) async throws -> HTTPResponse { try await send(request) }
     func send(_ request: URLRequest) async throws -> HTTPResponse {
         let batch = try await tokens.load()
         let pending = try await queue.pending()

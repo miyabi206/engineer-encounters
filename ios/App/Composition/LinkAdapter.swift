@@ -7,6 +7,8 @@ import Foundation
 final class LinkAdapter: ObservableObject {
     @Published private(set) var connection: GitHubConnectionState = .notConnected
     @Published private(set) var connectionError: LinkActionError?
+    @Published private(set) var disconnectError: LinkActionError?
+    @Published private(set) var needsGitHubSync = false
     @Published private(set) var links: [OwnLinkState]?
     private let account: AccountModel
     private let runner: any GitHubWebAuthenticationRunning
@@ -27,7 +29,7 @@ final class LinkAdapter: ObservableObject {
         pending = nil
         runner.cancel()
         await account.sessions?.cancelGitHubLink()
-        links = nil; connection = .notConnected; connectionError = nil
+        links = nil; connection = .notConnected; connectionError = nil; disconnectError = nil; needsGitHubSync = false
         own = nil; github = nil
     }
 
@@ -36,7 +38,7 @@ final class LinkAdapter: ObservableObject {
         return LinkActions(loadLinks: { try await self.loadLinks(epoch: epoch) },
             loadConnection: {
                 let value = try await self.operation(epoch: epoch) { own, _ in Self.present(try await own.getGitHubConnection()) }
-                self.connection = value
+                if !self.needsGitHubSync { self.connection = value }
                 return value
             },
             connectGitHub: { try await self.connect(epoch: epoch) },
@@ -96,17 +98,36 @@ final class LinkAdapter: ObservableObject {
 
     func disconnectGitHub() async throws {
         let epoch = account.sessionGeneration
-        connectionError = nil
+        do { try requireSession(epoch: epoch) }
+        catch { throw Self.presentationError(error) }
+        disconnectError = nil
         do {
             let value = try await operation(epoch: epoch) { own, _ in Self.present(try await own.disconnectGitHub()) }
             connection = value
+            needsGitHubSync = false
+            // Each follow-up runs independently: a failed read must not skip Auth unlink.
+            var followUpError: (any Error)?
+            do { _ = try await loadLinks(epoch: epoch) } catch { followUpError = error }
+            do {
+                let value = try await operation(epoch: epoch) { own, _ in Self.present(try await own.getGitHubConnection()) }
+                connection = value
+            } catch { if followUpError == nil { followUpError = error } }
             await refreshProfile(epoch: epoch, fallbackCount: 0)
-            _ = try await loadLinks(epoch: epoch)
+            do {
+                try requireSession(epoch: epoch)
+                if let sessions = account.sessions {
+                    _ = try await account.backendCallFence().call { try await sessions.unlinkGitHubIdentity() }
+                }
+            } catch {
+                await rejectIfDead(error, epoch: epoch)
+                if followUpError == nil { followUpError = error }
+            }
+            if let followUpError { throw followUpError }
         } catch {
             if account.sessionGeneration == epoch, account.hasCurrentSessionContext, case .signedIn = account.state {
-                connectionError = Self.presentationError(error)
+                disconnectError = Self.presentationError(error)
             }
-            throw error
+            throw Self.presentationError(error)
         }
     }
 
@@ -122,56 +143,77 @@ final class LinkAdapter: ObservableObject {
         guard account.canRefreshSession() else { throw BackendError.storageFailure }
     }
 
-    private func operation<Value>(epoch: UUID, rejectDeadSession: Bool = true,
+    private func operation<Value>(epoch: UUID,
         _ action: @MainActor (OwnLinkService, GitHubLinksService) async throws -> Value) async throws -> Value {
-        do {
-            try requireSession(epoch: epoch)
-            guard let own, let github else { throw BackendError.notAuthenticated }
-            let fence = account.backendCallFence()
-            let value = try await fence.call { try await action(own, github) }
-            try requireSession(epoch: epoch)
-            return value
-        } catch is CancellationError { throw CancellationError() }
+        // Local readiness failures are not evidence that Auth rejected this session.
+        do { try requireSession(epoch: epoch) }
+        catch { throw Self.presentationError(error) }
+        guard let own, let github else { throw Self.presentationError(BackendError.notAuthenticated) }
+        let fence = account.backendCallFence()
+        let value: Value
+        do { value = try await fence.call { try await action(own, github) } }
+        catch is CancellationError { throw CancellationError() }
         catch {
-            let failure = Self.presentationError(error)
-            if rejectDeadSession, error as? BackendError == .notAuthenticated { await account.rejectDeadSession(generation: epoch) }
-            throw failure
+            await rejectIfDead(error, epoch: epoch)
+            throw Self.presentationError(error)
         }
+        do { try requireSession(epoch: epoch) }
+        catch { throw Self.presentationError(error) }
+        return value
+    }
+
+    private func rejectIfDead(_ error: any Error, epoch: UUID) async {
+        guard error as? BackendError == .notAuthenticated,
+              (try? requireSession(epoch: epoch)) != nil else { return }
+        await account.rejectDeadSession(generation: epoch)
     }
 
     private func connect(epoch: UUID) async throws -> GitHubConnectionState {
         do { try requireSession(epoch: epoch) }
         catch { throw Self.presentationError(error) }
         guard pending == nil else { throw LinkActionError(code: .unavailable, details: ["pending"]) }
+        guard let sessions = account.sessions else { throw Self.presentationError(BackendError.notAuthenticated) }
         let id = UUID()
-        pending = id; connection = .connecting; connectionError = nil
-        // Capture the manager: cancelling an obsolete attempt must never touch its replacement.
-        let sessions = account.sessions
+        pending = id; connectionError = nil
+        if !needsGitHubSync { connection = .connecting }
         let fence = account.backendCallFence()
         defer { if pending == id { pending = nil } }
         do {
-            try requireSession(epoch: epoch)
-            guard let sessions else { throw BackendError.notAuthenticated }
-            let address = try await fence.call { try await sessions.beginGitHubLink() }
-            try requireSession(epoch: epoch)
-            let callback = try await fence.call { try await runner.authenticate(at: address, callbackScheme: "engineer-encounters") }
-            try requireSession(epoch: epoch)
-            _ = try await fence.call { try await sessions.completeGitHubLink(from: callback) }
-            try requireSession(epoch: epoch)
-            _ = try await operation(epoch: epoch, rejectDeadSession: false) { _, github in try await github.syncIdentity() }
-            let value = try await operation(epoch: epoch, rejectDeadSession: false) { own, _ in Self.present(try await own.getGitHubConnection()) }
+            let synced: GitHubConnectionTransfer
+            do {
+                synced = try await operation(epoch: epoch) { _, github in try await github.syncIdentity() }
+            } catch let failure as LinkActionError where failure.code == .prerequisiteMissing &&
+                failure.details.contains("github") && !needsGitHubSync {
+                // A live identity with a missing cache can be synced without another authorization.
+                try requireSession(epoch: epoch)
+                let address = try await fence.call { try await sessions.beginGitHubLink() }
+                try requireSession(epoch: epoch)
+                let callback = try await fence.call { try await runner.authenticate(at: address, callbackScheme: "engineer-encounters") }
+                try requireSession(epoch: epoch)
+                _ = try await fence.call { try await sessions.completeGitHubLink(from: callback) }
+                try requireSession(epoch: epoch)
+                needsGitHubSync = true
+                connection = .connected(handle: nil)
+                synced = try await operation(epoch: epoch) { _, github in try await github.syncIdentity() }
+            }
+            needsGitHubSync = false
+            connection = Self.present(synced)
+            let value = try await operation(epoch: epoch) { own, _ in Self.present(try await own.getGitHubConnection()) }
             connection = value
             return value
         } catch {
-            await sessions?.cancelGitHubLink()
+            await sessions.cancelGitHubLink()
             let current = fence.isCurrent() && pending == id
-            if error is CancellationError, current {
+            if error is CancellationError, current, !needsGitHubSync {
                 connection = .notConnected
                 return .notConnected
             }
+            await rejectIfDead(error, epoch: epoch)
             let failure = Self.presentationError(current ? error : BackendError.notAuthenticated)
-            if current { connection = .failed; connectionError = failure }
-            // Connection failures, including foreign-account exchanges, retain the initiating session.
+            if current, pending == id {
+                if !needsGitHubSync { connection = .failed }
+                connectionError = failure
+            }
             throw failure
         }
     }
@@ -224,7 +266,7 @@ final class LinkAdapter: ObservableObject {
             title: value.title, description: value.description, mainLanguage: value.mainLanguage, tags: value.tags,
             openingText: value.openingText, url: url, visibility: EncounterUI.VisibilityLevel(rawValue: value.visibility.rawValue),
             verified: value.verificationState == .verified, displayOrder: value.displayOrder, sourceItemID: value.sourceItemID,
-            repositoryName: url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")))
+            repositoryName: url.lastPathComponent)
     }
     static func present(_ value: RepositoryTransfer) throws -> GitHubRepositoryChoice {
         GitHubRepositoryChoice(repositoryID: value.repositoryID, repositoryName: value.repositoryName, title: value.title,

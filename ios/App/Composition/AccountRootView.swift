@@ -145,12 +145,20 @@ private struct AccountLinksView: View {
     var body: some View {
         VStack {
             LinkListView(model: model, back: back, discoverySettings: discovery)
+            if adapter.needsGitHubSync { Text(AccountStrings.text("githubSyncPending")) }
             if model.route == .list {
                 if adapter.connection.isConnected {
                     Button(AccountStrings.text("disconnectGitHub"), role: .destructive) { confirmDisconnect = true }
                         .disabled(model.isBusy || disconnecting)
                 }
-                if let error = adapter.connectionError {
+                if adapter.needsGitHubSync {
+                    Button(AccountStrings.text("retry")) { Task { await model.connectGitHub() } }
+                        .disabled(model.isBusy || disconnecting)
+                }
+                if adapter.connectionError != nil {
+                    Text(AccountStrings.text("connectError"))
+                }
+                if let error = adapter.disconnectError {
                     Text(AccountStrings.text(error.isLastLink ? "disconnectLastLink" : "disconnectError"))
                     if error.isLastLink { Button(AccountStrings.text("discoverySettings"), action: discovery) }
                 }
@@ -167,8 +175,8 @@ private struct AccountLinksView: View {
                     defer { disconnecting = false }
                     do {
                         try await adapter.disconnectGitHub()
-                        await model.loadLinks()
                     } catch { /* The adapter exposes a sanitized presentation failure. */ }
+                    await model.loadLinks()
                 }
             }
         } message: { Text(AccountStrings.text("disconnectConfirmation")) }

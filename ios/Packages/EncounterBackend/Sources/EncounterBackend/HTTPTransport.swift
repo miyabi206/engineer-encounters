@@ -21,11 +21,6 @@ public protocol HTTPTransport: Sendable {
     func sendWithoutRedirects(_ request: URLRequest) async throws -> HTTPResponse
 }
 
-public extension HTTPTransport {
-    // In-memory transports have no redirect handling. Network transports must override this.
-    func sendWithoutRedirects(_ request: URLRequest) async throws -> HTTPResponse { try await send(request) }
-}
-
 /// Foundation transport with no provider SDK dependency.
 public struct URLSessionHTTPTransport: HTTPTransport {
     private let session: URLSession

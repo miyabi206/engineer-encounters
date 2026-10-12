@@ -11,3 +11,6 @@
 "disconnectError" = "Could not disconnect GitHub. Try again.";
 "discoverySettings" = "Discovery settings";
 "disconnectConfirmation" = "Your GitHub links will be removed from the app. The originals and copied URLs are not removed.";
+
+"githubSyncPending" = "GitHub is linked. Sync is still needed.";
+"connectError" = "GitHub could not be connected or synced. Try again.";

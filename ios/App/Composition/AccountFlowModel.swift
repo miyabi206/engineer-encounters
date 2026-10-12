@@ -145,21 +145,29 @@ final class AccountFlowModel: ObservableObject {
         }
     }
 
-    private func makeModels(profile: OwnProfileState) {
-        guard let id = accountID else { return }
-        let epoch = composition.account.sessionGeneration
-        let completed = completion.contains(id)
-        let actions = composition.account.profileActions(bluetoothState: { [weak self] in
+    private static func allowsDiscoveryActivation(_ profile: OwnProfileState) -> Bool {
+        profile.declarationsRecorded && !profile.timeZone.isEmpty && profile.moderationState == "active"
+    }
+
+    private func profileActions() -> ProfileActions {
+        composition.account.profileActions(bluetoothState: { [weak self] in
             self?.bluetooth ?? .unavailable
         }) { [weak self] in
             guard let self else { throw ProfileActionError(code: .unavailable) }
             try await self.composition.requestBluetooth()
             return self.bluetooth
         }
+    }
+
+    private func makeModels(profile: OwnProfileState) {
+        guard let id = accountID else { return }
+        let epoch = composition.account.sessionGeneration
+        let completed = completion.contains(id)
+        let actions = profileActions()
         let linkActions = composition.linkAdapter.actions()
         links = LinksModel(actions: linkActions, discoveryOn: profile.discoveryOn)
         settings = SettingsModel(profile: profile, actions: actions, bluetooth: bluetooth,
-            onboardingExplanationCompleted: completed, allowsDiscoveryActivation: false)
+            onboardingExplanationCompleted: completed, allowsDiscoveryActivation: Self.allowsDiscoveryActivation(profile))
         if completed {
             onboarding = nil
             root = .settings
@@ -188,7 +196,10 @@ final class AccountFlowModel: ObservableObject {
     private func receive(profile: OwnProfileState) {
         guard let id = accountID, composition.account.state == .signedIn(id) else { return }
         onboarding?.receive(profile: profile, bluetooth: bluetooth)
-        settings?.receive(profile: profile, bluetooth: bluetooth)
+        if let settings, settings.allowsDiscoveryActivation != Self.allowsDiscoveryActivation(profile) {
+            self.settings = SettingsModel(profile: profile, actions: profileActions(), bluetooth: bluetooth,
+                onboardingExplanationCompleted: completion.contains(id), allowsDiscoveryActivation: Self.allowsDiscoveryActivation(profile))
+        } else { settings?.receive(profile: profile, bluetooth: bluetooth) }
         links?.discoveryOn = profile.discoveryOn
     }
 

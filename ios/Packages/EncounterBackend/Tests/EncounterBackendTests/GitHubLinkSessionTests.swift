@@ -240,13 +240,75 @@ final class GitHubLinkSessionTests: XCTestCase {
             await transport.waitForRequests(2)
             let linked = try await manager.completeGitHubLink(from: validCallback)
             await transport.release()
-            do { _ = try await refreshing.value; XCTFail("Older refresh cannot replace a linked session") }
-            catch { XCTAssertEqual(error as? BackendError, .notAuthenticated) }
+            let refreshed = try await refreshing.value
+            XCTAssertEqual(refreshed, linked)
             let saved = try await store.load()
             let current = try await manager.session()
             XCTAssertEqual(saved, linked)
             XCTAssertEqual(current, linked)
         }
+    }
+
+    func testAccountRequestsHeldAcrossLinkExchangeRemainAuthorized() async throws {
+        for edge in [false, true] {
+            let transport = StubTransport([.response(authorizeResponse()), .held(jsonResponse(#"{"saved":true}"#)),
+                                           .response(authResponse(access: "linked"))])
+            let manager = testManager(transport: transport, store: InMemorySessionStore(session: try testSession()))
+            _ = try await manager.beginGitHubLink()
+            let request = Task { () throws -> RPCResult in
+                if edge {
+                    return try await EdgeFunctionClient(configuration: testConfiguration(), transport: transport, sessions: manager)
+                        .call("github-links", parameters: RPCParameters(display_name: "Name"))
+                }
+                return try await RemoteProcedureClient(configuration: testConfiguration(), transport: transport, sessions: manager)
+                    .call("get_own_profile", parameters: RPCParameters(display_name: "Name"))
+            }
+            await transport.waitForRequests(2)
+            _ = try await manager.completeGitHubLink(from: validCallback)
+            await transport.release()
+            let result = try await request.value
+            XCTAssertTrue(result.saved)
+        }
+    }
+
+    func testUnlinkUsesCurrentUserGitHubIdentityAndRetainsCredentials() async throws {
+        let identity = "00000000-0000-0000-0000-000000000123"
+        let user = jsonResponse("""
+        {"id":"\(testUserID.uuidString)","identities":[
+          {"identity_id":"00000000-0000-0000-0000-000000000124","provider":"apple"},
+          {"identity_id":"\(identity)","provider":"github"}]}
+        """)
+        for deletion in [jsonResponse("{}", status: 204),
+                         jsonResponse(#"{"code":"single_identity_not_deletable"}"#, status: 422),
+                         jsonResponse(#"{"code":"unexpected"}"#, status: 500),
+                         jsonResponse(#"{"code":"bad_jwt"}"#, status: 401)] {
+            let original = try testSession()
+            let store = InMemorySessionStore(session: original)
+            let transport = StubTransport([.response(user), .response(deletion)])
+            let manager = testManager(transport: transport, store: store)
+            do {
+                let outcome = try await manager.unlinkGitHubIdentity()
+                XCTAssertEqual(outcome, deletion.statusCode == 204 ? .unlinked : .lastIdentityRetained)
+                XCTAssertTrue([204, 422].contains(deletion.statusCode))
+            } catch {
+                XCTAssertEqual(error as? BackendError, deletion.statusCode == 401 ? .notAuthenticated : .httpFailure(statusCode: 500))
+            }
+            let requests = await transport.recorded()
+            XCTAssertEqual(requests.map(\.httpMethod), ["GET", "DELETE"])
+            XCTAssertEqual(requests[0].url?.path, "/base/auth/v1/user")
+            XCTAssertEqual(requests[1].url?.path, "/base/auth/v1/user/identities/" + identity)
+            XCTAssertEqual(requests[1].value(forHTTPHeaderField: "Authorization"), "Bearer old-access")
+            let saved = try await store.load()
+            let current = try await manager.session()
+            XCTAssertEqual(saved, original)
+            XCTAssertEqual(current, original)
+        }
+        let transport = StubTransport([.response(jsonResponse("{\"id\":\"\(testUserID.uuidString)\",\"identities\":[]}"))])
+        let manager = testManager(transport: transport, store: InMemorySessionStore(session: try testSession()))
+        let outcome = try await manager.unlinkGitHubIdentity()
+        XCTAssertEqual(outcome, .notLinked)
+        let requests = await transport.recorded()
+        XCTAssertEqual(requests.count, 1)
     }
 
     func testSecondCallbackWhileFirstExchangeIsPendingSendsNoRequest() async throws {

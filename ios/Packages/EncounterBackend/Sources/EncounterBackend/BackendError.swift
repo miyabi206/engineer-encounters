@@ -68,7 +68,6 @@ public enum BackendError: Error, Equatable, Sendable {
         guard let failure = try? JSONDecoder().decode(Failure.self, from: response.data) else {
             switch response.statusCode {
             case 401: return .notAuthenticated
-            case 404: return .notFound
             case 429: return .rateLimited
             default: return .httpFailure(statusCode: response.statusCode)
             }

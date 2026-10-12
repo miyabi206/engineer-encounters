@@ -24,7 +24,7 @@ final class LinkAdapterTests: XCTestCase {
         XCTAssertEqual(link.id, linkTestID)
         XCTAssertEqual(link.source, .github)
         XCTAssertEqual(link.sourceItemID, "42")
-        XCTAssertEqual(link.repositoryName, "owner/repo")
+        XCTAssertEqual(link.repositoryName, "repo")
         XCTAssertEqual(link.sourceLabel, "GitHub")
         XCTAssertEqual(link.url.absoluteString, "https://github.com/owner/repo")
         XCTAssertEqual(link.visibility, .private)
@@ -41,7 +41,7 @@ final class LinkAdapterTests: XCTestCase {
         XCTAssertEqual(page.nextPage, 2)
         let repository = try XCTUnwrap(page.repositories.first)
         XCTAssertEqual(repository.repositoryID, "42")
-        XCTAssertEqual(repository.repositoryName, "owner/repo")
+        XCTAssertEqual(repository.repositoryName, "repo")
         let draft = try await actions.previewRepository(repository)
         XCTAssertNil(draft.visibility)
         XCTAssertNil(draft.existingLinkID)
@@ -66,12 +66,12 @@ final class LinkAdapterTests: XCTestCase {
         let metadata: [String: Any] = ["title": "Repo", "description": "Description", "main_language": "Swift",
             "tags": ["ios"], "opening_text": "Opening", "visibility": "private"]
         var save = metadata
-        save.merge(["action": "save_repository", "repository_id": "42", "repository_name": "owner/repo", "replace_existing": true]) { _, rhs in rhs }
+        save.merge(["action": "save_repository", "repository_id": "42", "repository_name": "repo", "replace_existing": true]) { _, rhs in rhs }
         var update = metadata
         update["visibility"] = "compatible_only"; update["link_id"] = linkTestID
         let expected: [(Int, [String: Any])] = [
             (1, [:]), (2, [:]), (3, ["action": "list_repositories", "page": 1]),
-            (4, ["action": "preview_repository", "repository_id": "42", "repository_name": "owner/repo"]),
+            (4, ["action": "preview_repository", "repository_id": "42", "repository_name": "repo"]),
             (5, save), (7, update), (9, ["link_ids": [linkTestID]]),
             (10, ["action": "refresh_preview", "link_id": linkTestID]), (11, ["link_id": linkTestID])]
         for (index, value) in expected {
@@ -108,7 +108,7 @@ final class LinkAdapterTests: XCTestCase {
         let wire = try JSONDecoder().decode(LinkTransfer.self, from: linkResponse(linkJSON()).data)
         let link = try LinkAdapter.present(wire)
         let draft = LinkPreviewDraft(link: link)
-        let repository = GitHubRepositoryChoice(repositoryID: "42", repositoryName: "owner/repo", title: "Repo", url: link.url)
+        let repository = GitHubRepositoryChoice(repositoryID: "42", repositoryName: "repo", title: "Repo", url: link.url)
         let actions: [@MainActor (LinkActions) async throws -> Void] = [
             { _ = try await $0.loadLinks() }, { _ = try await $0.loadConnection() },
             { _ = try await $0.listRepositories(1) }, { _ = try await $0.previewRepository(repository) },
@@ -184,7 +184,7 @@ final class LinkAdapterTests: XCTestCase {
 
     func testConnectionSuccessSyncsThenReloadsWithoutSwitchingAccounts() async throws {
         let runner = FakeGitHubWebAuthenticationRunner()
-        let transport = AppBackendTransport([appAccountOK(), authorizationResponse(), appBackendAuthResponse(),
+        let transport = AppBackendTransport([appAccountOK(), missingGitHubResponse(), authorizationResponse(), appBackendAuthResponse(),
             linkResponse(connectionJSON()), linkResponse(connectionJSON())])
         let composition = try linkComposition(transport: transport, runner: runner)
         await composition.waitForRestoration()
@@ -195,8 +195,8 @@ final class LinkAdapterTests: XCTestCase {
         XCTAssertEqual(runner.scheme, "engineer-encounters")
         XCTAssertEqual(runner.address?.host, "github.com")
         let requests = await transport.recorded()
-        XCTAssertEqual(requests.map { $0.url?.lastPathComponent }, ["register_time_zone", "authorize", "token", "github-links", "get_github_connection"])
-        let sync = try JSONSerialization.jsonObject(with: XCTUnwrap(requests[3].httpBody)) as? NSDictionary
+        XCTAssertEqual(requests.map { $0.url?.lastPathComponent }, ["register_time_zone", "github-links", "authorize", "token", "github-links", "get_github_connection"])
+        let sync = try JSONSerialization.jsonObject(with: XCTUnwrap(requests[4].httpBody)) as? NSDictionary
         XCTAssertEqual(sync, ["action": "sync_identity"] as NSDictionary)
     }
 
@@ -205,7 +205,7 @@ final class LinkAdapterTests: XCTestCase {
             let runner = FakeGitHubWebAuthenticationRunner(outcome: outcome)
             let store = InMemorySessionStore(session: try appBackendTestSession())
             let foreign = UUID(uuidString: "00000000-0000-0000-0000-000000000222")!
-            let transport = AppBackendTransport([appAccountOK(), authorizationResponse(), appBackendAuthResponse(userID: foreign)])
+            let transport = AppBackendTransport([appAccountOK(), missingGitHubResponse(), authorizationResponse(), appBackendAuthResponse(userID: foreign)])
             let composition = try linkComposition(transport: transport, runner: runner, store: store)
             await composition.waitForRestoration()
             let original = try await store.load()
@@ -224,14 +224,14 @@ final class LinkAdapterTests: XCTestCase {
             XCTAssertEqual(retained?.userID, original?.userID)
             XCTAssertEqual(retained?.accessCredential, original?.accessCredential)
             let requests = await transport.recorded()
-            XCTAssertFalse(requests.contains { $0.url?.lastPathComponent == "github-links" })
+            XCTAssertEqual(requests.filter { $0.url?.lastPathComponent == "github-links" }.count, 1)
         }
     }
 
     func testSecondAttemptIsRefusedAndSignOutCancelsPendingBrowser() async throws {
         let runner = FakeGitHubWebAuthenticationRunner(outcome: .held)
         let store = InMemorySessionStore(session: try appBackendTestSession())
-        let transport = AppBackendTransport([appAccountOK(), authorizationResponse()])
+        let transport = AppBackendTransport([appAccountOK(), missingGitHubResponse(), authorizationResponse()])
         let composition = try linkComposition(transport: transport, runner: runner, store: store)
         await composition.waitForRestoration()
         let actions = composition.linkAdapter.actions()
@@ -249,13 +249,14 @@ final class LinkAdapterTests: XCTestCase {
         let retained = try await store.load()
         XCTAssertNil(retained)
         let paths = await transport.recorded().map { $0.url?.lastPathComponent }
-        XCTAssertEqual(paths, ["register_time_zone", "authorize"])
+        XCTAssertEqual(paths, ["register_time_zone", "github-links", "authorize"])
         do { _ = try await actions.loadLinks(); XCTFail("Old actions must fail") }
         catch { XCTAssertEqual(error as? LinkActionError, .init(code: .unavailable, details: ["not_authenticated"])) }
     }
 
     func testSignOutDuringExchangeRefusesLateSameAccountResponse() async throws {
         let transport = ControlledAppBackendTransport(["register_time_zone": [.response(appAccountOK())],
+            "github-links": [.response(missingGitHubResponse())],
             "authorize": [.response(authorizationResponse())], "token": [.held]])
         let composition = try linkComposition(transport: transport, runner: FakeGitHubWebAuthenticationRunner())
         await composition.waitForRestoration()
@@ -274,7 +275,8 @@ final class LinkAdapterTests: XCTestCase {
             linkResponse(linkJSON()), appOwnProfileResponse(appLinkedPresentationProfile()),
             linkResponse(["deleted": true]), appOwnProfileResponse(), linkResponse([]),
             linkResponse(["link": linkJSON()]), appOwnProfileResponse(appLinkedPresentationProfile()),
-            linkResponse(connectionJSON(connected: false)), appOwnProfileResponse(), linkResponse([])])
+            linkResponse(connectionJSON(connected: false)), linkResponse([]), linkResponse(connectionJSON(connected: false)),
+            appOwnProfileResponse(), authUserResponse(), linkResponse([:], status: 204)])
         let composition = try linkComposition(transport: transport)
         let flow = AccountFlowModel(composition: composition)
         await flow.start()
@@ -341,7 +343,104 @@ final class LinkAdapterTests: XCTestCase {
         do { try await disconnecting.value; XCTFail("Obsolete disconnect must fail") } catch { }
         XCTAssertEqual(composition.account.state, .signedOut)
         XCTAssertEqual(composition.linkAdapter.connection, .notConnected)
+        XCTAssertNil(composition.linkAdapter.disconnectError)
+    }
+
+    func testPendingSessionGuardsKeepCredentialsAndDoNotSendLinkRequests() async throws {
+        let store = InMemorySessionStore(session: try appBackendTestSession())
+        let transport = ControlledAppBackendTransport(["register_time_zone": [.held]])
+        let composition = try linkComposition(transport: transport, store: store)
+        try await appBackendEventually { await transport.isHeld("register_time_zone") }
+        XCTAssertEqual(composition.account.state, .signedInPending(appBackendTestUser))
+        let actions = composition.linkAdapter.actions()
+        do { _ = try await actions.loadLinks(); XCTFail("Pending actions must refuse locally") } catch { }
+        do { _ = try await actions.connectGitHub(); XCTFail("Pending actions must refuse locally") } catch { }
+        do { try await composition.linkAdapter.disconnectGitHub(); XCTFail() } catch { }
+        let retained = try await store.load()
+        XCTAssertEqual(retained, try appBackendTestSession())
+        XCTAssertEqual(composition.account.state, .signedInPending(appBackendTestUser))
+        let requests = await transport.recorded()
+        XCTAssertEqual(requests.count, 1)
+        await transport.release("register_time_zone", with: appAccountOK())
+        await composition.waitForRestoration()
+        XCTAssertEqual(composition.account.state, .signedIn(appBackendTestUser))
+    }
+
+    func testExistingIdentityConnectSyncsWithoutBrowserAuthorization() async throws {
+        let runner = FakeGitHubWebAuthenticationRunner()
+        let transport = AppBackendTransport([appAccountOK(), linkResponse(connectionJSON()), linkResponse(connectionJSON())])
+        let composition = try linkComposition(transport: transport, runner: runner)
+        await composition.waitForRestoration()
+        let result = try await composition.linkAdapter.actions().connectGitHub()
+        XCTAssertEqual(result, .connected(handle: "owner"))
+        XCTAssertNil(runner.address)
+        let requests = await transport.recorded()
+        XCTAssertEqual(requests.map { $0.url?.lastPathComponent }, ["register_time_zone", "github-links", "get_github_connection"])
+    }
+
+    func testFailedSyncAfterExchangeRetriesWithoutSecondAuthorization() async throws {
+        let runner = FakeGitHubWebAuthenticationRunner()
+        let transport = AppBackendTransport([appAccountOK(), missingGitHubResponse(), authorizationResponse(), appBackendAuthResponse(),
+            linkResponse([:], status: 503), linkResponse(connectionJSON(connected: false)),
+            linkResponse(connectionJSON()), linkResponse(connectionJSON())])
+        let composition = try linkComposition(transport: transport, runner: runner)
+        await composition.waitForRestoration()
+        do { _ = try await composition.linkAdapter.actions().connectGitHub(); XCTFail() } catch { }
+        XCTAssertTrue(composition.linkAdapter.needsGitHubSync)
+        XCTAssertEqual(composition.linkAdapter.connection, .connected(handle: nil))
+        XCTAssertNotNil(composition.linkAdapter.connectionError)
+        _ = try await composition.linkAdapter.actions().loadConnection()
+        XCTAssertEqual(composition.linkAdapter.connection, .connected(handle: nil))
+        let result = try await composition.linkAdapter.actions().connectGitHub()
+        XCTAssertEqual(result, .connected(handle: "owner"))
+        XCTAssertFalse(composition.linkAdapter.needsGitHubSync)
         XCTAssertNil(composition.linkAdapter.connectionError)
+        XCTAssertEqual(runner.authorizationCount, 1)
+        let requests = await transport.recorded()
+        XCTAssertEqual(requests.filter { $0.url?.lastPathComponent == "authorize" }.count, 1)
+        XCTAssertEqual(requests.filter { $0.url?.lastPathComponent == "token" }.count, 1)
+        XCTAssertEqual(requests.filter { $0.url?.lastPathComponent == "github-links" }.count, 3)
+        XCTAssertEqual(composition.account.state, .signedIn(appBackendTestUser))
+    }
+
+    func testDisconnectAttemptsBothReadsAndAuthEvenWhenOneReadFails() async throws {
+        for failedRead in ["list_own_links", "get_github_connection"] {
+            let transport = ControlledAppBackendTransport([
+                "register_time_zone": [.response(appAccountOK())],
+                "disconnect_github": [.response(linkResponse(connectionJSON(connected: false)))],
+                "list_own_links": [failedRead == "list_own_links" ? .failure : .response(linkResponse([]))],
+                "get_github_connection": [failedRead == "get_github_connection" ? .failure : .response(linkResponse(connectionJSON(connected: false)))],
+                "get_own_profile": [.failure], "user": [.response(authUserResponse())],
+                authGitHubIdentity: [.response(linkResponse([:], status: 204))]
+            ])
+            let composition = try linkComposition(transport: transport)
+            await composition.waitForRestoration()
+            do { try await composition.linkAdapter.disconnectGitHub(); XCTFail("Read failure remains visible") } catch { }
+            let requests = await transport.recorded()
+            XCTAssertEqual(requests.map { $0.url?.lastPathComponent }, ["register_time_zone", "disconnect_github", "list_own_links",
+                "get_github_connection", "get_own_profile", "user", authGitHubIdentity])
+            XCTAssertEqual(requests.last?.httpMethod, "DELETE")
+            XCTAssertNotNil(composition.linkAdapter.disconnectError)
+            XCTAssertNil(composition.linkAdapter.connectionError)
+            XCTAssertEqual(composition.linkAdapter.connection, .notConnected)
+            XCTAssertEqual(composition.account.state, .signedIn(appBackendTestUser))
+        }
+    }
+
+    func testDisconnectLastAuthIdentityRefusalIsScreenSuccessAndKeepsConnectErrorSeparate() async throws {
+        let transport = AppBackendTransport([appAccountOK(), linkResponse([:], status: 503),
+            linkResponse(connectionJSON(connected: false)), linkResponse([]), linkResponse(connectionJSON(connected: false)),
+            appOwnProfileResponse(), authUserResponse(),
+            linkResponse(["code": "single_identity_not_deletable"], status: 422)])
+        let composition = try linkComposition(transport: transport)
+        await composition.waitForRestoration()
+        do { _ = try await composition.linkAdapter.actions().connectGitHub(); XCTFail() } catch { }
+        let connectError = composition.linkAdapter.connectionError
+        XCTAssertNotNil(connectError)
+        try await composition.linkAdapter.disconnectGitHub()
+        XCTAssertNil(composition.linkAdapter.disconnectError)
+        XCTAssertEqual(composition.linkAdapter.connectionError, connectError)
+        XCTAssertEqual(composition.account.state, .signedIn(appBackendTestUser))
     }
 
     func testOnboardingGoesThroughBasicsSelectionsFirstLinkAndPermissions() async throws {
@@ -392,7 +491,7 @@ private func linkJSON() -> [String: Any] {
      "opening_text": "Opening", "visibility": "private", "verification_state": "verified", "display_order": 0]
 }
 private func repositoryJSON() -> [String: Any] {
-    ["repository_id": "42", "repository_name": "owner/repo", "title": "Repo", "description": "Description",
+    ["repository_id": "42", "repository_name": "repo", "title": "Repo", "description": "Description",
      "main_language": "Swift", "tags": ["ios"], "url": "https://github.com/owner/repo"]
 }
 private func previewJSON() -> [String: Any] {
@@ -423,12 +522,14 @@ private func linkComposition(transport: any HTTPTransport, runner: (any GitHubWe
 private final class FakeGitHubWebAuthenticationRunner: GitHubWebAuthenticationRunning {
     enum Outcome: Equatable { case callback, cancelled, failed, held }
     private let outcome: Outcome
+    private(set) var authorizationCount = 0
     private(set) var address: URL?
     private(set) var scheme: String?
     private var waiting: CheckedContinuation<URL, any Error>?
     var isHeld: Bool { waiting != nil }
     init(outcome: Outcome = .callback) { self.outcome = outcome }
     func authenticate(at address: URL, callbackScheme: String) async throws -> URL {
+        authorizationCount += 1
         self.address = address; scheme = callbackScheme
         switch outcome {
         case .callback: return URL(string: "engineer-encounters://auth/github?code=fixture-code&state=fixture-state")!
@@ -445,6 +546,7 @@ private actor LinkFailureTransport: HTTPTransport {
     let rpc: HTTPResponse
     let edge: HTTPResponse
     init(rpc: HTTPResponse, edge: HTTPResponse) { self.rpc = rpc; self.edge = edge }
+    func sendWithoutRedirects(_ request: URLRequest) async throws -> HTTPResponse { try await send(request) }
     func send(_ request: URLRequest) async throws -> HTTPResponse {
         switch request.url?.lastPathComponent {
         case "register_time_zone": return appAccountOK()
@@ -453,4 +555,14 @@ private actor LinkFailureTransport: HTTPTransport {
         default: return rpc
         }
     }
+}
+
+private let authGitHubIdentity = "00000000-0000-0000-0000-000000000444"
+private func authUserResponse() -> HTTPResponse {
+    linkResponse(["id": appBackendTestUser.uuidString, "identities": [
+        ["provider": "github", "identity_id": authGitHubIdentity],
+        ["provider": "apple", "identity_id": "00000000-0000-0000-0000-000000000445"]]])
+}
+private func missingGitHubResponse() -> HTTPResponse {
+    linkResponse(["error": ["code": "prerequisite_missing", "details": ["github"]]], status: 400)
 }
