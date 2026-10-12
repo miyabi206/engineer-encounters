@@ -994,7 +994,7 @@ update private.notification_preferences set time_zone = 'Asia/Tokyo' where user_
 -- Either-direction blocks conceal suppression while consuming and erasing both receipt shapes.
 reset role;
 select receipts_test.reset_evidence();
-insert into private.blocks values (receipts_test.user_id(1), receipts_test.user_id(2));
+insert into private.blocks (blocker_id, blocked_id, placed_day) values (receipts_test.user_id(1), receipts_test.user_id(2), (pg_catalog.now() at time zone 'UTC')::date);
 set local role authenticated;
 set local "request.jwt.claims" = '{"sub":"cccccccc-0000-0000-0000-000000000001","role":"authenticated"}';
 select receipts_test.expect('block 1 first half', pg_catalog.jsonb_build_array(receipts_test.receipt(450, 1, null, 120, (select start_seconds from receipts_test.clock) + 120, null, false, false, null, 0), receipts_test.receipt(449, 1)), array['candidate','candidate']);
@@ -1008,7 +1008,7 @@ select extensions.is((select pg_catalog.count(*) from private.encounter_candidat
 select extensions.is((select pg_catalog.count(*) from private.consumed_nonces), 1::bigint, 'block 1 consumes qualifying nonces');
 reset role;
 select receipts_test.reset_evidence();
-insert into private.blocks values (receipts_test.user_id(2), receipts_test.user_id(1));
+insert into private.blocks (blocker_id, blocked_id, placed_day) values (receipts_test.user_id(2), receipts_test.user_id(1), (pg_catalog.now() at time zone 'UTC')::date);
 set local role authenticated;
 set local "request.jwt.claims" = '{"sub":"cccccccc-0000-0000-0000-000000000001","role":"authenticated"}';
 select receipts_test.expect('block 2 first joined call', pg_catalog.jsonb_build_array(receipts_test.receipt(460, 1, null, 0, null, null, false, false, null, 0), receipts_test.receipt(461, 1, (select start_seconds from receipts_test.clock) + 120, 120, null, 460, false, false, null, 0), receipts_test.receipt(462, 1)), array['candidate', 'candidate', 'candidate']);

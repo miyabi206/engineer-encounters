@@ -192,10 +192,10 @@ begin
         update private.profiles set discovery_on = (v_flags & 64) <> 0 where user_id = authorized_cards_test.id(1);
         update private.profiles set discovery_on = (v_flags & 32) <> 0 where user_id = authorized_cards_test.id(2);
         if (v_flags & 16) <> 0 then
-            insert into private.blocks values (authorized_cards_test.id(1), authorized_cards_test.id(2));
+            insert into private.blocks (blocker_id, blocked_id, placed_day) values (authorized_cards_test.id(1), authorized_cards_test.id(2), (pg_catalog.now() at time zone 'UTC')::date);
         end if;
         if (v_flags & 8) <> 0 then
-            insert into private.blocks values (authorized_cards_test.id(2), authorized_cards_test.id(1));
+            insert into private.blocks (blocker_id, blocked_id, placed_day) values (authorized_cards_test.id(2), authorized_cards_test.id(1), (pg_catalog.now() at time zone 'UTC')::date);
         end if;
         delete from private.user_purposes where user_id in (authorized_cards_test.id(1), authorized_cards_test.id(2));
         insert into private.user_purposes values (authorized_cards_test.id(1), 'discovery'),
@@ -503,10 +503,10 @@ update private.profiles set discovery_on = true where user_id = authorized_cards
 update private.profiles set discovery_on = false where user_id = authorized_cards_test.id(2);
 select authorized_cards_test.refused(1, 'owner discovery off refuses an existing favorite');
 update private.profiles set discovery_on = true where user_id = authorized_cards_test.id(2);
-insert into private.blocks values (authorized_cards_test.id(1), authorized_cards_test.id(2));
+insert into private.blocks (blocker_id, blocked_id, placed_day) values (authorized_cards_test.id(1), authorized_cards_test.id(2), (pg_catalog.now() at time zone 'UTC')::date);
 select authorized_cards_test.refused(1, 'viewer block refuses an existing favorite');
 delete from private.blocks where blocker_id = authorized_cards_test.id(1);
-insert into private.blocks values (authorized_cards_test.id(2), authorized_cards_test.id(1));
+insert into private.blocks (blocker_id, blocked_id, placed_day) values (authorized_cards_test.id(2), authorized_cards_test.id(1), (pg_catalog.now() at time zone 'UTC')::date);
 select authorized_cards_test.refused(1, 'owner block refuses an existing favorite');
 delete from private.blocks where blocker_id = authorized_cards_test.id(2);
 select extensions.is(authorized_cards_test.as_caller(authorized_cards_test.id(1), authorized_cards_test.id(100))->>'display_name',

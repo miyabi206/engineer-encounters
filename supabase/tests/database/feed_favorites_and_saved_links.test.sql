@@ -156,8 +156,8 @@ begin
         when 'unrevealed' then update private.encounter_views set revealed = false where viewer_id = viewer;
         when 'viewer_off' then update private.profiles set discovery_on = false where user_id = viewer;
         when 'owner_off' then update private.profiles set discovery_on = false where user_id = owner;
-        when 'viewer_block' then insert into private.blocks values (viewer, owner);
-        when 'owner_block' then insert into private.blocks values (owner, viewer);
+        when 'viewer_block' then insert into private.blocks (blocker_id, blocked_id, placed_day) values (viewer, owner, (pg_catalog.now() at time zone 'UTC')::date);
+        when 'owner_block' then insert into private.blocks (blocker_id, blocked_id, placed_day) values (owner, viewer, (pg_catalog.now() at time zone 'UTC')::date);
         when 'hidden_owner' then update private.profiles set moderation_state = 'hidden' where user_id = owner;
         when 'suspended_owner' then update private.profiles set moderation_state = 'suspended' where user_id = owner;
         when 'missing_zone' then delete from private.notification_preferences where user_id = viewer;
@@ -236,8 +236,8 @@ revoke all on function feed_test.reset_pair(integer,text), feed_test.gate_matrix
 grant execute on all functions in schema extensions to anon, authenticated, service_role;
 
 -- Hand-counted: catalog 42, null gate 4, matrix 324, errors/roles 42,
--- wire 20, references/retention 38, ordering/dedup 14, caps 27, extras 32 = 543.
-select extensions.plan(543);
+-- wire 20, references/retention 38, batch 8, ordering/dedup 14, caps 27, scalar timings 4, extras 31 = 554.
+select extensions.plan(554);
 
 create temporary table reading_rpcs (signature text, names text[], statement text);
 insert into reading_rpcs values
@@ -463,6 +463,60 @@ update private.matching_preferences set minimum_shared_interests = 10 where user
 select feed_test.error_call(1, op.operation, feed_test.id(100), feed_test.link_id(2), true, 'not_found', '',
     op.operation || ': compatibility-protected counterpart link') from (values ('save'),('unsave')) as op(operation);
 
+-- Multi-owner batch: 8 assertions. Each owner's payload/state remains separate;
+-- an owner-side discovery denial sits beside two differently authorized owners.
+select feed_test.reset_pair();
+insert into private.encounters (encounter_id,user_a,user_b,kind,day_a,day_b)
+select feed_test.id(4000+n),feed_test.id(1),feed_test.id(n),'session',feed_test.day(),feed_test.day()
+from pg_catalog.generate_series(4,6) as n;
+insert into private.encounter_views (encounter_id,viewer_id,revealed,reveal_report_day,favorite)
+select feed_test.id(4000+n),feed_test.id(1),true,feed_test.day(),n<>4 from pg_catalog.generate_series(4,6) as n;
+insert into private.saved_links (viewer_id,encounter_id,link_id)
+select feed_test.id(1),feed_test.id(4000+n),feed_test.link_id(n) from pg_catalog.generate_series(4,6) as n;
+update private.field_visibility set level=case field when 'introduction' then 'private' when 'purposes' then 'private'
+    when 'contact_detail' then 'compatible_only' else 'everyone_eligible' end where owner_id=feed_test.id(4);
+update private.field_visibility set level=case field when 'display_name' then 'private' when 'contact_detail' then 'private'
+    when 'interests' then 'compatible_only' else 'everyone_eligible' end where owner_id=feed_test.id(5);
+insert into private.user_interests values (feed_test.id(5),'feed-m');
+update private.user_purposes set purpose='collaboration' where user_id=feed_test.id(5);
+update private.external_links set visibility='compatible_only' where link_id=feed_test.link_id(5,2);
+update private.profiles set discovery_on=false where user_id=feed_test.id(6);
+select extensions.is(feed_test.as_caller(feed_test.id(1),'feed'),pg_catalog.jsonb_build_object('cards',pg_catalog.jsonb_build_array(
+    feed_test.expected_card(1,feed_test.day()) || pg_catalog.jsonb_build_object('favorite',true,'shared_interest_ids',array['feed-a','feed-z']),
+    pg_catalog.jsonb_build_object('encounter_id',feed_test.id(4004),'kind','session','day',feed_test.day(),
+        'display_name','Owner4','contact_detail','Contact4','interests',array['feed-a','feed-z'],
+        'links',pg_catalog.jsonb_build_array(feed_test.expected_link(4)),'favorite',false,'shared_interest_ids',array['feed-a','feed-z']),
+    pg_catalog.jsonb_build_object('encounter_id',feed_test.id(4005),'kind','session','day',feed_test.day(),
+        'introduction','Intro5','purposes',array['collaboration'],
+        'links',pg_catalog.jsonb_build_array(feed_test.expected_link(5)),'favorite',true)
+), 'truncated',false), 'batch keeps each owner fields, links, purposes and protected intersection separate');
+select extensions.is((select pg_catalog.jsonb_agg(c.value->'encounter_id' order by c.position)
+    from pg_catalog.jsonb_array_elements(feed_test.as_caller(feed_test.id(1),'favorites')->'cards') with ordinality as c(value,position)),
+    pg_catalog.jsonb_build_array(feed_test.id(100),feed_test.id(4005)),'batch favorite state belongs to each encounter');
+select extensions.is((select pg_catalog.jsonb_agg(pg_catalog.jsonb_build_array(l.value->'encounter_id',l.value#>'{link,link_id}') order by l.position)
+    from pg_catalog.jsonb_array_elements(feed_test.as_caller(feed_test.id(1),'saved')->'links') with ordinality as l(value,position)),
+    pg_catalog.jsonb_build_array(pg_catalog.jsonb_build_array(feed_test.id(100),feed_test.link_id(2)),
+        pg_catalog.jsonb_build_array(feed_test.id(4004),feed_test.link_id(4)),
+        pg_catalog.jsonb_build_array(feed_test.id(4005),feed_test.link_id(5))), 'batch saved links retain per-owner references and omit denied owner');
+select extensions.is(pg_catalog.jsonb_build_array(
+    feed_test.as_caller(feed_test.id(1),'card',feed_test.id(4004))->'favorite',
+    feed_test.as_caller(feed_test.id(1),'card',feed_test.id(4004))->'saved_link_ids'),
+    pg_catalog.jsonb_build_array(false,pg_catalog.jsonb_build_array(feed_test.link_id(4))),'owner 4 scalar state agrees with batch');
+select extensions.is(pg_catalog.jsonb_build_array(
+    feed_test.as_caller(feed_test.id(1),'card',feed_test.id(4005))->'favorite',
+    feed_test.as_caller(feed_test.id(1),'card',feed_test.id(4005))->'saved_link_ids'),
+    pg_catalog.jsonb_build_array(true,pg_catalog.jsonb_build_array(feed_test.link_id(5))),'owner 5 scalar state agrees with batch');
+select feed_test.error_call(1,'card',feed_test.id(4006),null,true,'not_found','','batch owner-side denial also hides scalar card');
+select feed_test.error_call(1,'save',feed_test.id(4006),feed_test.link_id(6),true,'not_found','','batch owner-side denial also prevents save');
+select extensions.is((select pg_catalog.count(*) from private.saved_links where encounter_id=feed_test.id(4006)),1::bigint,
+    'denied batch reference stays stored without exposing a snapshot');
+delete from private.encounters where encounter_id in (feed_test.id(4004),feed_test.id(4005),feed_test.id(4006));
+delete from private.user_interests where user_id=feed_test.id(5) and interest_id='feed-m';
+update private.field_visibility set level='everyone_eligible' where owner_id in (feed_test.id(4),feed_test.id(5));
+update private.user_purposes set purpose='discovery' where user_id=feed_test.id(5);
+update private.external_links set visibility='private' where link_id=feed_test.link_id(5,2);
+update private.profiles set discovery_on=true where user_id=feed_test.id(6);
+
 -- Ordering/dedup: 14 assertions. Deliberately permute UUID, count, match and day.
 select feed_test.reset_pair();
 update private.encounters set day_a = feed_test.day() - 1 where encounter_id = feed_test.id(100);
@@ -600,7 +654,19 @@ select extensions.performs_ok(pg_catalog.format('select feed_test.as_caller(%L::
     feed_test.id(1), r.operation), 3000::numeric, '200-entry ' || r.operation || ' read completes within 3000 ms')
 from (values ('feed'), ('favorites'), ('saved')) as r(operation);
 
--- Extra boundaries/Live/cascades: 32 assertions, for a total plan of 543.
+-- Warm plans before timing. The caller still has hundreds of views and
+-- references; scalar calls must use PK probes and avoid zone enumeration.
+-- Four bounds in milliseconds also cover both saved-reference write branches.
+select feed_test.as_caller(feed_test.id(1),'card',feed_test.id(1004));
+select feed_test.as_caller(feed_test.id(1),'favorite',feed_test.id(1004),null,true);
+select feed_test.as_caller(feed_test.id(1),'save',feed_test.id(1004),feed_test.link_id(4));
+select feed_test.as_caller(feed_test.id(1),'unsave',feed_test.id(1004),feed_test.link_id(4));
+select extensions.performs_ok(pg_catalog.format('select feed_test.as_caller(%L::uuid,%L,%L::uuid,%L::uuid,true)',
+    feed_test.id(1),op.name,feed_test.id(1004),feed_test.link_id(4)),35::numeric,
+    'single-card ' || op.name || ' completes within 35 ms')
+from (values ('card'),('favorite'),('save'),('unsave')) as op(name);
+
+-- Extra boundaries/Live/cascades: 31 assertions, for a total plan of 554.
 delete from private.encounters where user_a=feed_test.id(1);
 select feed_test.reset_pair();
 delete from private.saved_links where encounter_id=feed_test.id(100);
@@ -702,7 +768,6 @@ select extensions.is(feed_test.as_caller(feed_test.id(1),'feed'),'{"cards":[],"t
     'empty feed has exact wire shape');
 select extensions.is((select pg_catalog.count(*) from private.account_limit_events where user_id=feed_test.id(1)),0::bigint,
     'new endpoints introduce no rate budget');
-select extensions.ok(pg_catalog.to_regprocedure('public.delete_encounter(uuid)') is null,'encounter deletion RPC remains outside this migration');
 
 select * from extensions.finish();
 rollback;

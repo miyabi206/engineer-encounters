@@ -370,10 +370,10 @@ select sessions_qr_test.unavailable(2, 'self', 'QR is expired at exactly now equ
 select sessions_qr_test.unavailable(1, 'self', 'expired self-code is unavailable rather than invalid');
 
 select sessions_qr_test.issue(1, 'blocked');
-insert into private.blocks values (sessions_qr_test.id(1), sessions_qr_test.id(2));
+insert into private.blocks (blocker_id, blocked_id, placed_day) values (sessions_qr_test.id(1), sessions_qr_test.id(2), (pg_catalog.now() at time zone 'UTC')::date);
 select sessions_qr_test.unavailable(2, 'blocked', 'issuer-to-scanner block is indistinguishable not_found');
 delete from private.blocks;
-insert into private.blocks values (sessions_qr_test.id(2), sessions_qr_test.id(1));
+insert into private.blocks (blocker_id, blocked_id, placed_day) values (sessions_qr_test.id(2), sessions_qr_test.id(1), (pg_catalog.now() at time zone 'UTC')::date);
 select sessions_qr_test.unavailable(2, 'blocked', 'scanner-to-issuer block is indistinguishable not_found');
 delete from private.blocks;
 update private.profiles set moderation_state = 'hidden' where user_id = sessions_qr_test.id(1);

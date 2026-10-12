@@ -430,7 +430,7 @@ select extensions.is(daily_test.as_caller(daily_test.id(1), 'select public.get_d
 update private.profiles set discovery_on = false where user_id = daily_test.id(2);
 select extensions.is(daily_test.as_caller(daily_test.id(1), 'select public.get_daily_report()')->'cards', '[]'::jsonb, 'report rechecks owner discovery');
 update private.profiles set discovery_on = true where user_id = daily_test.id(2);
-insert into private.blocks values (daily_test.id(2),daily_test.id(1));
+insert into private.blocks (blocker_id, blocked_id, placed_day) values (daily_test.id(2),daily_test.id(1), (pg_catalog.now() at time zone 'UTC')::date);
 select extensions.is(daily_test.as_caller(daily_test.id(1), 'select public.get_daily_report()')->'cards', '[]'::jsonb, 'report rechecks reverse block');
 delete from private.blocks where blocker_id = daily_test.id(2);
 update private.profiles set moderation_state = 'hidden' where user_id = daily_test.id(2);
