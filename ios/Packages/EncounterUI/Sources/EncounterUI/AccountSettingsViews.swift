@@ -47,9 +47,14 @@ public struct AccountSettingsView: View {
                     .disabled(!model.canDismiss)
                 Text(AccountSettingsStrings.text(.permanent)).foregroundStyle(.secondary)
             }
-            if model.isBusy { ProgressView(SettingsStrings.text(.loading)) }
+            if model.isBusy {
+                ProgressView(model.failedOperation == .checkAccount ?
+                    AccountSettingsStrings.text(.checkingAccount) : SettingsStrings.text(.loading))
+            }
             if model.deletion == .pending { Text(AccountSettingsStrings.text(.pending)).foregroundStyle(.secondary) }
-            if model.deletion == .configurationRequired {
+            if model.failedOperation == .checkAccount, model.error != nil {
+                Text(AccountSettingsStrings.text(.failedAccountCheck)).foregroundStyle(.red)
+            } else if model.deletion == .configurationRequired {
                 Text(AccountSettingsStrings.text(.configurationRequired)).foregroundStyle(.red)
             } else if model.deletion == .failed {
                 Text(AccountSettingsStrings.text(.failedDeletion)).foregroundStyle(.red)
@@ -60,21 +65,21 @@ public struct AccountSettingsView: View {
             }
             if model.deletion.canRetry {
                 Button(SettingsStrings.text(.retry)) { Task { await model.retry() } }.disabled(model.isBusy)
-                Button(SettingsStrings.text(.cancel)) { model.cancelDeletion() }.disabled(model.isBusy)
+                Button(SettingsStrings.text(.cancel)) { Task { await model.cancelDeletion() } }.disabled(model.isBusy)
             } else if let error = model.error {
                 SafetyFailure(error: error, fallback: model.failedOperation == .load ? .listError : .saveError,
-                              disabled: model.isBusy) { await model.retry() }
+                              disabled: !model.canDismiss) { await model.retry() }
             }
-            if let support = model.navigation.support {
-                Button(LegalStrings.text(.contact), action: support).disabled(model.isBusy)
+            if model.showsSupport, let support = model.navigation.support {
+                Button(LegalStrings.text(.contact), action: support).disabled(!model.canDismiss)
             }
         }
         .navigationBarBackButtonHidden(true)
         .interactiveDismissDisabled(!model.canDismiss)
         .toolbar {
-            if !model.deletion.preventsSignedInDismissal {
+            if model.canDismiss {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button(SettingsStrings.text(.back)) { model.back() }.disabled(!model.canDismiss)
+                    Button(SettingsStrings.text(.back)) { Task { await model.back() } }
                 }
             }
         }
@@ -102,6 +107,7 @@ public struct AccountSettingsView: View {
             }.presentationDetents([.large])
         }
         .task { await model.load() }
-        .onDisappear { model.cancelDeletion() }
+        .onAppear { model.appear() }
+        .onDisappear { model.disappear() }
     }
 }

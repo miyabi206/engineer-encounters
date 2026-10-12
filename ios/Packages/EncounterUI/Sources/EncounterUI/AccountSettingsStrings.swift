@@ -1,7 +1,7 @@
 import Foundation
 
 enum AccountSettingsString: String, CaseIterable {
-    case title, signIn, temporary, github, disconnect, disconnectExplanation, notConnected, signOut, delete, temporaryWarning, connected, confirmSignOut, signOutExplanation, permanent, lastLink, pending, configurationRequired, failedDeletion, deletionConfirmation
+    case title, signIn, temporary, github, disconnect, disconnectExplanation, notConnected, signOut, delete, temporaryWarning, connected, confirmSignOut, signOutExplanation, permanent, lastLink, pending, configurationRequired, failedDeletion, deletionConfirmation, checkingAccount, failedAccountCheck
 }
 
 enum AccountSettingsStrings {

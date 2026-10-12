@@ -15,7 +15,7 @@ public struct ReportSettingsView: View {
                     Text(ReportSettingsStrings.text(.localTime)).foregroundStyle(.secondary)
                     if !model.time.isValid { Text(ReportSettingsStrings.text(.invalidTime)).foregroundStyle(.red) }
                 }
-                if model.pushAvailable {
+                if model.pushAvailable || model.showsNotificationSwitch {
                     OnboardingCard {
                         if model.showsNotificationSwitch {
                             Toggle(ReportSettingsStrings.text(.notifications), isOn: Binding(
@@ -23,8 +23,9 @@ public struct ReportSettingsView: View {
                                 set: { enabled in Task { await model.setNotifications(enabled) } }))
                                 .disabled(model.isBusy)
                         }
-                        Text(ReportSettingsStrings.text(model.permission.stringKey)).foregroundStyle(.secondary)
-                        if model.permission == .denied {
+                        Text(ReportSettingsStrings.text(model.pushAvailable ? model.permission.stringKey : .noPush))
+                            .foregroundStyle(.secondary)
+                        if model.pushAvailable, model.permission == .denied {
                             Button(ReportSettingsStrings.text(.systemSettings), action: model.navigation.systemSettings)
                         }
                         Text(ReportSettingsStrings.text(.names)).font(.callout).foregroundStyle(.secondary)

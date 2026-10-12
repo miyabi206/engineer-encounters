@@ -73,6 +73,56 @@ final class ReportSettingsTests: XCTestCase {
     }
 
     @MainActor
+    func testFailedNotificationEnableRetryAfterPermissionChangedClearsErrorAndExplainsPermission() async {
+        for permission in [ReportSettingsPermission.denied, .unavailable, .notRequested] {
+            let driver = ReportSettingsTestDriver()
+            let model = driver.model()
+            model.receive(permission: .allowed)
+            driver.fail = true
+            await model.setNotifications(true)
+            XCTAssertNotNil(model.error)
+            XCTAssertEqual(model.failedOperation, .notifications(true))
+            driver.fail = false
+            driver.permission = .denied
+            model.receive(permission: permission)
+            await model.retry()
+            XCTAssertNil(model.error)
+            XCTAssertNil(model.failedOperation)
+            XCTAssertEqual(model.permission, permission == .notRequested ? .denied : permission)
+            XCTAssertFalse(model.showsNotificationSwitch)
+            XCTAssertEqual(model.data?.notificationsEnabled, false)
+            XCTAssertEqual(driver.calls, permission == .notRequested ?
+                ["notifications:true", "permission"] : ["notifications:true"])
+        }
+    }
+
+    @MainActor
+    func testNotificationDisableAndItsRetryRemainPossibleWithoutPermissionOrPush() async {
+        for pushAvailable in [false, true] {
+            for permission in [ReportSettingsPermission.notRequested, .allowed, .denied, .unavailable] {
+                let driver = ReportSettingsTestDriver()
+                driver.data.notificationsEnabled = true
+                let model = driver.model(pushAvailable: pushAvailable)
+                model.receive(permission: permission)
+                XCTAssertTrue(model.showsNotificationSwitch)
+                driver.fail = true
+                await model.setNotifications(false)
+                XCTAssertNotNil(model.error)
+                XCTAssertEqual(model.failedOperation, .notifications(false))
+                XCTAssertEqual(model.data?.notificationsEnabled, true)
+                driver.fail = false
+                model.receive(permission: .denied)
+                await model.retry()
+                XCTAssertNil(model.error)
+                XCTAssertNil(model.failedOperation)
+                XCTAssertEqual(model.data?.notificationsEnabled, false)
+                XCTAssertFalse(model.showsNotificationSwitch)
+                XCTAssertEqual(driver.calls, ["notifications:false", "notifications:false"])
+            }
+        }
+    }
+
+    @MainActor
     func testFailedSaveRetainsDraftAndRetryRequiresConfirmedTime() async {
         let driver = ReportSettingsTestDriver()
         let model = driver.model()

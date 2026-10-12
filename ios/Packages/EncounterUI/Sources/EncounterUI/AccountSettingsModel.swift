@@ -20,11 +20,13 @@ public struct AccountSettingsData: Equatable, Sendable {
     }
 }
 
-/// Pending deletion suspends participation. Cancellation after failure resumes it. Auth expiry routes
-/// to sign-in without a deletion receipt; only an accepted deletion is success.
+/// Pending deletion suspends participation. Cancellation verifies the account before resuming it.
+/// Auth expiry routes to sign-in without claiming deletion.
 public enum AccountSettingsDeletionState: Equatable, Sendable {
     case idle, pending, failed, configurationRequired, deleted, authenticationExpired
-    public var preventsSignedInDismissal: Bool { self == .pending }
+    public var preventsSignedInDismissal: Bool {
+        self == .pending || self == .deleted || self == .authenticationExpired
+    }
     public var canRetry: Bool { self == .failed || self == .configurationRequired }
     public mutating func cancel() -> Bool {
         guard canRetry else { return false }
@@ -47,12 +49,18 @@ public enum AccountSettingsDeletionState: Equatable, Sendable {
     }
 }
 
+public enum AccountSettingsAccountState: Equatable, Sendable {
+    case present(AccountSettingsData), deleted, authenticationExpired
+}
+
 @MainActor
 public struct AccountSettingsActions {
     public var load: @MainActor () async throws -> AccountSettingsData
     public var disconnectGitHub: @MainActor () async throws -> AccountSettingsData
     public var signOut: @MainActor () async throws -> Void
     public var deleteAccount: @MainActor () async throws -> Bool
+    /// Reload the current account from the caller's account state before lifting deletion suspension.
+    public var reloadAccount: @MainActor () async throws -> AccountSettingsAccountState
     /// Must synchronously suspend radio participation and protected reads before a deletion request.
     public var suspendParticipation: @MainActor () -> Void
     /// Restore participation according to the current signed-in settings after a failed deletion is cancelled.
@@ -61,11 +69,12 @@ public struct AccountSettingsActions {
                 disconnectGitHub: @escaping @MainActor () async throws -> AccountSettingsData,
                 signOut: @escaping @MainActor () async throws -> Void,
                 deleteAccount: @escaping @MainActor () async throws -> Bool,
-                resumeParticipation: @escaping @MainActor () -> Void = {},
+                reloadAccount: @escaping @MainActor () async throws -> AccountSettingsAccountState,
+                resumeParticipation: @escaping @MainActor () -> Void,
                 suspendParticipation: @escaping @MainActor () -> Void) {
         self.load = load; self.disconnectGitHub = disconnectGitHub; self.signOut = signOut
         self.deleteAccount = deleteAccount; self.suspendParticipation = suspendParticipation
-        self.resumeParticipation = resumeParticipation
+        self.reloadAccount = reloadAccount; self.resumeParticipation = resumeParticipation
     }
 }
 
@@ -81,7 +90,7 @@ public struct AccountSettingsNavigationActions {
     }
 }
 
-public enum AccountSettingsOperation: Equatable, Sendable { case load, disconnect, signOut, delete }
+public enum AccountSettingsOperation: Equatable, Sendable { case load, disconnect, signOut, delete, checkAccount }
 
 @MainActor
 public final class AccountSettingsModel: ObservableObject {
@@ -93,20 +102,44 @@ public final class AccountSettingsModel: ObservableObject {
     public let allowsSignOut: Bool
     public let navigation: AccountSettingsNavigationActions
     private let actions: AccountSettingsActions
+    private var isVisible = true
     public init(data: AccountSettingsData? = nil, allowsSignOut: Bool = true,
                 actions: AccountSettingsActions, navigation: AccountSettingsNavigationActions) {
         self.data = data; self.allowsSignOut = allowsSignOut; self.actions = actions; self.navigation = navigation
     }
     public var canDismiss: Bool { !isBusy && !deletion.preventsSignedInDismissal }
+    public var showsSupport: Bool { navigation.support != nil }
     public var lastLinkRefused: Bool {
         failedOperation == .disconnect && error?.code == .prerequisiteMissing && error?.fields.contains("link") == true
     }
-    public func cancelDeletion() {
-        guard !isBusy, deletion.cancel() else { return }
-        succeeded(); actions.resumeParticipation()
+    public func cancelDeletion() async {
+        guard !isBusy, deletion.canRetry else { return }
+        begin(.checkAccount)
+        defer { isBusy = false }
+        do {
+            switch try await actions.reloadAccount() {
+            case .present(let fresh):
+                data = fresh; _ = deletion.cancel(); succeeded(); actions.resumeParticipation()
+            case .deleted:
+                deletion = .deleted; succeeded(); data = nil; navigation.signedOut()
+            case .authenticationExpired:
+                deletion = .authenticationExpired; succeeded(); data = nil; navigation.signedOut()
+            }
+        } catch {
+            failed(error)
+            // If verification is unavailable after leaving, route to sign-in with participation still suspended.
+            if !isVisible, self.error?.code != .notAuthenticated { data = nil; navigation.signedOut() }
+        }
     }
-    public func back() {
-        if canDismiss { cancelDeletion(); navigation.back() }
+    public func back() async {
+        guard canDismiss else { return }
+        await cancelDeletion()
+        if canDismiss, deletion == .idle { navigation.back() }
+    }
+    public func appear() { isVisible = true }
+    public func disappear() {
+        isVisible = false
+        if !isBusy, deletion.canRetry { Task { await cancelDeletion() } }
     }
     public func load() async {
         guard canDismiss, deletion == .idle else { return }
@@ -117,8 +150,9 @@ public final class AccountSettingsModel: ObservableObject {
     }
     /// All destructive methods are called only after the view/caller confirms.
     public func disconnect() async {
-        guard canDismiss, let data, data.githubConnected else { return }
-        cancelDeletion()
+        guard canDismiss else { return }
+        await cancelDeletion()
+        guard canDismiss, deletion == .idle, let data, data.githubConnected else { return }
         if data.disconnectRemovesLastLink {
             failedOperation = .disconnect; error = .init(code: .prerequisiteMissing, fields: ["link"]); return
         }
@@ -132,7 +166,8 @@ public final class AccountSettingsModel: ObservableObject {
     }
     public func signOut() async {
         guard canDismiss, allowsSignOut else { return }
-        cancelDeletion()
+        await cancelDeletion()
+        guard canDismiss, deletion == .idle else { return }
         begin(.signOut)
         defer { isBusy = false }
         do { try await actions.signOut(); succeeded(); navigation.signedOut() }
@@ -152,6 +187,10 @@ public final class AccountSettingsModel: ObservableObject {
             failed(error)
             deletion.fail(self.error ?? .init(code: .unavailable))
         }
+        if !isVisible, deletion.canRetry {
+            isBusy = false
+            await cancelDeletion()
+        }
     }
     public func retry() async {
         switch failedOperation {
@@ -159,6 +198,7 @@ public final class AccountSettingsModel: ObservableObject {
         case .disconnect: await disconnect()
         case .signOut: await signOut()
         case .delete: await deleteAccount()
+        case .checkAccount: await cancelDeletion()
         case nil: break
         }
     }
@@ -172,6 +212,7 @@ public final class AccountSettingsModel: ObservableObject {
         } else { error = failure as? ProfileActionError ?? .init(code: .unavailable) }
         if error?.code == .notAuthenticated {
             if failedOperation == .delete { deletion.fail(error!) }
+            else if failedOperation == .checkAccount { deletion = .authenticationExpired }
             data = nil; navigation.signedOut()
         }
     }
