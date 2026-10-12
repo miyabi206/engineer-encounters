@@ -1,9 +1,9 @@
 # Decisions — Engineer Encounters
 
-**Version:** 0.6\
+**Version:** 0.7\
 **Status:** Confirmed product decisions; drafting defaults and unverified items labelled\
 **Date:** 2026-10-12\
-**Related:** `specification.md` v0.6, `design.md` v0.6, `ui.md` v0.4\
+**Related:** `specification.md` v0.7, `design.md` v0.7, `ui.md` v0.5\
 **Platforms:** iOS first, Android later\
 **Languages:** Japanese, English
 
@@ -69,6 +69,8 @@ Profile fields: display name, self-introduction written by the user, interests, 
 Discovery is off by default. Turning it on requires a display name, a self-introduction, at least one interest and at least one link of any kind.
 
 ### Link sources in v1
+
+**DEFAULT:** Unit 5 implements only GitHub; Qiita/Zenn remain Unit 8 and other pages Unit 9. Exact planned APIs, Auth connection and client rules are in `design.md`, **Unit 4 and 5 contract**.
 
 | Source | How it is read | Automatically filled fields |
 |---|---|---|
@@ -181,7 +183,7 @@ Each stage gates the next.
 
 1. **Toolchain check. FACT:** Unit 1 is implemented and merged to main (pull request 2). The sandbox question is resolved: Swift package checks pass with local cache paths and `--disable-sandbox`; Xcode and Supabase checks run outside that sandbox in the tester role. See **Repository and tools**.
 2. **Bluetooth engine first. FACT:** Unit 2 is implemented and merged to main (pull requests 4 and 5), with the real app and S22 diagnostics. The owner completed the one-day check on 2026-10-11 with an iPhone 15 and an iPad (10th generation), Development builds, local test tokens, no backend and no account. Rungs 3 and 4 worked with both approaches in both orientations, with the trial limitation below; unrun trials remain open.
-3. **Basic functions.** Follow the Unit 3 allocation under **User interface** and the built contract in `design.md`, **Unit 3 contract**, then complete Units 4 and 5 before the 160-trial matrix, using a borrowed second iPhone. **FACT:** the three binding owner decisions of 2026-10-11 were implemented on 2026-10-12; device verification remains open before the matrix; see **Bluetooth transport**.
+3. **Basic functions.** Follow the built `design.md`, **Unit 3 contract**, then the dated owner confirmation and demonstration-first dependency order in **Unit 4 and 5 contract**, before the 160-trial matrix with a borrowed second iPhone. **FACT:** the three binding owner decisions of 2026-10-11 were implemented on 2026-10-12; device verification remains open before the matrix; see **Bluetooth transport**.
 4. **Friends test:** 3 to 5 friends in a small room or cafe, on the free Apple account. **DEFAULT:** the friends test uses development builds pointed at a hosted non-production Supabase project, because the phones leave the owner's Mac. For the later hosted test, enable anonymous sign-in only on that non-production project and disable it on production, in addition to being compiled out of the release build. Local Supabase is for automated checks and the owner's own development. That means cable installs from the Mac of the owner, builds that stop working after about a week, the temporary anonymous sign-in, sessions for immediate results, and the daily report viewed inside the app without a notification. The GitHub reader alone is enough. If the device cap of the free account is reached, the phone of a friend can be signed with the own free Apple ID of that friend.
 5. **Join the Apple Developer Program.** Add and verify Sign in with Apple, push notifications and TestFlight.
 6. **One real event with 20 or more people,** using a TestFlight build made with the release configuration against the production backend. No demo switch, diagnostics or anonymous sign-in is included; attendees sign in with Apple. Verify these build gates and normal daily reveal and notification timing before the event. Internal builds, which keep the demo switch and diagnostics, go only to the owner's own devices.
@@ -352,7 +354,7 @@ Encounter states for `design.md`, **Encounter states**: Observed (a discovery ca
 
 ### Retention and deletion contract
 
-State separately how long each of these is kept and what deletes it: on-device diagnostics, receipts on the device, candidates on the server, token batches, confirmed encounters, favorites, reports, and push tokens.
+Built retention is in `design.md`, **Unit 3 contract**. **DEFAULT:** planned encounter/favorite/save/report/session/QR retention, deletion safety and cleanup are defined in **Unit 4 and 5 contract**; push tokens remain Unit 7. Final policy periods remain open.
 
 - **DEFAULT:** Development and Internal diagnostics are kept 7 days. **FACT:** Unit 2 prunes on launch, writes and Refresh; the specific clearing follow-up is listed under **Open and unverified items**. Logs contain dates, elapsed values and exchange digests, not identities or raw tokens.
 - **DEFAULT:** reports are kept until resolved and then for a period the privacy policy will state, unless account deletion erases them; only operator moderation outcomes may survive under the safety exception in **Privacy and safety**.
@@ -394,11 +396,13 @@ The GitHub, Qiita and Zenn readers call only fixed hosts.
 
 ### Daily report delivery
 
-A scheduled job runs at a regular interval, selects users whose local time has reached their report time, marks the confirmed ambient encounters of that day as revealed, and sends the notification. Define the time-zone handling and the push-token lifecycle.
+**DEFAULT:** Unit 4 in-app reveal/settings/Cron/demo behavior is defined in `design.md`, **Unit 4 and 5 contract**, **Daily reveal and demo**. APNs and push-token/outbox work remain Unit 7 under `design.md`, **Push-token lifecycle**; notification delivery does not hold up reveal.
 
 ## 11. User interface
 
-The UI document is `ui.md`, version 0.4. Unit 2 built the welcome/diagnostics base; Unit 3 built the allocated account screens and Settings list. Current UI routing is recorded below.
+The dated Unit 4/5 owner confirmation, security review before merge and cross-unit build order are recorded once in `design.md`, **Unit 4 and 5 contract**. Its planned navigation/screen allocation extends the historical Unit 3 scope below.
+
+The UI document is `ui.md`, version 0.5. Unit 2 built the welcome/diagnostics base; Unit 3 built the allocated account screens and Settings list. Current UI routing is recorded below.
 
 **Owner decision — scope, 2026-10-12 (binding):** Unit 3 will build `S02`, `S03`, `S05`, `S12`, `S16`, `S17`, the Settings list needed to reach `S12`, `S16`, `S17`, and the two declarations plus Development-only temporary sign-in on `S01`. `S04` and all link flows will stay in Unit 5, Sign in with Apple in Unit 7, and sessions, QR, feed, block, report and deletion in Unit 4. Until the owner supplies real values, screens will use a placeholder interest list and a threshold range of 1 to 10; the real list and range remain open.
 
@@ -409,7 +413,7 @@ The UI document is `ui.md`, version 0.4. Unit 2 built the welcome/diagnostics ba
 - The Connections tab of the concept is removed, because connection requests are out of v1. The My links tab of the concept becomes Profile, because the name, self-introduction and interests live there too.
 - Removed from the concept screens: the Request a connection button, the Mutual connections level, the Allow AI processing toggle, and both AI screens.
 - Added: Start session, the active session screen, and QR exchange.
-- The Settings tab opens a plain list that leads to the seven settings screens. That list is described in `ui.md`, **Navigation**, and is not one of the numbered screens.
+- The Settings tab opens a plain list leading to six settings screens (S16–S21), plus S22 in Development/Internal. **DEFAULT:** Unit 4 removes S12 from that list and adds the tab roots under `design.md`, **Unit 4 and 5 contract**. The list is described in `ui.md`, **Navigation**, and is not numbered.
 
 **FACT:** Unit 3 routes S01 → S02 → S03 → S05 → Settings; the list reaches S12/S16/S17 and S22 in Development/Internal. S04/links and the final tab roots await later units. S16 activation is unavailable and S05 cannot activate before links exist. The onboarding completion marker uses an installation-salted digest. S12 requires name/introduction/an interest only while discovery is on; purpose remains a screen requirement. Text omissions follow **Open and unverified items**. `ui.md`, **Navigation**, governs detailed built versus future routes.
 
@@ -424,7 +428,7 @@ The identifiers are fixed.
 | Onboarding | S03 | Interests and purposes. |
 | Onboarding | S04 | First link. |
 | Onboarding | S05 | Permissions and turning discovery on (Bluetooth permission, what is promised and what is not, the force-quit note). |
-| Discover tab | S06 | Feed, grouped by day (with Start session, QR exchange and the favorites filter). |
+| Discover tab | S06 | Feed, grouped by day (with Start session, QR exchange and the Favorites chip). |
 | Discover tab | S07 | Encounter detail (the card of the other person). |
 | Discover tab | S08 | Active session. |
 | Discover tab | S09 | QR exchange (show and scan). |
@@ -475,11 +479,11 @@ For each screen `ui.md` gives: its purpose, how the user reaches it, a text sket
 - **Owner — interests and threshold:** supply the real curated interest list and threshold range; the retained scope decision fixes interim values.
 - **Owner — token prerequisite:** revisit requiring discovery once onboarding/link flows exist; see the retained account decision.
 - **Legal/UI texts:** supply legal texts, links and final version strings, plus the two S05 sketch headings; those links/headings are omitted until supplied.
-- **Unit 4 — feed deduplication:** deduplicate same-day cards per viewer.
-- **Unit 4 — deletion races:** deletion must take the account advisory lock and map foreign-key races; upload already maps these to `not_found`, while other own-account calls need the future deletion integration.
-- **Unit 4 — short session evidence:** decide early discard before expiry and a smaller receipt budget.
-- **Unit 4 — physical cleanup:** implement confirmed-encounter/session cleanup; Unit 3 only cleans transient evidence/digests/limiter events.
-- **Unit 4 — diagnostics clearing:** call the existing trial-log clear method on sign-out/account deletion.
+- **DEFAULT — Unit 4/5 specified, implementation pending:** feed deduplication, deletion races, physical cleanup and diagnostics/demo clearing are settled in `design.md`, **Unit 4 and 5 contract**; these are no longer open design choices.
+- **Unit 4 — short session evidence:** early discard and the smaller evidence budget remain undecided and are not built by that contract.
+- **Owner — GitHub OAuth setup:** supply the GitHub OAuth app and backend callback for each environment; see `design.md`, **Unit 4 and 5 contract**.
+- **UNVERIFIED — hosted Auth SQL:** Auth user hard-deletion and GitHub identity unlinking need hosted validation; see that contract.
+- **Internal demo limit:** Internal cannot establish sign-in before Unit 7; the contract's demo notification is local only and its runnable demonstration uses Development accounts.
 - **Bluetooth status follow-up:** engine powered-off state is unavailable; the app side channel already distinguishes powered off for S05/S16/S22. Keep the distinction consistent.
 - **UNVERIFIED — app/backend:** the app has never been run against a backend in the simulator or on a device.
 - **UNVERIFIED — hosted Supabase:** no hosted project has been exercised, including the anonymous sign-in setting.
@@ -502,6 +506,11 @@ For each screen `ui.md` gives: its purpose, how the user reaches it, a text sket
 - Whether Sign in with Apple is available on a free Apple account, and the current device cap.
 - Whether a foreign developer needs a government filing number for the China mainland storefront. Sources conflict.
 - Whether a solo developer with a free, ad-free app counts as a trader under EU rules.
-- The exact retention period for resolved reports.
-- The exact retention period for the account-deletion safety record (hashed Apple identifier, operator moderation outcomes and incoming blocks), to settle with the legal review and state in the privacy policy.
+- The final resolved-report period; the provisional DEFAULT is in `design.md`, **Unit 4 and 5 contract**, pending privacy-policy review.
+- The final safety-record period; the provisional DEFAULT is in `design.md`, **Unit 4 and 5 contract**. Settle with legal review and disclose it in the policy/S20; owner must supply moderation contact/legal texts.
+- **Owner — S19 identification:** identification beyond the planned opaque block reference/placement day remains open; see `ui.md`, **S19**.
 - **UNVERIFIED:** whether the Supabase free plan allows the second, hosted non-production project.
+
+**Changes in v0.7 — 2026-10-12:**
+
+- Point planned Units 4/5 behavior and the dated owner confirmation/demonstration-first order to `design.md`, **Unit 4 and 5 contract**; resolve affected source/navigation/safety contradictions and distinguish specified work from remaining owner/legal/validation items.

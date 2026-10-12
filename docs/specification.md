@@ -1,9 +1,9 @@
 # Specification — Engineer Encounters
 
-**Version:** 0.6\
+**Version:** 0.7\
 **Status:** Draft requirements; product decisions recorded in `decisions.md`\
 **Date:** 2026-10-12\
-**Related:** `decisions.md` v0.6, `design.md` v0.6, `ui.md` v0.4\
+**Related:** `decisions.md` v0.7, `design.md` v0.7, `ui.md` v0.5\
 **Platforms:** iOS first, Android later\
 **Languages:** Japanese, English
 
@@ -81,6 +81,8 @@ Discovery is the master switch for product discovery and card eligibility and is
 Onboarding requests Bluetooth permission and explains what discovery promises, its limitations and the force-quit rule before turning discovery on.
 
 ## 5. Links
+
+**DEFAULT:** Unit 5 builds GitHub alone; Qiita/Zenn follow in Unit 8 and other pages in Unit 9. The exact planned reader, connection, link APIs and screen behavior are in `design.md`, **Unit 4 and 5 contract**.
 
 A link card is one shared link with its automatically filled title or name, description, main language, source, tags and opening or preview text, where available for that source. A link reader is the server component that reads one kind of source.
 
@@ -172,7 +174,7 @@ A **revealed encounter per viewer** is a confirmed encounter that a user is now 
 - Do not issue someone-is-nearby notifications or prompts of any kind. There is no weekly digest.
 - Development and internal builds have a demo switch for immediate ambient reveal and notification. The same switch is used in device tests and is compiled out of the release build.
 
-APNs delivers the daily report notification. Scheduling, time-zone handling and push-token lifecycle belong in `design.md`, **Daily report delivery**. Notification and session surfaces belong in `ui.md`, **Surfaces outside the app**.
+APNs daily notifications remain Unit 7. **DEFAULT:** Unit 4 in-app scheduling/report reads and local demo notification follow `design.md`, **Unit 4 and 5 contract**, **Daily reveal and demo**; push-token lifecycle remains under **Daily report delivery**. Notification and session surfaces belong in `ui.md`, **Surfaces outside the app**.
 
 ## 8. Matching and visibility
 
@@ -198,7 +200,7 @@ Once discovery is on, the display name, self-introduction, interests and purpose
 
 Current settings apply in both directions, including to past encounters, favorites and saved links. The server enforces authorization and never sends an unauthorized field to the app. Direct table access from the app is denied by default.
 
-`design.md`, **Matching and visibility**, must publish a truth table covering both discovery switches, blocks, purposes, interest thresholds and each visibility level.
+`design.md`, **Matching and visibility**, publishes the truth table. **DEFAULT:** the exact shared read gate, feed/favorite/save outputs and per-viewer retention are in **Unit 4 and 5 contract**.
 
 ## 9. Privacy and safety
 
@@ -213,7 +215,7 @@ Current settings apply in both directions, including to past encounters, favorit
 - Account deletion is available inside the app and is immediate and permanent for all personal data, with one safety exception: the server keeps only a one-way hash of the Apple account identifier together with operator moderation outcomes and the blocks other people placed on that account, for a period the privacy policy states, and re-applies them if the same Apple identity signs up again. Nothing else survives. The hash cannot be turned back into the Apple identifier; the kept record holds no name, profile field, link, token, encounter or contact detail. A block is dropped when the person who placed it deletes their own account. The privacy policy and the S20 deletion confirmation disclose this exception. The exact retention period is an open item to settle with the legal review.
 - Bluetooth exchanges must not carry account IDs, names, GitHub handles, email addresses or links; only temporary tokens identify the participants.
 
-The retention and deletion contract must also cover on-device diagnostics, on-device receipts, token batches, reports and push tokens. **DEFAULT:** Development and Internal diagnostics are kept for 7 days; reports are kept until resolved, then for a period stated in the privacy policy, unless account deletion erases them; only operator moderation outcomes may survive under the safety exception above. Unspecified retention periods remain open. Details belong in `design.md`, **Retention and deletion contract**.
+The retention and deletion contract must also cover on-device diagnostics, on-device receipts, token batches, reports and push tokens. **DEFAULT:** Development and Internal diagnostics are kept for 7 days; reports are kept until resolved, then for a period stated in the privacy policy, unless account deletion erases them; only operator moderation outcomes may survive under the safety exception above. Unspecified retention periods remain open. Built details belong in `design.md`, **Retention and deletion contract**; **DEFAULT:** planned Unit 4/5 deletion, safety and cleanup are defined in **Unit 4 and 5 contract**.
 
 ### Moderation
 
@@ -226,7 +228,7 @@ The retention and deletion contract must also cover on-device diagnostics, on-de
 
 ### Sample encounter
 
-New users see one clearly labelled sample encounter. It also gives App Review something to open. **DEFAULT:** the sample exists only on the device and can be dismissed.
+New users see one clearly labelled sample encounter. It also gives App Review something to open. **DEFAULT:** its on-device fixture and installation-level dismissal follow `design.md`, **Unit 4 and 5 contract**, **iOS client and navigation**.
 
 ## 10. Scope of v1
 
@@ -235,7 +237,7 @@ New users see one clearly labelled sample encounter. It also gives App Review so
 - Discovery and purpose selection.
 - Profiles and links with automatic filling and owner editing.
 - Three visibility levels and server-enforced matching and authorization.
-- Encounter feed grouped by day, with session and QR actions and a favorites filter; favorite encounters and saved links.
+- Encounter feed grouped by day, with session and QR actions and a Favorites chip; favorite encounters and saved links.
 - Daily report, sessions and QR exchange.
 - Block, report and in-app account deletion.
 - A clearly labelled sample encounter.
@@ -279,6 +281,8 @@ Implementation uses SwiftData with a replaceable receipt queue, CryptoKit and th
 
 
 ## 12. Release path and gates
+
+The dated owner confirmation, whole-diff security review and demonstration-first order across Units 4/5 are recorded in `design.md`, **Unit 4 and 5 contract**; follow its planned dependencies without changing the retained unit allocations or release gates.
 
 Each stage gates the next. Device radio tests and battery measurements are performed by the owner.
 
@@ -407,11 +411,11 @@ Discovery off, the 21:00 daily report, profile visibility and private contact de
 - **Owner — interests and threshold:** supply the real curated interest list and threshold range; the retained scope decision fixes interim values.
 - **Owner — token prerequisite:** revisit requiring discovery once onboarding/link flows exist; see the retained account decision.
 - **Legal/UI texts:** supply legal texts, links and final version strings, plus the two S05 sketch headings; those links/headings are omitted until supplied.
-- **Unit 4 — feed deduplication:** deduplicate same-day cards per viewer.
-- **Unit 4 — deletion races:** deletion must take the account advisory lock and map foreign-key races; upload already maps these to `not_found`, while other own-account calls need the future deletion integration.
-- **Unit 4 — short session evidence:** decide early discard before expiry and a smaller receipt budget.
-- **Unit 4 — physical cleanup:** implement confirmed-encounter/session cleanup; Unit 3 only cleans transient evidence/digests/limiter events.
-- **Unit 4 — diagnostics clearing:** call the existing trial-log clear method on sign-out/account deletion.
+- **DEFAULT — Unit 4/5 specified, implementation pending:** feed deduplication, deletion races, physical cleanup and diagnostics/demo clearing are settled in `design.md`, **Unit 4 and 5 contract**; these are no longer open design choices.
+- **Unit 4 — short session evidence:** early discard and the smaller evidence budget remain undecided and are not built by that contract.
+- **Owner — GitHub OAuth setup:** supply the GitHub OAuth app and backend callback for each environment; see `design.md`, **Unit 4 and 5 contract**.
+- **UNVERIFIED — hosted Auth SQL:** Auth user hard-deletion and GitHub identity unlinking need hosted validation; see that contract.
+- **Internal demo limit:** Internal cannot establish sign-in before Unit 7; the contract's demo notification is local only and its runnable demonstration uses Development accounts.
 - **Bluetooth status follow-up:** engine powered-off state is unavailable; the app side channel already distinguishes powered off for S05/S16/S22. Keep the distinction consistent.
 - **UNVERIFIED — app/backend:** the app has never been run against a backend in the simulator or on a device.
 - **UNVERIFIED — hosted Supabase:** no hosted project has been exercised, including the anonymous sign-in setting.
@@ -433,10 +437,11 @@ Discovery off, the 21:00 daily report, profile visibility and private contact de
 - **UNVERIFIED:** whether Sign in with Apple is available on a free Apple account, and its current device cap.
 - Whether a foreign developer needs a government filing number for China mainland distribution; sources conflict.
 - Whether a solo developer with a free, ad-free app counts as a trader under EU rules.
-- The exact retention period for resolved moderation reports.
-- The exact retention period for the account-deletion safety record (hashed Apple identifier, operator moderation outcomes and incoming blocks), to settle with the legal review and state in the privacy policy.
+- The final resolved-report period; `design.md`, **Unit 4 and 5 contract**, specifies only a provisional DEFAULT pending privacy-policy review.
+- The final safety-record period; the provisional DEFAULT is in `design.md`, **Unit 4 and 5 contract**, pending legal review and policy/S20 disclosure.
+- **Owner — S19 identification:** identifying a blocked person beyond the planned opaque reference/placement day remains open; see `ui.md`, **S19**.
 - Remaining retention defaults for token batches, push tokens and Development/Internal diagnostics are in `design.md`, **Retention and deletion contract**. **FACT:** Unit 2 implements the 48-hour receipt expiry, protected storage and backup exclusion; receipt expiry is invoked on start, refresh and every 15 minutes while running. Built sign-out/terminal cleanup is under **Accounts**; account deletion and real-device protection checks remain to complete.
-- `design.md`, **Daily report delivery**, now proposes time-zone handling values as **DEFAULT**, pending confirmation after the device checks.
+- **DEFAULT:** planned time-zone handling is defined in `design.md`, **Unit 4 and 5 contract**, **Daily reveal and demo**; DST/travel behavior still needs the specified verification.
 - Transport timing values remain adjustable **DEFAULT** values in `design.md`, **Bluetooth transport**; Unit 2’s current timeouts, subscription teardown and both receipt shapes are implemented facts. Reliable locked evidence and background discovery remain unverified.
 - Product success targets; no numerical targets are specified.
 - **UNVERIFIED:** whether the Supabase free plan allows the second, hosted non-production project.
@@ -477,3 +482,7 @@ The full source list and evidence markings are in `decisions.md`, **Verified sou
 **Changes in v0.6 — 2026-10-12:**
 
 - Record Unit 3 as built with its account recovery, server contract, screens, review fixes and local verification, preserving the three binding owner decisions and remaining device/later-unit gates.
+
+**Changes in v0.7 — 2026-10-12:**
+
+- Point planned Units 4/5 behavior and the dated owner confirmation/demonstration-first order to `design.md`, **Unit 4 and 5 contract**; resolve affected source/navigation/safety contradictions and distinguish specified work from remaining owner/legal/validation items.
