@@ -24,20 +24,25 @@ public final class OnboardingModel: ObservableObject {
     @Published public private(set) var hasCompleted = false
     @Published public private(set) var failedOperation: OnboardingOperation?
 
+    public private(set) var linkModel: LinksModel?
+
     private let actions: ProfileActions
     private let onExit: @MainActor () -> Void
     private let onFinish: @MainActor (Bool) -> Void
     private let onBluetoothRecovery: @MainActor () -> Void
     private let onAddLink: (@MainActor () -> Void)?
+    let linkDiscoverySettings: (@MainActor () -> Void)?
 
     public init(profile: OwnProfileState, interests: [InterestOption]? = nil,
                 bluetooth: BluetoothPermissionState = .notRequested, actions: ProfileActions,
                 onExit: @escaping @MainActor () -> Void,
                 onFinish: @escaping @MainActor (Bool) -> Void,
                 onBluetoothRecovery: @escaping @MainActor () -> Void,
-                onAddLink: (@MainActor () -> Void)? = nil) {
+                onAddLink: (@MainActor () -> Void)? = nil,
+                linkActions: LinkActions? = nil,
+                onDiscoverySettings: (@MainActor () -> Void)? = nil) {
         self.profile = profile
-        step = OnboardingStep.unfinishedStep(profile: profile)
+        step = OnboardingStep.unfinishedStep(profile: profile, requiresFirstLink: linkActions != nil)
         displayName = profile.displayName
         introduction = profile.introduction
         selectedInterestIDs = interests.map { profile.interestIDs.intersection(Set($0.map(\.id))) } ?? profile.interestIDs
@@ -50,9 +55,17 @@ public final class OnboardingModel: ObservableObject {
         self.onFinish = onFinish
         self.onBluetoothRecovery = onBluetoothRecovery
         self.onAddLink = onAddLink
+        linkDiscoverySettings = onDiscoverySettings
+        if let linkActions {
+            linkModel = LinksModel(actions: linkActions, discoveryOn: profile.discoveryOn) { [weak self] links in
+                guard let self else { return }
+                self.profile.linkCount = links.count
+                self.profile.prerequisites.link = !links.isEmpty
+            }
+        }
     }
 
-    public var isBusy: Bool { isSaving || isLoadingInterests || hasCompleted }
+    public var isBusy: Bool { isSaving || isLoadingInterests || hasCompleted || linkModel?.isBusy == true }
     public var shouldRetryInterestLoad: Bool { !isLoadingInterests && (!hasLoadedInterests || interests.isEmpty) }
     public var canContinueBasics: Bool {
         !isBusy && ProfileValidation.invalidBasics(displayName: displayName, introduction: introduction).isEmpty
@@ -65,7 +78,7 @@ public final class OnboardingModel: ObservableObject {
     public var canEnableDiscovery: Bool {
         !isBusy && profile.prerequisites.canEnableDiscovery && bluetooth.canEnableDiscovery
     }
-    public var canAddLink: Bool { onAddLink != nil && !isBusy }
+    public var canAddLink: Bool { (onAddLink != nil || linkModel != nil) && !isBusy }
 
     /// Refresh confirmed prerequisites after returning from a caller-owned editor.
     public func receive(profile fresh: OwnProfileState, bluetooth: BluetoothPermissionState? = nil) {
@@ -74,6 +87,7 @@ public final class OnboardingModel: ObservableObject {
         if selectedInterestIDs == profile.interestIDs { selectedInterestIDs = fresh.interestIDs }
         if selectedPurposes == profile.purposes { selectedPurposes = fresh.purposes }
         profile = fresh
+        linkModel?.discoveryOn = fresh.discoveryOn
         if let bluetooth { self.bluetooth = bluetooth }
     }
 
@@ -85,7 +99,8 @@ public final class OnboardingModel: ObservableObject {
             hasCompleted = true
             onExit()
         case .interests: step = .basics
-        case .permissions: step = .interests
+        case .firstLink: step = .interests
+        case .permissions: step = linkModel == nil ? .interests : .firstLink
         }
     }
 
@@ -95,8 +110,19 @@ public final class OnboardingModel: ObservableObject {
         switch prerequisite {
         case .displayName, .introduction: step = .basics
         case .interest: step = .interests
-        case .link: onAddLink?()
+        case .link:
+            if linkModel != nil { step = .firstLink } else { onAddLink?() }
         }
+    }
+
+    public var canContinueFirstLink: Bool {
+        !isBusy && linkModel?.hasLoadedLinks == true && FirstLinkStepGate.hasLink(profile)
+    }
+
+    public func continueFirstLink() {
+        guard canContinueFirstLink, step == .firstLink else { return }
+        actionError = nil
+        step = .permissions
     }
 
     public func toggleInterest(_ id: String) {
@@ -162,7 +188,7 @@ public final class OnboardingModel: ObservableObject {
             if ids != profile.interestIDs { profile = try await actions.saveInterests(ids) }
             if purposes != profile.purposes { profile = try await actions.savePurposes(purposes) }
             failedOperation = nil
-            step = .permissions
+            step = linkModel == nil ? .permissions : .firstLink
         } catch is CancellationError {
         } catch {
             actionError = Self.presentationError(error)
@@ -191,7 +217,8 @@ public final class OnboardingModel: ObservableObject {
     }
 
     public func finish(discovery enabled: Bool) async {
-        guard !isBusy, !enabled || canEnableDiscovery else { return }
+        guard !isBusy, linkModel == nil || step == .permissions,
+              !enabled || canEnableDiscovery else { return }
         if !enabled && !profile.discoveryOn {
             hasCompleted = true
             failedOperation = nil

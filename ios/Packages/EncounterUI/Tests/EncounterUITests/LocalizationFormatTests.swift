@@ -6,7 +6,8 @@ final class LocalizationFormatTests: XCTestCase {
     func testFormatSpecifiersMatchForEveryJapaneseAndEnglishKey() throws {
         for tables in [
             (try OnboardingStrings.table(language: "ja"), try OnboardingStrings.table(language: "en")),
-            (try SettingsStrings.table(language: "ja"), try SettingsStrings.table(language: "en"))
+            (try SettingsStrings.table(language: "ja"), try SettingsStrings.table(language: "en")),
+            (try LinkStrings.table(language: "ja"), try LinkStrings.table(language: "en"))
         ] {
             XCTAssertEqual(Set(tables.0.keys), Set(tables.1.keys))
             for key in tables.0.keys {
