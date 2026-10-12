@@ -2,6 +2,8 @@ begin;
 
 create extension if not exists pgtap with schema extensions;
 
+grant execute on all functions in schema extensions to anon, authenticated;
+
 select extensions.plan(43);
 
 select extensions.ok(exists (select 1 from pg_catalog.pg_extension where extname = 'pg_cron'),

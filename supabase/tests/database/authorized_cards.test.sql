@@ -43,7 +43,7 @@ $$;
 insert into private.external_links (link_id, owner_id, source, source_item_id, url, title,
     description, main_language, tags, opening_text, verification_state, visibility, display_order)
 select authorized_cards_test.id(200 + 10 * (o - 1) + l), authorized_cards_test.id(o),
-    'other', 'must-not-leak', 'https://example.invalid/' || o || '/' || l,
+    'other', 'must-not-leak-' || l, 'https://example.invalid/' || o || '/' || l,
     'Link ' || l, 'Description ' || l, case when l = 4 then null else 'en' end,
     array['tag-b', 'tag-a'], 'Opening ' || l, 'unverified', 'everyone_eligible',
     case when l in (2, 3) then 10 when l = 1 then 20 else 30 end
@@ -101,7 +101,7 @@ begin
     cross join pg_catalog.unnest(array['discovery', 'collaboration']) as p;
     update private.field_visibility set level = 'everyone_eligible'
     where owner_id in (authorized_cards_test.id(1), authorized_cards_test.id(2));
-    update private.external_links as links set source = 'other', source_item_id = 'must-not-leak',
+    update private.external_links as links set source = 'other', source_item_id = 'must-not-leak-' || l,
         url = 'https://example.invalid/' || o || '/' || l,
         title = 'Link ' || l, description = 'Description ' || l,
         main_language = case when l = 4 then null else 'en' end,
@@ -301,6 +301,11 @@ revoke all on function authorized_cards_test.item_levels() from public, anon, au
 -- Catalog/privileges: 18; actual role checks: 14; exhaustive truth table: 1792;
 -- individual levels: 72; wire values: 9; mixed levels: 4; current settings: 19;
 -- helper edge cases: 6; additional read gates: 31.
+-- Test helpers use explicit grants under the hardened function defaults.
+grant execute on all functions in schema authorized_cards_test to anon, authenticated, service_role;
+revoke all on function authorized_cards_test.reset_pair() from public, anon, authenticated, service_role;
+grant execute on all functions in schema extensions to anon, authenticated, service_role;
+
 select extensions.plan(1965);
 
 select extensions.ok(p.prosecdef, 'card is security definer')

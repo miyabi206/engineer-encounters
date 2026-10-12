@@ -184,6 +184,10 @@ cross join lateral (values (c.start_seconds), (c.start_seconds + 120), (c.start_
     (c.current_seconds), (c.current_seconds + 300), (c.current_seconds + 301),
     (c.current_seconds - 172800), (c.current_seconds - 172799)) as times(t);
 
+-- Test helpers use explicit grants under the hardened function defaults.
+grant execute on all functions in schema receipts_test to anon, authenticated, service_role;
+grant execute on all functions in schema extensions to anon, authenticated, service_role;
+
 select extensions.plan(472);
 -- Catalog, default denial, date-only confirmed storage and RPC privileges.
 select extensions.ok(pg_catalog.to_regclass('private.' || name) is not null, name || ' exists') from receipts_test.tables;

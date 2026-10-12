@@ -68,6 +68,10 @@ begin
 end;
 $$;
 
+-- Test helpers use explicit grants under the hardened function defaults.
+grant execute on all functions in schema accounts_profiles_test to anon, authenticated;
+grant execute on all functions in schema extensions to anon, authenticated;
+
 select extensions.plan(546);
 
 select extensions.ok(c.relrowsecurity, t.name || ' has RLS enabled')
