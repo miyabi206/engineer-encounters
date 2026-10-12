@@ -35,6 +35,12 @@ insert into accounts_profiles_test.helpers values
     ('private.account_is_ready(''11111111-1111-1111-1111-111111111111''::uuid)'),
     ('private.raise_error(''invalid_input'', array[''field''])');
 
+create table accounts_profiles_test.invisible_inputs (code_point text primary key, value text not null);
+insert into accounts_profiles_test.invisible_inputs values
+    ('U+200B', U&'\200B'), ('U+200C', U&'\200C'), ('U+200D', U&'\200D'),
+    ('U+2060', U&'\2060'), ('U+FEFF', U&'\FEFF'), ('U+3164', U&'\3164'),
+    ('U+115F', U&'\115F'), ('U+1160', U&'\1160'), ('U+FFA0', U&'\FFA0');
+
 grant select on all tables in schema accounts_profiles_test to anon, authenticated;
 
 -- Check the detail as well as the stable message, without exposing submitted values.
@@ -62,7 +68,7 @@ begin
 end;
 $$;
 
-select extensions.plan(486);
+select extensions.plan(546);
 
 select extensions.ok(c.relrowsecurity, t.name || ' has RLS enabled')
 from accounts_profiles_test.tables as t
@@ -608,6 +614,86 @@ select extensions.is(public.get_own_profile()->'prerequisites',
 select accounts_profiles_test.expect_error('select public.set_discovery(true)', 'prerequisite_missing',
     'display_name,introduction', 'only the four discovery fields are named for a ready account');
 reset role;
+
+-- Invisible code points affect absence only, including unnormalized stored values.
+select extensions.is(private.trim_input(U&'\3000' || v.value || E'\t \n' || v.value), '',
+    v.code_point || ' mixed with whitespace is absent') from accounts_profiles_test.invisible_inputs as v;
+select extensions.is(private.trim_input(v.value || 'A' || v.value || 'B' || v.value),
+    v.value || 'A' || v.value || 'B' || v.value, v.code_point || ' around and inside visible text is preserved')
+from accounts_profiles_test.invisible_inputs as v;
+set local role authenticated;
+select extensions.lives_ok($test$select public.update_own_profile(
+    U&'\200B\200C\200D\2060\FEFF\3164\115F\1160\FFA0',
+    U&'\3000\200B\2060\FEFF', U&'\115F\1160\FFA0')$test$,
+    'invisible-only profile values may be cleared while discovery is off');
+select extensions.is(pg_catalog.jsonb_build_array(public.get_own_profile()->>'display_name',
+    public.get_own_profile()->>'introduction', public.get_own_profile()->>'contact_detail'),
+    '["","",""]'::jsonb, 'invisible-only profile input is stored as absent');
+select accounts_profiles_test.expect_error($test$select public.accept_declarations(true,
+    U&'\200B\2060\FEFF', U&'\3164\115F\1160\FFA0')$test$,
+    'invalid_input', 'terms_version,privacy_version', 'invisible-only declarations are invalid');
+select public.update_own_profile('name', 'intro', '');
+select public.set_discovery(true);
+select accounts_profiles_test.expect_error(pg_catalog.format('select public.update_own_profile(%L, ''intro'', '''')', v.value),
+    'prerequisite_missing', 'display_name', v.code_point || ' cannot replace a discovering name')
+from accounts_profiles_test.invisible_inputs as v;
+select accounts_profiles_test.expect_error(pg_catalog.format('select public.update_own_profile(''name'', %L, '''')', v.value),
+    'prerequisite_missing', 'introduction', v.code_point || ' cannot replace a discovering introduction')
+from accounts_profiles_test.invisible_inputs as v;
+select public.set_discovery(false);
+reset role;
+update private.profiles set display_name = U&'\200B\2060\FEFF', introduction = U&'\3164\115F\1160\FFA0'
+where user_id = '11111111-1111-1111-1111-111111111111';
+set local role authenticated;
+select extensions.is(public.get_own_profile()->'prerequisites',
+    '{"display_name":false,"introduction":false,"interest":true,"link":true}'::jsonb,
+    'invisible-only stored profile values are absent in prerequisites');
+select accounts_profiles_test.expect_error('select public.set_discovery(true)', 'prerequisite_missing',
+    'display_name,introduction', 'invisible-only stored fields cannot enable discovery');
+reset role;
+
+-- Ten zone registrations per rolling day, independent from other accounts/buckets.
+delete from private.account_limit_events where bucket = 'register_time_zone'
+    and user_id in ('11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222');
+set local role authenticated;
+select extensions.lives_ok('select public.register_time_zone(''UTC'')', 'zone registration ' || n || ' of ten succeeds')
+from pg_catalog.generate_series(1, 10) as calls(n);
+select accounts_profiles_test.expect_error('select public.register_time_zone(''Asia/Tokyo'')', 'rate_limited', '',
+    'eleventh zone registration in a day is refused');
+reset role;
+select extensions.is((select pg_catalog.count(*) from private.account_limit_events
+    where user_id = '11111111-1111-1111-1111-111111111111' and bucket = 'register_time_zone'),
+    10::bigint, 'refused zone registration records no event');
+select extensions.is((select n.time_zone from private.notification_preferences as n
+    where n.user_id = '11111111-1111-1111-1111-111111111111'), 'UTC', 'refused zone registration preserves the latest zone');
+set local role authenticated;
+set local "request.jwt.claims" = '{"sub":"22222222-2222-2222-2222-222222222222","role":"authenticated"}';
+select extensions.lives_ok('select public.register_time_zone(''Asia/Tokyo'')', 'another account has its own daily zone limit');
+reset role;
+update private.account_limit_events set occurred_at = pg_catalog.now() - interval '1 day'
+where user_id = '11111111-1111-1111-1111-111111111111' and bucket = 'register_time_zone';
+update private.account_limit_events set occurred_at = pg_catalog.now() - interval '2 days'
+where user_id = '22222222-2222-2222-2222-222222222222' and bucket = 'register_time_zone';
+insert into private.account_limit_events (user_id, bucket, occurred_at)
+select '11111111-1111-1111-1111-111111111111', 'register_time_zone', pg_catalog.now() - interval '1 day' + interval '1 microsecond'
+from pg_catalog.generate_series(1, 9);
+insert into private.account_limit_events (user_id, bucket, occurred_at) values
+    ('11111111-1111-1111-1111-111111111111', 'zone-other-bucket', pg_catalog.now() - interval '3 days');
+set local role authenticated;
+set local "request.jwt.claims" = '{"sub":"11111111-1111-1111-1111-111111111111","role":"authenticated"}';
+select extensions.lives_ok('select public.register_time_zone(''Asia/Tokyo'')', 'zone events exactly a day old are pruned');
+select accounts_profiles_test.expect_error('select public.register_time_zone(''UTC'')', 'rate_limited', '',
+    'zone events just inside the day still count');
+reset role;
+select extensions.is((select pg_catalog.count(*) from private.account_limit_events
+    where user_id = '11111111-1111-1111-1111-111111111111' and bucket = 'register_time_zone'),
+    10::bigint, 'the daily limiter keeps only its current span');
+select extensions.is((select pg_catalog.count(*) from private.account_limit_events
+    where user_id = '22222222-2222-2222-2222-222222222222' and bucket = 'register_time_zone'),
+    1::bigint, 'daily pruning preserves another account old events');
+select extensions.is((select pg_catalog.count(*) from private.account_limit_events
+    where user_id = '11111111-1111-1111-1111-111111111111' and bucket = 'zone-other-bucket'),
+    1::bigint, 'daily pruning preserves another bucket old events');
 
 select * from extensions.finish();
 

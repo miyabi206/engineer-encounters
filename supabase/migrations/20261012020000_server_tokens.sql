@@ -13,11 +13,10 @@ create index temporary_tokens_owner_window_idx on private.temporary_tokens (user
 create index temporary_tokens_valid_until_idx on private.temporary_tokens (valid_until);
 create index temporary_tokens_delete_after_idx on private.temporary_tokens (delete_after);
 
--- Keep events rather than fixed calendar counters: both hour and minute buckets
--- use the same rolling-span helper. A later cleanup can remove old events.
+-- Keep only the rolling span for each account and bucket when its limiter runs.
 create table private.account_limit_events (
     user_id uuid not null references auth.users (id) on delete cascade,
-    bucket text not null check (pg_catalog.btrim(bucket) <> ''),
+    bucket text not null check (private.trim_input(bucket) <> ''),
     occurred_at timestamptz not null
 );
 
@@ -49,6 +48,10 @@ begin
     if not exists (select 1 from auth.users as u where u.id = account_id) then
         perform private.raise_error('not_authenticated');
     end if;
+
+    delete from private.account_limit_events as e
+    where e.user_id = account_id and e.bucket = event_bucket
+      and e.occurred_at <= pg_catalog.now() - time_span;
 
     select pg_catalog.count(*) into event_count
     from private.account_limit_events as e

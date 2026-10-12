@@ -2,15 +2,19 @@ create schema private;
 
 revoke all on schema private from public, anon, authenticated;
 
--- Normalize Unicode White_Space once; NULL and whitespace-only input are absent.
+-- Trim Unicode White_Space; invisible-only input is absent, but invisible
+-- characters accompanying visible text are preserved.
 create function private.trim_input(input_text text)
 returns text
 language sql
 immutable
 set search_path = ''
 as $$
-    select pg_catalog.btrim(coalesce(input_text, ''),
-        U&'\0009\000A\000B\000C\000D\0020\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000');
+    select case when pg_catalog.translate(trimmed.value,
+        U&'\0009\000A\000B\000C\000D\0020\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000\200B\200C\200D\2060\FEFF\3164\115F\1160\FFA0', '') = ''
+        then '' else trimmed.value end
+    from (select pg_catalog.btrim(coalesce(input_text, ''),
+        U&'\0009\000A\000B\000C\000D\0020\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000') as value) as trimmed;
 $$;
 
 revoke all on function private.trim_input(text) from public, anon, authenticated;
@@ -222,6 +226,10 @@ as $$
 declare
     caller uuid := private.require_caller();
 begin
+    -- This bucket name must match private.cleanup_expired_data's daily retention.
+    if private.record_account_event(caller, 'register_time_zone', 10, interval '1 day') then
+        perform private.raise_error('rate_limited');
+    end if;
     perform 1 from private.profiles as p where p.user_id = caller for update;
     if not found then
         perform private.raise_error('declaration_required');

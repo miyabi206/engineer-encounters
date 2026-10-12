@@ -2,7 +2,7 @@ begin;
 
 create extension if not exists pgtap with schema extensions;
 
-select extensions.plan(33);
+select extensions.plan(43);
 
 select extensions.ok(exists (select 1 from pg_catalog.pg_extension where extname = 'pg_cron'),
     'pg_cron is installed');
@@ -92,6 +92,17 @@ from (values
     ('cleanup-live', timestamptz '2026-10-12 00:00:00+00')
 ) as f(bucket, event_time);
 
+-- The registration bucket needs its full daily span, including events older
+-- than the hourly retention applied to all other buckets.
+insert into private.account_limit_events (user_id, bucket, occurred_at)
+select 'dddddddd-0000-0000-0000-000000000001'::uuid, 'register_time_zone', f.event_time
+from (values
+    (timestamptz '2026-10-10 23:59:59.999999+00'),
+    (timestamptz '2026-10-11 00:00:00+00'),
+    (timestamptz '2026-10-11 00:00:00.000001+00'),
+    (timestamptz '2026-10-11 12:00:00+00')
+) as f(event_time);
+
 -- This zone is on the previous calendar date at the UTC deadline.
 set local time zone 'America/Los_Angeles';
 select private.cleanup_expired_data(timestamptz '2026-10-11 23:59:59.999999+00');
@@ -105,6 +116,9 @@ select extensions.ok(exists (select 1 from private.consumed_nonces where exchang
     pg_catalog.decode(pg_catalog.lpad('ca', 64, '0'), 'hex')), 'tombstone survives until UTC midnight');
 select extensions.ok(exists (select 1 from private.account_limit_events where bucket = 'cleanup-old'
     and user_id = 'dddddddd-0000-0000-0000-000000000001'), 'limiter survives at exactly one hour');
+select extensions.ok(exists (select 1 from private.account_limit_events
+    where user_id = 'dddddddd-0000-0000-0000-000000000001' and bucket = 'register_time_zone'
+      and occurred_at = timestamptz '2026-10-10 23:59:59.999999+00'), 'registration event survives at exactly one day');
 
 select private.cleanup_expired_data(timestamptz '2026-10-12 00:00:00+00');
 select extensions.ok(not exists (select 1 from private.encounter_candidates where nonce_digest =
@@ -135,6 +149,19 @@ select extensions.ok(exists (select 1 from private.account_limit_events where bu
 select extensions.is((select pg_catalog.count(*) from private.account_limit_events
     where user_id = 'dddddddd-0000-0000-0000-000000000001' and bucket in ('cleanup-recent', 'cleanup-live')),
     2::bigint, 'recent limiter events survive');
+select extensions.ok(not exists (select 1 from private.account_limit_events
+    where user_id = 'dddddddd-0000-0000-0000-000000000001' and bucket = 'register_time_zone'
+      and occurred_at = timestamptz '2026-10-10 23:59:59.999999+00'), 'registration event older than one day is deleted');
+select extensions.ok(exists (select 1 from private.account_limit_events
+    where user_id = 'dddddddd-0000-0000-0000-000000000001' and bucket = 'register_time_zone'
+      and occurred_at = timestamptz '2026-10-11 00:00:00+00'), 'registration event at the one-day boundary survives');
+select extensions.is((select pg_catalog.count(*) from private.account_limit_events
+    where user_id = 'dddddddd-0000-0000-0000-000000000001' and bucket = 'register_time_zone'
+      and occurred_at in (timestamptz '2026-10-11 00:00:00.000001+00', timestamptz '2026-10-11 12:00:00+00')),
+    2::bigint, 'registration events inside the daily span survive');
+select extensions.ok(exists (select 1 from private.account_limit_events
+    where user_id = 'dddddddd-0000-0000-0000-000000000001' and bucket = 'register_time_zone'
+      and occurred_at = timestamptz '2026-10-11 12:00:00+00'), 'registration event older than one hour but younger than one day survives cleanup');
 
 select private.cleanup_expired_data(timestamptz '2026-10-12 00:00:00.000001+00');
 select extensions.ok(not exists (select 1 from private.encounter_candidates where nonce_digest =
@@ -145,12 +172,45 @@ select extensions.ok(not exists (select 1 from private.account_limit_events wher
 select extensions.is((select pg_catalog.count(*) from private.encounter_candidates
     where uploader_id = 'dddddddd-0000-0000-0000-000000000001'), 2::bigint, 'remaining candidates survive another cleanup');
 select extensions.is((select pg_catalog.count(*) from private.account_limit_events
-    where user_id = 'dddddddd-0000-0000-0000-000000000001'), 2::bigint, 'remaining limiter events survive another cleanup');
+    where user_id = 'dddddddd-0000-0000-0000-000000000001'), 4::bigint, 'remaining hourly and daily limiter events survive another cleanup');
+select extensions.ok(not exists (select 1 from private.account_limit_events
+    where user_id = 'dddddddd-0000-0000-0000-000000000001' and bucket = 'register_time_zone'
+      and occurred_at = timestamptz '2026-10-11 00:00:00+00'), 'registration event is deleted immediately beyond one day');
+select extensions.is((select pg_catalog.count(*) from private.account_limit_events
+    where user_id = 'dddddddd-0000-0000-0000-000000000001' and bucket = 'register_time_zone'),
+    2::bigint, 'remaining registration events survive another cleanup');
 
 -- Repeating the same cleanup must be harmless.
 select private.cleanup_expired_data(timestamptz '2026-10-12 00:00:00.000001+00');
 select extensions.is((select pg_catalog.count(*) from private.temporary_tokens
     where user_id = 'dddddddd-0000-0000-0000-000000000001'), 1::bigint, 'repeated cleanup retains the live token');
+
+-- Real registrations retain their daily budget across the default cleanup call.
+set local "request.jwt.claim.sub" = '';
+set local "request.jwt.claims" = '{"sub":"dddddddd-0000-0000-0000-000000000002","role":"authenticated"}';
+set local role authenticated;
+select public.accept_declarations(true, 'draft', 'draft');
+do $$
+begin
+    for registration_number in 1..10 loop
+        perform public.register_time_zone('UTC');
+    end loop;
+end;
+$$;
+reset role;
+update private.account_limit_events set occurred_at = pg_catalog.now() - interval '2 hours'
+where user_id = 'dddddddd-0000-0000-0000-000000000002' and bucket = 'register_time_zone';
+select extensions.is((select pg_catalog.count(*) from private.account_limit_events
+    where user_id = 'dddddddd-0000-0000-0000-000000000002' and bucket = 'register_time_zone'),
+    10::bigint, 'ten real registrations have spent the daily budget');
+select private.cleanup_expired_data();
+select extensions.is((select pg_catalog.count(*) from private.account_limit_events
+    where user_id = 'dddddddd-0000-0000-0000-000000000002' and bucket = 'register_time_zone'),
+    10::bigint, 'cleanup preserves all two-hour-old registration events');
+set local role authenticated;
+select extensions.throws_ok('select public.register_time_zone(''Asia/Tokyo'')', 'P0001', 'rate_limited',
+    'cleanup cannot allow an eleventh registration in the day');
+reset role;
 
 select * from extensions.finish();
 rollback;

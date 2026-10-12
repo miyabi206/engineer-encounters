@@ -107,7 +107,7 @@ begin
 end;
 $$;
 
-select extensions.plan(144);
+select extensions.plan(177);
 
 -- Catalog and grants: 32 assertions.
 select extensions.ok(c.relrowsecurity, t.name || ' has RLS enabled')
@@ -247,12 +247,22 @@ where user_id = 'aaaaaaaa-0000-0000-0000-000000000001';
 set local role authenticated;
 select server_tokens_test.expect_error('select public.issue_token_batch()', 'account_not_ready', '', 'Unicode whitespace privacy acceptance is not ready');
 reset role;
-update private.profiles set privacy_version = 'draft' where user_id = 'aaaaaaaa-0000-0000-0000-000000000001';
+update private.profiles set terms_version = U&'\200B\200C\200D\2060\FEFF', privacy_version = 'draft'
+where user_id = 'aaaaaaaa-0000-0000-0000-000000000001';
+set local role authenticated;
+select server_tokens_test.expect_error('select public.issue_token_batch()', 'account_not_ready', '', 'invisible-only terms acceptance is not ready');
+reset role;
+update private.profiles set terms_version = 'draft', privacy_version = U&'\3164\115F\1160\FFA0'
+where user_id = 'aaaaaaaa-0000-0000-0000-000000000001';
+set local role authenticated;
+select server_tokens_test.expect_error('select public.issue_token_batch()', 'account_not_ready', '', 'invisible-only privacy acceptance is not ready');
+reset role;
+update private.profiles set terms_version = 'draft', privacy_version = 'draft' where user_id = 'aaaaaaaa-0000-0000-0000-000000000001';
 alter table private.profiles add constraint profiles_age_18_declared_check check (age_18_declared);
 alter table private.profiles add constraint profiles_terms_version_check check (private.trim_input(terms_version) <> '' and pg_catalog.char_length(private.trim_input(terms_version)) <= 32);
 alter table private.profiles add constraint profiles_privacy_version_check check (private.trim_input(privacy_version) <> '' and pg_catalog.char_length(private.trim_input(privacy_version)) <= 32);
 select extensions.is((select pg_catalog.count(*) from private.account_limit_events
-    where user_id = 'aaaaaaaa-0000-0000-0000-000000000001'), 0::bigint, 'readiness errors record no limiter events');
+    where user_id = 'aaaaaaaa-0000-0000-0000-000000000001' and bucket = 'issue_token_batch'), 0::bigint, 'readiness errors record no token issue events');
 select extensions.is((select pg_catalog.count(*) from private.temporary_tokens
     where user_id = 'aaaaaaaa-0000-0000-0000-000000000001'), 0::bigint, 'readiness errors store no tokens');
 
@@ -319,7 +329,7 @@ from server_tokens_test.clock as c cross join lateral (values
 ) as v(value, description);
 reset role;
 select extensions.is((select pg_catalog.count(*) from private.account_limit_events
-    where user_id = 'aaaaaaaa-0000-0000-0000-000000000001'), 3::bigint, 'invalid coverage records no events');
+    where user_id = 'aaaaaaaa-0000-0000-0000-000000000001' and bucket = 'issue_token_batch'), 3::bigint, 'invalid coverage records no events');
 select extensions.is((select pg_catalog.count(*) from private.temporary_tokens
     where user_id = 'aaaaaaaa-0000-0000-0000-000000000001'),
     (select 3 * (horizon - current_window) / 900 from server_tokens_test.clock), 'invalid coverage stores no tokens');
@@ -342,7 +352,7 @@ select extensions.is((select pg_catalog.count(*) from private.temporary_tokens
     where user_id = 'aaaaaaaa-0000-0000-0000-000000000001'),
     (select 4 * (horizon - current_window) / 900 - 1 from server_tokens_test.clock), 'a refused batch leaves all windows unchanged');
 select extensions.is((select pg_catalog.count(*) from private.account_limit_events
-    where user_id = 'aaaaaaaa-0000-0000-0000-000000000001'), 4::bigint, 'a refused token batch rolls back its event');
+    where user_id = 'aaaaaaaa-0000-0000-0000-000000000001' and bucket = 'issue_token_batch'), 4::bigint, 'a refused token batch rolls back its event');
 select extensions.is((select pg_catalog.count(*) from private.temporary_tokens as t cross join server_tokens_test.clock as c
     where t.user_id = 'aaaaaaaa-0000-0000-0000-000000000001' and t.valid_from = c.current_window), 3::bigint,
     'no fourth token is partially issued in the available first window');
@@ -358,7 +368,7 @@ select extensions.is((select pg_catalog.count(*) from private.temporary_tokens
     where user_id = 'aaaaaaaa-0000-0000-0000-000000000001'),
     (select 4 * (horizon - current_window) / 900 - 1 from server_tokens_test.clock), 'already covered requests store no tokens');
 select extensions.is((select pg_catalog.count(*) from private.account_limit_events
-    where user_id = 'aaaaaaaa-0000-0000-0000-000000000001'), 6::bigint, 'already covered calls still count toward the hourly limit');
+    where user_id = 'aaaaaaaa-0000-0000-0000-000000000001' and bucket = 'issue_token_batch'), 6::bigint, 'already covered calls still count toward the hourly limit');
 
 -- Independent accounts and exactly four tokens per window: 6 assertions.
 set local role authenticated;
@@ -381,7 +391,7 @@ select extensions.ok((select pg_catalog.bool_and(n = 4) from (
     where user_id = 'aaaaaaaa-0000-0000-0000-000000000002' group by valid_from
 ) as counts), 'exactly four unexpired tokens per window are allowed');
 select extensions.is((select pg_catalog.count(*) from private.account_limit_events
-    where user_id = 'aaaaaaaa-0000-0000-0000-000000000002'), 4::bigint, 'the fourth full batch succeeds');
+    where user_id = 'aaaaaaaa-0000-0000-0000-000000000002' and bucket = 'issue_token_batch'), 4::bigint, 'the fourth full batch succeeds');
 set local role authenticated;
 select server_tokens_test.expect_error('select public.issue_token_batch()', 'rate_limited', '', 'a fifth full batch exceeds the window limit');
 reset role;
@@ -389,7 +399,7 @@ select extensions.is((select pg_catalog.count(*) from private.temporary_tokens
     where user_id = 'aaaaaaaa-0000-0000-0000-000000000002'),
     (select 4 * (horizon - current_window) / 900 from server_tokens_test.clock), 'the fifth batch stores nothing');
 select extensions.is((select pg_catalog.count(*) from private.account_limit_events
-    where user_id = 'aaaaaaaa-0000-0000-0000-000000000002'), 4::bigint, 'the fifth batch leaves the successful call count unchanged');
+    where user_id = 'aaaaaaaa-0000-0000-0000-000000000002' and bucket = 'issue_token_batch'), 4::bigint, 'the fifth batch leaves the successful call count unchanged');
 
 -- Expired windows and the hourly boundary: 9 assertions.
 insert into private.temporary_tokens (token_digest, user_id, batch_id, valid_from, valid_until, delete_after)
@@ -422,24 +432,24 @@ end;
 $$;
 reset role;
 select extensions.is((select pg_catalog.count(*) from private.account_limit_events
-    where user_id = 'aaaaaaaa-0000-0000-0000-000000000003'), 19::bigint, 'nineteen hourly calls succeed');
+    where user_id = 'aaaaaaaa-0000-0000-0000-000000000003' and bucket = 'issue_token_batch'), 19::bigint, 'nineteen hourly calls succeed');
 set local role authenticated;
 select server_tokens_test.capture('hour-20', (select horizon from server_tokens_test.clock));
 reset role;
 select extensions.is((select pg_catalog.count(*) from private.account_limit_events
-    where user_id = 'aaaaaaaa-0000-0000-0000-000000000003'), 20::bigint, 'exactly twenty hourly calls succeed');
+    where user_id = 'aaaaaaaa-0000-0000-0000-000000000003' and bucket = 'issue_token_batch'), 20::bigint, 'exactly twenty hourly calls succeed');
 select extensions.is((select window_count from server_tokens_test.batches where label = 'hour-20'), 0, 'the twentieth already covered request succeeds');
 set local role authenticated;
 select server_tokens_test.expect_error(pg_catalog.format('select public.issue_token_batch(%s)', (select horizon from server_tokens_test.clock)),
     'rate_limited', '', 'the twenty-first hourly call is refused even when already covered');
 reset role;
 select extensions.is((select pg_catalog.count(*) from private.account_limit_events
-    where user_id = 'aaaaaaaa-0000-0000-0000-000000000003'), 20::bigint, 'the rejected hourly call rolls back its event');
+    where user_id = 'aaaaaaaa-0000-0000-0000-000000000003' and bucket = 'issue_token_batch'), 20::bigint, 'the rejected hourly call rolls back its event');
 select extensions.is((select pg_catalog.count(*) from private.temporary_tokens
     where user_id = 'aaaaaaaa-0000-0000-0000-000000000003'),
     (select (horizon - current_window) / 900 + 4 from server_tokens_test.clock), 'the hourly limit does not alter stored digests');
 
--- Reusable helper, separate buckets/accounts, rolling minute cutoff: 12 assertions.
+-- Reusable helper, separate buckets/accounts, rolling minute cutoff and pruning.
 select extensions.ok(not private.record_account_event('aaaaaaaa-0000-0000-0000-000000000004', 'receipt-test', 2, interval '1 minute'), 'the helper accepts its first minute event');
 select extensions.ok(exists (select 1 from pg_catalog.pg_locks as l
     where l.pid = pg_catalog.pg_backend_pid() and l.locktype = 'advisory'
@@ -464,16 +474,25 @@ insert into private.account_limit_events (user_id, bucket, occurred_at) values
     ('aaaaaaaa-0000-0000-0000-000000000004', 'receipt-test', pg_catalog.now() - interval '1 minute'),
     ('aaaaaaaa-0000-0000-0000-000000000004', 'receipt-test', pg_catalog.now() - interval '1 minute 1 microsecond'),
     ('aaaaaaaa-0000-0000-0000-000000000004', 'receipt-test', pg_catalog.now() - interval '1 minute' + interval '1 microsecond');
+insert into private.account_limit_events (user_id, bucket, occurred_at) values
+    ('aaaaaaaa-0000-0000-0000-000000000004', 'resolution-test', pg_catalog.now() - interval '2 minutes'),
+    ('aaaaaaaa-0000-0000-0000-000000000001', 'receipt-test', pg_catalog.now() - interval '2 minutes');
 select extensions.ok(private.record_account_event('aaaaaaaa-0000-0000-0000-000000000004', 'receipt-test', 1, interval '1 minute'),
     'the event just inside the rolling span plus the new event exceeds one');
 select extensions.is((select pg_catalog.count(*) from private.account_limit_events
     where user_id = 'aaaaaaaa-0000-0000-0000-000000000004' and bucket = 'receipt-test'
     and occurred_at > pg_catalog.now() - interval '1 minute'), 1::bigint, 'events at the cutoff are excluded and refusal adds no event');
 select extensions.is((select pg_catalog.count(*) from private.account_limit_events
-    where user_id = 'aaaaaaaa-0000-0000-0000-000000000004' and bucket = 'receipt-test'), 3::bigint,
-    'the helper preserves older events for other spans and later cleanup');
+    where user_id = 'aaaaaaaa-0000-0000-0000-000000000004' and bucket = 'receipt-test'), 1::bigint,
+    'the helper prunes older events even when refusing the new event');
+select extensions.is((select pg_catalog.count(*) from private.account_limit_events
+    where user_id = 'aaaaaaaa-0000-0000-0000-000000000004' and bucket = 'resolution-test'), 2::bigint,
+    'minute pruning preserves old events of another bucket');
+select extensions.is((select pg_catalog.count(*) from private.account_limit_events
+    where user_id = 'aaaaaaaa-0000-0000-0000-000000000001' and bucket = 'receipt-test'), 2::bigint,
+    'minute pruning preserves old events of another account');
 
--- Hourly cutoff applies at the API as well: 6 assertions.
+-- Hourly cutoff and pruning apply at the API as well.
 insert into private.account_limit_events (user_id, bucket, occurred_at)
 select 'aaaaaaaa-0000-0000-0000-000000000004', 'issue_token_batch', pg_catalog.now() - interval '1 hour'
 from pg_catalog.generate_series(1, 20);
@@ -488,6 +507,9 @@ select extensions.is((select window_count from server_tokens_test.batches where 
 select extensions.is((select pg_catalog.count(*) from private.account_limit_events
     where user_id = 'aaaaaaaa-0000-0000-0000-000000000004' and bucket = 'issue_token_batch'
     and occurred_at > pg_catalog.now() - interval '1 hour'), 1::bigint, 'only the new event counts after the hour cutoff');
+select extensions.is((select pg_catalog.count(*) from private.account_limit_events
+    where user_id = 'aaaaaaaa-0000-0000-0000-000000000004' and bucket = 'issue_token_batch'),
+    1::bigint, 'token issue prunes its old hour events');
 insert into private.account_limit_events (user_id, bucket, occurred_at)
 select 'aaaaaaaa-0000-0000-0000-000000000004', 'issue_token_batch', pg_catalog.now() - interval '1 hour' + interval '1 microsecond'
 from pg_catalog.generate_series(1, 18);
@@ -505,6 +527,28 @@ reset role;
 select extensions.is((select pg_catalog.count(*) from private.account_limit_events
     where user_id = 'aaaaaaaa-0000-0000-0000-000000000004' and bucket = 'issue_token_batch'
     and occurred_at > pg_catalog.now() - interval '1 hour'), 20::bigint, 'the hourly cutoff refusal is atomic');
+
+-- The limiter API and table constraint share invisible/whitespace absence rules.
+create temporary table limiter_empty_inputs (code_point text primary key, value text not null);
+insert into limiter_empty_inputs values
+    ('U+200B', U&'\200B'), ('U+200C', U&'\200C'), ('U+200D', U&'\200D'),
+    ('U+2060', U&'\2060'), ('U+FEFF', U&'\FEFF'), ('U+3164', U&'\3164'),
+    ('U+115F', U&'\115F'), ('U+1160', U&'\1160'), ('U+FFA0', U&'\FFA0'),
+    ('tab', E'\t'), ('line feed', E'\n'), ('no-break space', U&'\00A0'),
+    ('ideographic space', U&'\3000');
+select server_tokens_test.expect_error(pg_catalog.format(
+    'select private.record_account_event(''aaaaaaaa-0000-0000-0000-000000000004'', %L, 1, interval ''1 minute'')', v.value),
+    'invalid_input', '', v.code_point || ' is not a limiter bucket') from limiter_empty_inputs as v;
+select extensions.throws_ok(pg_catalog.format(
+    'insert into private.account_limit_events (user_id, bucket, occurred_at) values (''aaaaaaaa-0000-0000-0000-000000000004'', %L, pg_catalog.now())', v.value),
+    '23514', null, v.code_point || ' is rejected by the bucket constraint') from limiter_empty_inputs as v;
+select extensions.ok(not private.record_account_event('aaaaaaaa-0000-0000-0000-000000000004',
+    U&'a\200B\200Cb\200D\2060\FEFF\3164\115F\1160\FFA0', 1, interval '1 minute'),
+    'invisible characters within visible bucket text are valid');
+select extensions.is((select e.bucket from private.account_limit_events as e
+    where e.user_id = 'aaaaaaaa-0000-0000-0000-000000000004'
+      and e.bucket = U&'a\200B\200Cb\200D\2060\FEFF\3164\115F\1160\FFA0'),
+    U&'a\200B\200Cb\200D\2060\FEFF\3164\115F\1160\FFA0', 'visible bucket text preserves its invisible characters');
 
 -- Auth deletion removes token and limiter data: 2 assertions.
 delete from auth.users where id = 'aaaaaaaa-0000-0000-0000-000000000004';

@@ -19,8 +19,10 @@ as $$
     delete from private.consumed_nonces as n
     where n.delete_after <= (cleanup_at at time zone 'UTC')::date;
 
+    -- This bucket name must match private.register_time_zone's limiter call.
     delete from private.account_limit_events as e
-    where e.occurred_at < cleanup_at - interval '1 hour';
+    where e.occurred_at < cleanup_at - case when e.bucket = 'register_time_zone'
+        then interval '1 day' else interval '1 hour' end;
 $$;
 
 revoke all on function private.cleanup_expired_data(timestamptz)

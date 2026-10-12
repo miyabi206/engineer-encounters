@@ -143,6 +143,8 @@ declare
     matched_ids uuid[];
     lock_key bigint;
     pair_key integer;
+    locked_nonce_keys bigint[] := '{}'::bigint[];
+    locked_pair_keys integer[] := '{}'::integer[];
     encounter_kind text;
     original_pair_found boolean;
     observation_a bigint;
@@ -198,6 +200,7 @@ begin
         order by 1
     loop
         perform pg_catalog.pg_advisory_xact_lock(lock_key);
+        locked_nonce_keys := pg_catalog.array_append(locked_nonce_keys, lock_key);
     end loop;
     -- Pair locks (in the separate two-integer advisory namespace) also serialize
     -- different exchanges of one pair while their matched evidence is removed.
@@ -213,6 +216,7 @@ begin
         order by 1
     loop
         perform pg_catalog.pg_advisory_xact_lock(31003, pair_key);
+        locked_pair_keys := pg_catalog.array_append(locked_pair_keys, pair_key);
     end loop;
 
     -- Store the entire call before resolving, including joined-before-original.
@@ -308,9 +312,7 @@ begin
                 elsif start_seconds <= server_seconds - 172800 then
                     status := 'expired';
                 elsif exists (select 1 from private.consumed_nonces as n
-                    where n.exchange_digest in (
-                        private.receipt_exchange_digest(nonce, own_digest, peer_digest),
-                        private.receipt_exchange_digest(prior_nonce, own_digest, peer_digest))
+                    where n.exchange_digest = private.receipt_exchange_digest(nonce, own_digest, peer_digest)
                       and n.delete_after > utc_day) then
                     status := 'consumed';
                 elsif exists (select 1 from private.encounter_candidates as c
@@ -385,10 +387,17 @@ begin
         select c.* into a from private.encounter_candidates as c
         where c.nonce_digest = nonce and c.uploader_id = caller and c.expires_at > server_time;
         if not found then continue; end if;
+        -- Joined rows discovered through an original may name locks absent from
+        -- this call. Defer them rather than taking more locks out of order.
+        if not (pg_catalog.hashtextextended(pg_catalog.encode(a.nonce_digest, 'hex'), 0) = any(locked_nonce_keys))
+            or (a.prior_nonce_digest is not null and not (
+                pg_catalog.hashtextextended(pg_catalog.encode(a.prior_nonce_digest, 'hex'), 0) = any(locked_nonce_keys)))
+            or not (pg_catalog.hashtext(least(a.uploader_id, a.peer_id)::text || ':'
+                || greatest(a.uploader_id, a.peer_id)::text) = any(locked_pair_keys)) then
+            continue;
+        end if;
         if exists (select 1 from private.consumed_nonces as n
-            where n.exchange_digest in (
-                private.receipt_exchange_digest(nonce, a.start_own_token_digest, a.start_peer_token_digest),
-                private.receipt_exchange_digest(a.prior_nonce_digest, a.start_own_token_digest, a.start_peer_token_digest))
+            where n.exchange_digest = private.receipt_exchange_digest(nonce, a.start_own_token_digest, a.start_peer_token_digest)
               and n.delete_after > utc_day) then
             continue;
         end if;

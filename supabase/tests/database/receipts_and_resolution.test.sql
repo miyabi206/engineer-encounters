@@ -115,6 +115,60 @@ begin
 end;
 $$;
 
+-- Twelve assertions per real upload flow, with and without token rotation and
+-- server-backed sessions. No manually manufactured prior tombstone is used.
+create function receipts_test.consumed_original_flow(test_label text, rotates boolean, in_session boolean)
+returns setof text language plpgsql set search_path = pg_catalog, extensions as $$
+declare
+    original_seconds bigint := (select c.start_seconds from receipts_test.clock as c)
+        - case when rotates then 0 else 120 end;
+    joined_seconds bigint := original_seconds + 120;
+begin
+    perform receipts_test.reset_evidence();
+    perform pg_catalog.set_config('request.jwt.claims',
+        pg_catalog.jsonb_build_object('sub', receipts_test.user_id(1), 'role', 'authenticated')::text, true);
+    return next receipts_test.expect(test_label || ' original central',
+        pg_catalog.jsonb_build_array(receipts_test.receipt(603, 1, original_seconds, 120, joined_seconds)), array['candidate']);
+    perform pg_catalog.set_config('request.jwt.claims',
+        pg_catalog.jsonb_build_object('sub', receipts_test.user_id(2), 'role', 'authenticated')::text, true);
+    return next receipts_test.expect(test_label || ' original resolves',
+        pg_catalog.jsonb_build_array(receipts_test.receipt(603, 2, original_seconds, 120, joined_seconds)), array['resolved']);
+    return next extensions.is((select pg_catalog.count(*) from private.encounter_candidates), 0::bigint,
+        test_label || ' originals removed');
+    return next extensions.ok(exists (select 1 from private.consumed_nonces as n
+        where n.exchange_digest = receipts_test.exchange_digest(603, 1, 2, original_seconds)),
+        test_label || ' original exchange tombstone exists');
+    return next receipts_test.expect(test_label || ' original replay',
+        pg_catalog.jsonb_build_array(receipts_test.receipt(603, 2, original_seconds, 120, joined_seconds)), array['consumed']);
+    return next extensions.is(receipts_test.token(1, original_seconds) <> receipts_test.token(1, joined_seconds),
+        rotates, test_label || ' uses the intended token windows');
+    if in_session then
+        insert into private.sessions (user_id, starts_at, expires_at)
+        select receipts_test.user_id(side), pg_catalog.to_timestamp(joined_seconds::double precision) - interval '1 minute',
+            pg_catalog.to_timestamp(joined_seconds::double precision) + interval '1 minute'
+        from pg_catalog.generate_series(1, 2) as sides(side);
+    end if;
+    perform pg_catalog.set_config('request.jwt.claims',
+        pg_catalog.jsonb_build_object('sub', receipts_test.user_id(1), 'role', 'authenticated')::text, true);
+    return next receipts_test.expect(test_label || ' joined central',
+        pg_catalog.jsonb_build_array(receipts_test.receipt(604, 1, joined_seconds, 120, null, 603, in_session)), array['candidate']);
+    perform pg_catalog.set_config('request.jwt.claims',
+        pg_catalog.jsonb_build_object('sub', receipts_test.user_id(2), 'role', 'authenticated')::text, true);
+    return next receipts_test.expect(test_label || ' joined peripheral',
+        pg_catalog.jsonb_build_array(receipts_test.receipt(604, 2, joined_seconds, 120, null, 603, in_session)),
+        array[case when in_session then 'resolved' else 'candidate' end]);
+    return next extensions.is((select pg_catalog.count(*) from private.encounters as e where e.kind = 'ambient'),
+        1::bigint, test_label || ' missing originals cannot produce another ambient encounter');
+    return next extensions.is((select pg_catalog.count(*) from private.encounters as e where e.kind = 'session'),
+        case when in_session then 1::bigint else 0::bigint end, test_label || ' server sessions qualify independently');
+    return next extensions.is((select pg_catalog.count(*) from private.encounter_candidates),
+        case when in_session then 0::bigint else 2::bigint end, test_label || ' joined storage follows qualification');
+    return next receipts_test.expect(test_label || ' joined retry',
+        pg_catalog.jsonb_build_array(receipts_test.receipt(604, 2, joined_seconds, 120, null, 603, in_session)),
+        array[case when in_session then 'consumed' else 'candidate' end]);
+end;
+$$;
+
 insert into auth.users (id, aud, role, email)
 select receipts_test.user_id(n), 'authenticated', 'authenticated', 'receipt-fixture-' || n || '@example.invalid'
 from pg_catalog.generate_series(1, 8) as n;
@@ -130,7 +184,7 @@ cross join lateral (values (c.start_seconds), (c.start_seconds + 120), (c.start_
     (c.current_seconds), (c.current_seconds + 300), (c.current_seconds + 301),
     (c.current_seconds - 172800), (c.current_seconds - 172799)) as times(t);
 
-select extensions.plan(407);
+select extensions.plan(472);
 -- Catalog, default denial, date-only confirmed storage and RPC privileges.
 select extensions.ok(pg_catalog.to_regclass('private.' || name) is not null, name || ' exists') from receipts_test.tables;
 select extensions.ok(c.relrowsecurity, t.name || ' enables RLS') from receipts_test.tables as t join pg_catalog.pg_class as c on c.oid = ('private.' || t.name)::regclass;
@@ -194,6 +248,35 @@ set local "request.jwt.claims" = '{"sub":"cccccccc-0000-0000-0000-000000000001",
 select receipts_test.expect_error('select public.submit_receipts(pg_catalog.jsonb_build_array(receipts_test.receipt(10, 1, null, 0, null, null, false, false, null, 0)))', 'account_not_ready', '', 'suspended caller cannot upload');
 reset role;
 update private.profiles set moderation_state = 'active' where user_id = receipts_test.user_id(1);
+-- The first successful call must hold exactly account, both named nonces, and
+-- pair locks. Earlier errors roll their locks back with their subtransactions.
+set local role authenticated;
+select receipts_test.expect('one call locks its own and prior exchange',
+    pg_catalog.jsonb_build_array(receipts_test.receipt(9, 1, null, 0, null, 8)), array['candidate']);
+reset role;
+select extensions.ok(exists (select 1 from pg_catalog.pg_locks as l
+    where l.pid = pg_catalog.pg_backend_pid() and l.locktype = 'advisory' and l.granted
+      and l.mode = 'ExclusiveLock' and l.objsubid = 2 and l.classid = 31001::oid
+      and l.objid = (pg_catalog.hashtext(receipts_test.user_id(1)::text)::bigint & 4294967295::bigint)::oid),
+    'submit holds the account lock');
+select extensions.is((select pg_catalog.count(*) from pg_catalog.pg_locks as l
+    join (select pg_catalog.hashtextextended(pg_catalog.encode(receipts_test.digest(n), 'hex'), 0) as key
+        from (values (8), (9)) as nonces(n)) as keys
+      on l.classid = ((keys.key >> 32) & 4294967295::bigint)::oid
+     and l.objid = (keys.key & 4294967295::bigint)::oid
+    where l.pid = pg_catalog.pg_backend_pid() and l.locktype = 'advisory'
+      and l.granted and l.mode = 'ExclusiveLock' and l.objsubid = 1),
+    2::bigint, 'submit holds own and prior nonce locks in the bigint key space');
+select extensions.ok(exists (select 1 from pg_catalog.pg_locks as l
+    where l.pid = pg_catalog.pg_backend_pid() and l.locktype = 'advisory' and l.granted
+      and l.mode = 'ExclusiveLock' and l.objsubid = 2 and l.classid = 31003::oid
+      and l.objid = (pg_catalog.hashtext(receipts_test.user_id(1)::text || ':'
+          || receipts_test.user_id(2)::text)::bigint & 4294967295::bigint)::oid),
+    'submit holds the pair lock in its separate namespace');
+select extensions.is((select pg_catalog.count(*) from pg_catalog.pg_locks as l
+    where l.pid = pg_catalog.pg_backend_pid() and l.locktype = 'advisory' and l.granted),
+    4::bigint, 'one submit takes exactly the account, two nonce and pair locks');
+select receipts_test.reset_evidence();
 -- Shape, ownership, window and freshness order. All diagnostics contain statuses only.
 set local role authenticated;
 set local "request.jwt.claims" = '{"sub":"cccccccc-0000-0000-0000-000000000001","role":"authenticated"}';
@@ -487,9 +570,54 @@ reset role;
 select extensions.is((select pg_catalog.count(*) from private.encounters), 0::bigint, 'one original withheld still cannot confirm');
 set local role authenticated;
 set local "request.jwt.claims" = '{"sub":"cccccccc-0000-0000-0000-000000000002","role":"authenticated"}';
-select receipts_test.expect('last original triggers prior joined resolution', pg_catalog.jsonb_build_array(receipts_test.receipt(320, 2, null, 0, null, null, false, false, null, 0)), array['resolved']);
+select receipts_test.expect('last original defers joined row without its nonce lock in this call', pg_catalog.jsonb_build_array(receipts_test.receipt(320, 2, null, 0, null, null, false, false, null, 0)), array['candidate']);
 reset role;
-select extensions.is((select pg_catalog.count(*) from private.consumed_nonces), 2::bigint, 'split calls consume both nonces');
+select extensions.is((select pg_catalog.count(*) from private.consumed_nonces), 0::bigint, 'unlocked joined row consumes no nonce');
+select extensions.is((select pg_catalog.count(*) from private.encounter_candidates), 4::bigint,
+    'unlocked joined row and its originals remain stored');
+set local role authenticated;
+select receipts_test.expect('joined retry takes both nonce locks and resolves',
+    pg_catalog.jsonb_build_array(receipts_test.receipt(321, 2,
+        (select start_seconds from receipts_test.clock) + 120, 120, null, 320)), array['resolved']);
+reset role;
+select extensions.is((select pg_catalog.count(*) from private.consumed_nonces), 2::bigint, 'locked retry consumes both nonces');
+-- A stored joined session row may be visited through another pair's original.
+-- Name both nonces in this call, but derive only the different pair lock.
+select receipts_test.reset_evidence();
+set local role authenticated;
+set local "request.jwt.claims" = '{"sub":"cccccccc-0000-0000-0000-000000000001","role":"authenticated"}';
+select receipts_test.expect('pair guard joined central before sessions', pg_catalog.jsonb_build_array(
+    receipts_test.receipt(986, 1, (select start_seconds from receipts_test.clock) + 120, 0, null, 985, true)),
+    array['candidate']);
+set local "request.jwt.claims" = '{"sub":"cccccccc-0000-0000-0000-000000000002","role":"authenticated"}';
+select receipts_test.expect('pair guard joined peripheral before sessions', pg_catalog.jsonb_build_array(
+    receipts_test.receipt(986, 2, (select start_seconds from receipts_test.clock) + 120, 0, null, 985, true)),
+    array['candidate']);
+reset role;
+insert into private.sessions (user_id, starts_at, expires_at)
+select receipts_test.user_id(side), pg_catalog.to_timestamp(c.start_seconds::double precision),
+    pg_catalog.to_timestamp((c.start_seconds + 300)::double precision)
+from receipts_test.clock as c cross join pg_catalog.generate_series(1, 2) as sides(side);
+set local role authenticated;
+set local "request.jwt.claims" = '{"sub":"cccccccc-0000-0000-0000-000000000001","role":"authenticated"}';
+select receipts_test.expect('different pair cannot resolve a stored row even with both nonce locks',
+    pg_catalog.jsonb_build_array(receipts_test.receipt(985, 1, null, 0, null, null, false, false, 3),
+        pg_catalog.jsonb_build_object('id', receipts_test.user_id(9861), 'exchange_nonce', receipts_test.hex(986))),
+    array['candidate', 'rejected']);
+reset role;
+select extensions.is((select pg_catalog.count(*) from private.encounters), 0::bigint,
+    'missing pair lock defers an otherwise qualifying session');
+select extensions.is((select pg_catalog.count(*) from private.consumed_nonces), 0::bigint,
+    'missing pair lock creates no tombstone');
+select extensions.is((select pg_catalog.count(*) from private.encounter_candidates), 3::bigint,
+    'missing pair lock preserves both joined rows and the different original');
+set local role authenticated;
+select receipts_test.expect('retry with the stored pair lock resolves the session', pg_catalog.jsonb_build_array(
+    receipts_test.receipt(986, 1, (select start_seconds from receipts_test.clock) + 120, 0, null, 985, true)),
+    array['resolved']);
+reset role;
+select extensions.is((select pg_catalog.count(*) from private.encounter_candidates), 1::bigint,
+    'session resolution preserves the original belonging to another pair');
 reset role;
 select receipts_test.reset_evidence();
 set local role authenticated;
@@ -937,12 +1065,15 @@ set local role authenticated;
 set local "request.jwt.claims" = '{"sub":"cccccccc-0000-0000-0000-000000000001","role":"authenticated"}';
 select receipts_test.expect('expired token digest cannot validate ownership', pg_catalog.jsonb_build_array(pg_catalog.jsonb_set(receipts_test.receipt(600, 1, null, 0, null, null, false, false, null, 0), '{start,own_token}', pg_catalog.to_jsonb(receipts_test.hex(600000)))), array['rejected']);
 reset role;
-insert into private.consumed_nonces values (receipts_test.exchange_digest(601), (pg_catalog.now() at time zone 'UTC')::date), (receipts_test.exchange_digest(602), (pg_catalog.now() at time zone 'UTC')::date + 1), (receipts_test.exchange_digest(603, 1, 2, (select start_seconds from receipts_test.clock) + 120), (pg_catalog.now() at time zone 'UTC')::date + 1);
+insert into private.consumed_nonces values (receipts_test.exchange_digest(601), (pg_catalog.now() at time zone 'UTC')::date), (receipts_test.exchange_digest(602), (pg_catalog.now() at time zone 'UTC')::date + 1);
 set local role authenticated;
 set local "request.jwt.claims" = '{"sub":"cccccccc-0000-0000-0000-000000000001","role":"authenticated"}';
 select receipts_test.expect('expired tombstone ignored at its UTC date', pg_catalog.jsonb_build_array(receipts_test.receipt(601, 1, null, 0, null, null, false, false, null, 0)), array['candidate']);
 select receipts_test.expect('unexpired tombstone rejects replay', pg_catalog.jsonb_build_array(receipts_test.receipt(602, 1, null, 0, null, null, false, false, null, 0)), array['consumed']);
-select receipts_test.expect('consumed prior rejects new joined nonce', pg_catalog.jsonb_build_array(receipts_test.receipt(604, 1, (select start_seconds from receipts_test.clock) + 120, 120, null, 603, false, false, null, 0)), array['consumed']);
+reset role;
+select receipts_test.consumed_original_flow(v.label, v.rotates, v.in_session)
+from (values ('rotated ambient', true, false), ('rotated session', true, true),
+    ('same-window ambient', false, false), ('same-window session', false, true)) as v(label, rotates, in_session);
 reset role;
 select receipts_test.reset_evidence();
 set local role authenticated;
@@ -985,6 +1116,12 @@ set local role authenticated;
 set local "request.jwt.claims" = '{"sub":"cccccccc-0000-0000-0000-000000000001","role":"authenticated"}';
 select receipts_test.expect('events at minute cutoff excluded', pg_catalog.jsonb_build_array(receipts_test.receipt(750, 1, null, 0, null, null, false, false, null, 0)), array['candidate']);
 reset role;
+select extensions.is((select pg_catalog.count(*) from private.account_limit_events
+    where user_id = receipts_test.user_id(1) and bucket = 'submit_receipts'), 1::bigint,
+    'submit limiter deletes its old minute events');
+select extensions.is((select pg_catalog.count(*) from private.account_limit_events
+    where user_id = receipts_test.user_id(2) and bucket = 'submit_receipts'), 1::bigint,
+    'submit limiter preserves another account old events');
 -- 30 qualifying resolutions/minute: over-limit evidence remains candidate without a new event.
 reset role;
 select receipts_test.reset_evidence();
@@ -1013,7 +1150,7 @@ set local role authenticated;
 set local "request.jwt.claims" = '{"sub":"cccccccc-0000-0000-0000-000000000001","role":"authenticated"}';
 select receipts_test.expect('later call resolves deferred evidence', pg_catalog.jsonb_build_array(receipts_test.receipt(761, 1, null, 120, (select start_seconds from receipts_test.clock) + 120, null, false, false, null, 0)), array['resolved']);
 reset role;
-select extensions.is((select pg_catalog.count(*) from private.account_limit_events where user_id = receipts_test.user_id(1) and bucket = 'resolve_receipts' and occurred_at > pg_catalog.now() - interval '1 minute'), 1::bigint, 'new minute allows one successful resolution attempt');
+select extensions.is((select pg_catalog.count(*) from private.account_limit_events where user_id = receipts_test.user_id(1) and bucket = 'resolve_receipts'), 1::bigint, 'resolution limiter deletes all previous minute instants');
 reset role;
 select receipts_test.reset_evidence();
 set local role authenticated;

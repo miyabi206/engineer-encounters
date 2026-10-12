@@ -65,12 +65,17 @@ select extensions.is((select pg_catalog.count(*) from unit3_rpc_signatures as f
 
 select extensions.ok(not exists (
     select 1 from pg_catalog.pg_proc as p
-    join unit3_rpc_signatures as f on p.oid = pg_catalog.to_regprocedure(f.signature)
-    where case when r.role_name = 'PUBLIC' then exists (
+    where p.pronamespace = 'public'::regnamespace
+      and not exists (
+          select 1 from pg_catalog.pg_depend as d
+          where d.classid = 'pg_catalog.pg_proc'::regclass and d.objid = p.oid
+            and d.refclassid = 'pg_catalog.pg_extension'::regclass and d.deptype = 'e'
+      )
+      and case when r.role_name = 'PUBLIC' then exists (
         select 1 from pg_catalog.aclexplode(coalesce(p.proacl, pg_catalog.acldefault('f', p.proowner))) as a
         where a.grantee = 0 and a.privilege_type = 'EXECUTE'
     ) else pg_catalog.has_function_privilege(r.role_name, p.oid, 'execute') end
-), r.role_name || ' cannot execute any Unit 3 public RPC')
+), r.role_name || ' cannot execute any non-extension public function')
 from (values ('PUBLIC'), ('anon'), ('service_role')) as r(role_name);
 
 select * from extensions.finish();
