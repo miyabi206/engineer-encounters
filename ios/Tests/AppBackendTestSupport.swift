@@ -138,7 +138,7 @@ func appBackendLongBatch() throws -> TokenBatch {
 /// Held requests deliberately ignore cancellation to exercise stale-result fences.
 actor ControlledAppBackendTransport: HTTPTransport {
     enum Reply: Sendable {
-        case response(HTTPResponse), failure, held
+        case response(HTTPResponse), failure, cancelled, held
     }
     private var plans: [String: [Reply]]
     private var requests: [URLRequest] = []
@@ -154,6 +154,7 @@ actor ControlledAppBackendTransport: HTTPTransport {
         switch reply {
         case .response(let response): return response
         case .failure: throw BackendError.transportFailure
+        case .cancelled: throw CancellationError()
         case .held: return try await withCheckedThrowingContinuation { held.append((path, $0)) }
         }
     }

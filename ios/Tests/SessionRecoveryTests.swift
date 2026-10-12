@@ -121,7 +121,7 @@ final class SessionRecoveryTests: XCTestCase {
         XCTAssertFalse(composition.status.discoveryOn)
     }
 
-    func testHeldSignInAndRejectedAuthPreserveThePreviousSessionTokensAndReceipts() async throws {
+    func testSignInIsRefusedBeforeIOWhileAnotherAccountIsPresent() async throws {
         let other = UUID()
         let transport = ControlledAppBackendTransport([
             "register_time_zone": [.response(appAccountOK())], "signin": [.held]
@@ -134,8 +134,8 @@ final class SessionRecoveryTests: XCTestCase {
         let oldRuntime = composition.runtime
         let receipt = EncounterSamples.receipt()
         try await queue.enqueue(receipt)
-        let signingIn = Task { try await recoverySignIn(composition) }
-        try await appBackendEventually { await transport.isHeld("signin") }
+        do { try await recoverySignIn(composition); XCTFail("A present session must refuse sign-in") }
+        catch { XCTAssertEqual(error as? BackendError, .invalidRequest) }
         let before = try await sessions.load()
         let retainedTokens = try await tokens.load()
         let retainedReceipts = try await queue.pending()
@@ -143,9 +143,8 @@ final class SessionRecoveryTests: XCTestCase {
         XCTAssertNotNil(retainedTokens)
         XCTAssertEqual(retainedReceipts, [receipt])
         XCTAssertTrue(composition.runtime === oldRuntime)
-        await transport.release("signin", with: HTTPResponse(data: Data(), statusCode: 500))
-        do { try await signingIn.value; XCTFail("Rejected Auth must throw") }
-        catch { XCTAssertEqual(error as? BackendError, .transportFailure) }
+        let signInCalls = await transport.count("signin")
+        XCTAssertEqual(signInCalls, 0)
         XCTAssertEqual(composition.account.state, .signedIn(other))
         XCTAssertTrue(composition.runtime === oldRuntime)
         let after = try await sessions.load()
@@ -156,7 +155,7 @@ final class SessionRecoveryTests: XCTestCase {
         let transport = ControlledAppBackendTransport([
             "register_time_zone": [.response(appAccountOK())], "signin": [.held]
         ])
-        let sessions = InMemorySessionStore(session: try appBackendTestSession())
+        let sessions = InMemorySessionStore()
         let composition = makeRecoveryComposition(transport: transport, sessions: sessions)
         await composition.waitForRestoration()
         let signingIn = Task { try await recoverySignIn(composition) }
@@ -268,12 +267,11 @@ final class SessionRecoveryTests: XCTestCase {
         }
     }
 
-    func testSignInCleanupFailureRetainsOldAccountAndPersistenceFailureKeepsNewAccount() async throws {
+    func testSignInCleanupFailureRetainsSignedOutStateAndPersistenceFailureKeepsNewAccount() async throws {
         for failingStore in ["tokens", "receipts", "clearSession", "saveSession"] {
-            let oldUser = UUID()
             let transport = ControlledAppBackendTransport(["register_time_zone": [.response(appAccountOK()), .response(appAccountOK())],
                 "signin": [.response(appBackendAuthResponse())], "accept_declarations": [.response(appAccountOK())]])
-            let sessions = FailingAppSessionStore(session: try appBackendTestSession(userID: oldUser),
+            let sessions = FailingAppSessionStore(
                 failSave: failingStore == "saveSession", failClear: failingStore == "clearSession")
             let tokens = FailingAppTokenStore(batch: try appBackendLongBatch())
             let queue = FailingAppReceiptQueue()
@@ -284,11 +282,16 @@ final class SessionRecoveryTests: XCTestCase {
             await queue.setClearFailure(failingStore == "receipts")
             do { try await recoverySignIn(composition); XCTFail("Storage failure must surface") }
             catch { XCTAssertEqual(error as? BackendError, .storageFailure) }
-            let expectedUser = ["tokens", "receipts"].contains(failingStore) ? oldUser : appBackendTestUser
-            XCTAssertEqual(composition.account.state, .signedIn(expectedUser))
-            let actualSession = try await composition.account.sessions?.session()
-            XCTAssertEqual(actualSession?.userID, expectedUser)
-            XCTAssertTrue(composition.runtime?.tokenIssuer is ServerTokenIssuer)
+            if ["tokens", "receipts"].contains(failingStore) {
+                XCTAssertEqual(composition.account.state, .signedOut)
+                do { _ = try await composition.account.sessions?.session(); XCTFail("Cleanup failure must retain signed-out storage") }
+                catch { XCTAssertEqual(error as? BackendError, .notAuthenticated) }
+            } else {
+                XCTAssertEqual(composition.account.state, .signedIn(appBackendTestUser))
+                let actualSession = try await composition.account.sessions?.session()
+                XCTAssertEqual(actualSession?.userID, appBackendTestUser)
+                XCTAssertTrue(composition.runtime?.tokenIssuer is ServerTokenIssuer)
+            }
             XCTAssertFalse(composition.runtime === oldRuntime)
             await composition.refreshLocalSummary()
             XCTAssertNotNil(composition.status.pendingReceiptCount)

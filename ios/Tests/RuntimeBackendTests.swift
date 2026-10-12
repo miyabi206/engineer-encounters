@@ -82,19 +82,39 @@ final class RuntimeBackendTests: XCTestCase {
 
     func testSignedOutNeverUploadsOrSchedulesForAnyTrigger() async throws {
         let queue = InMemoryReceiptQueue()
-        try await queue.enqueue(appBackendFinalReceipt())
-        let transport = AppBackendTransport()
+        let transport = AppBackendTransport(Array(repeating: HTTPResponse(data: Data("[]".utf8), statusCode: 200), count: 4))
         let scheduler = ManualReceiptUploadScheduler()
-        let runtime = try appBackendRuntime(transport: transport, queue: queue, scheduler: scheduler, signedIn: false)
-        await runtime.start()
+        let clock = ManualEncounterClock()
+        // Wire the real composition and backend. The application, rather than this test,
+        // must decide that a signed-out runtime has no upload route.
+        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(),
+            transport: transport, sessionStore: InMemorySessionStore(),
+            serverTokenStore: InMemoryTokenBatchStore(), signedOutTokenStore: InMemoryTokenBatchStore(),
+            queueOpener: { queue }, transportFactory: {
+                await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)
+            }, clock: clock, uploadScheduler: scheduler, now: { appBackendTestNow })
+        await composition.waitForRestoration()
+        XCTAssertEqual(composition.account.state, .signedOut)
+        XCTAssertNotNil(composition.account.service)
+        try await queue.enqueue(appBackendFinalReceipt())
+        await composition.setParticipation(true)
+        let runtime = try XCTUnwrap(composition.runtime)
         await runtime.refresh()
         runtime.receive(.exchangeCompleted(role: .central, nonceDigest: "fixture-digest"))
         runtime.receive(.evidenceReached(role: .central, nonceDigest: "fixture-digest", observedDuration: 120))
         await runtime.refreshLocalSummary()
+        await composition.setParticipation(false)
         await runtime.invalidateForAccountChange()
         let requests = await transport.recorded()
         XCTAssertTrue(requests.isEmpty)
         XCTAssertTrue(scheduler.jobs.isEmpty)
+        // Positive control: the same wired transport and queue do upload for a live account.
+        let signedIn = try appBackendRuntime(transport: transport, queue: queue, scheduler: scheduler)
+        await signedIn.refresh()
+        try await appBackendEventually { !(await transport.recorded()).isEmpty }
+        let controlRequests = await transport.recorded()
+        XCTAssertEqual(controlRequests.map { $0.url?.lastPathComponent }, ["submit_receipts"])
+        await signedIn.invalidateForAccountChange()
     }
 
     func testInjectedSessionFlagReachesEngineReceipts() async throws {

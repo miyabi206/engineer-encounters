@@ -81,11 +81,11 @@ final class AppComposition: ObservableObject {
             client = makeClient(sessions)
             account = AccountModel(sessions: sessions, service: OwnAccountService(client: makeClient(sessions)),
                 sessionStore: store, sessionFactory: factory,
-                serviceFactory: { OwnAccountService(client: makeClient($0)) }, timeZone: timeZone)
+                serviceFactory: { OwnAccountService(client: makeClient($0)) }, defaults: defaults, timeZone: timeZone)
         } else {
             clientFactory = nil
             client = nil
-            account = AccountModel(sessions: nil, service: nil, timeZone: timeZone)
+            account = AccountModel(sessions: nil, service: nil, defaults: defaults, timeZone: timeZone)
         }
         #if DEVELOPMENT_BUILD || INTERNAL_BUILD
         trialLog = TrialLog()

@@ -26,7 +26,8 @@ settings:
       SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEVELOPMENT_BUILD
       EXCLUDED_SOURCE_FILE_NAMES: ""
       INFOPLIST_PREPROCESSOR_DEFINITIONS: DEVELOPMENT_BACKEND_NETWORKING=1
-    # App/Development also contains DevelopmentWelcomeView; its control and text stay Development-only.
+    # DevelopmentWelcomeView stays Development-only. DiagnosticsParticipationControl is
+    # in App/Diagnostics, available in Development/Internal and excluded from Release.
     Internal:
       BACKEND_URL: $(INTERNAL_BACKEND_URL)
       BACKEND_PUBLIC_KEY: $(INTERNAL_BACKEND_PUBLIC_KEY)

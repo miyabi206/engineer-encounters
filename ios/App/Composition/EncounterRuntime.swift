@@ -7,6 +7,7 @@ import Foundation
 
 struct EncounterRuntimeStatus: Sendable, Equatable {
     var radioAvailability: RadioAvailability = .unknown
+    var bluetoothPoweredOff = false
     var discoveryOn = false
     var pausedForLackOfToken = false
     var storageUnavailable = false
@@ -22,6 +23,7 @@ final class EncounterRuntime: ObservableObject {
     private var queue: (any ReceiptQueue)?
     private var engine: EncounterEngine?
     private var radioTransport: RuntimeBluetoothTransport?
+    private var radioObserver: BluetoothRadioObserver?
     private let tokenStore: any TokenBatchStore
     private let transportFactory: @MainActor () async -> any BluetoothTransport
     private let queueOpener: @MainActor () async throws -> any ReceiptQueue
@@ -171,6 +173,7 @@ final class EncounterRuntime: ObservableObject {
         scheduledUpload = nil
         eventTask?.cancel()
         radioTransport?.invalidate()
+        radioObserver = nil
     }
 
     func invalidateForAccountChange() async {
@@ -255,6 +258,13 @@ final class EncounterRuntime: ObservableObject {
             guard let self, self.validForAccount else { return }
             self.status.radioAvailability = availability
         }
+        let receive: @MainActor (RadioAvailability, Bool) -> Void = { [weak self] availability, poweredOff in
+            guard let self, self.validForAccount else { return }
+            self.status.radioAvailability = availability
+            self.status.bluetoothPoweredOff = poweredOff
+        }
+        if let reporting = transport as? any RuntimeBluetoothStateReporting { reporting.observeRadioState(receive) }
+        else if transport is CoreBluetoothTransport { radioObserver = BluetoothRadioObserver(receive: receive) }
         radioTransport = relay
         if !participationOn { await relay.execute(.stopDiscovery) }
         let engine = EncounterEngine(transport: relay, tokenProvider: TokenProvider(store: tokenStore),

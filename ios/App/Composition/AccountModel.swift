@@ -4,7 +4,7 @@ import Foundation
 import EncounterUI
 
 enum AccountState: Equatable {
-    case unavailable, signedOut, signedInPending(UUID?), signedIn(UUID)
+    case unavailable, restoring, signedOut, signedInPending(UUID?), signedIn(UUID)
 
     var isSignedIn: Bool {
         switch self {
@@ -17,7 +17,7 @@ enum AccountState: Equatable {
 @MainActor
 final class AccountModel: ObservableObject {
     @Published private(set) var state: AccountState {
-        didSet { if state != oldValue { profile = nil } }
+        didSet { if state != oldValue { profile = nil; profileIsStale = false } }
     }
     private(set) var sessions: SessionManager?
     private(set) var service: OwnAccountService?
@@ -34,6 +34,9 @@ final class AccountModel: ObservableObject {
     private var pendingDeclarations: Declarations?
     private var setupTask: (id: UUID, task: Task<Void, any Error>)?
     @Published var profile: OwnProfileState?
+    @Published private(set) var profileIsStale = false
+    let onboardingCompletion: OnboardingCompletionStore
+    var sessionGeneration: UUID { generation }
     private let timeZone: @MainActor () -> String
     private var registeredTimeZone: String?
     private var operationTask: Task<Void, any Error>?
@@ -44,6 +47,7 @@ final class AccountModel: ObservableObject {
          sessionStore: (any SessionStore)? = nil,
          sessionFactory: (@MainActor (any SessionStore) -> SessionManager)? = nil,
          serviceFactory: (@MainActor (SessionManager) -> OwnAccountService)? = nil,
+         defaults: UserDefaults = .standard,
          timeZone: @escaping @MainActor () -> String = { TimeZone.current.identifier }) {
         self.sessions = sessions
         self.service = service
@@ -51,7 +55,8 @@ final class AccountModel: ObservableObject {
         self.sessionFactory = sessionFactory
         self.serviceFactory = serviceFactory
         self.timeZone = timeZone
-        state = sessions == nil ? .unavailable : .signedOut
+        onboardingCompletion = OnboardingCompletionStore(defaults: defaults)
+        state = sessions == nil ? .unavailable : .restoring
     }
 
     func restore() async {
@@ -84,10 +89,11 @@ final class AccountModel: ObservableObject {
         await refresh()
     }
 
-    /// Authenticate in isolated storage; an unsuccessful provider request leaves the old account intact.
+    /// Authenticate only when signed out, using isolated storage until session cleanup completes.
     func signIn(using request: AuthRequest, isAdult: Bool, acceptsTermsAndPrivacy: Bool,
                 termsVersion: String, privacyVersion: String) async throws {
         guard isAdult && acceptsTermsAndPrivacy else { throw BackendError.declarationRequired }
+        guard state == .signedOut else { throw BackendError.invalidRequest }
         guard let oldSessions = sessions, let sessionStore, let sessionFactory, let serviceFactory else {
             throw BackendError.invalidRequest
         }
@@ -101,6 +107,7 @@ final class AccountModel: ObservableObject {
         var storageFailed = false
         try await serialize {
             guard authGeneration == self.generation else { throw BackendError.notAuthenticated }
+            guard self.state == .signedOut else { throw BackendError.invalidRequest }
             self.invalidateRefresh()
             do { try await self.prepareForSessionChange() }
             catch {
@@ -141,6 +148,7 @@ final class AccountModel: ObservableObject {
             do { try await sessions.clear() } catch { storageFailed = true }
             self.registeredTimeZone = nil
             self.pendingDeclarations = nil
+            self.onboardingCompletion.clear()
             self.state = .signedOut
             await self.sessionDidChange(true)
             if storageFailed { throw BackendError.storageFailure }
@@ -212,9 +220,19 @@ final class AccountModel: ObservableObject {
             try? await sessions.clear()
             self.registeredTimeZone = nil
             self.pendingDeclarations = nil
+            self.onboardingCompletion.clear()
             self.state = .signedOut
             await self.sessionDidChange(recreate)
         }
+    }
+
+    func rejectDeadSession(generation: UUID) async {
+        await discardDeadSession(epoch: generation, recreate: true)
+    }
+
+    func publishProfile(_ value: OwnProfileState, stale: Bool) {
+        profileIsStale = stale
+        profile = value
     }
 
     private func serialize(_ operation: @escaping @MainActor () async throws -> Void) async throws {

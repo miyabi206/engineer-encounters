@@ -21,75 +21,113 @@ extension AccountModel {
     func loadOwnProfile() async throws -> OwnProfileState {
         let fresh = try await ownAccountOperation { try await $0.getOwnProfile() }
         let state = Self.present(fresh)
-        profile = state
+        publishProfile(state, stale: false)
         return state
     }
 
     func profileActions(bluetoothState: (@MainActor () -> BluetoothPermissionState)? = nil,
                         requestBluetooth: @escaping @MainActor () async throws -> BluetoothPermissionState) -> ProfileActions {
-        ProfileActions(
+        let epoch = sessionGeneration
+        let requireSession: @MainActor () throws -> Void = {
+            guard self.sessionGeneration == epoch, case .signedIn = self.state else {
+                throw ProfileActionError(code: .notAuthenticated)
+            }
+        }
+        return ProfileActions(
             loadInterests: {
+                try requireSession()
                 let interests = try await self.ownAccountOperation { try await $0.listInterests() }
-                _ = try await self.loadOwnProfile()
+                if self.sessionGeneration == epoch { _ = try? await self.loadOwnProfile() }
                 return interests.map { InterestOption(id: $0.interestID, labelJapanese: $0.labelJA, labelEnglish: $0.labelEN) }
             },
             saveProfile: { name, introduction, contact in
-                try await self.writeProfile { try await $0.updateOwnProfile(displayName: name, introduction: introduction, contactDetail: contact) }
+                try requireSession()
+                return try await self.writeProfile({ try await $0.updateOwnProfile(displayName: name, introduction: introduction, contactDetail: contact) }) {
+                    $0.displayName = ProfileValidation.trimmed(name)
+                    $0.introduction = ProfileValidation.trimmed(introduction)
+                    $0.contactDetail = ProfileValidation.trimmed(contact)
+                    $0.prerequisites.displayName = !$0.displayName.isEmpty
+                    $0.prerequisites.introduction = !$0.introduction.isEmpty
+                }
             },
             saveInterests: { ids in
-                try await self.writeProfile { try await $0.setOwnInterests(ids.sorted()) }
+                try requireSession()
+                return try await self.writeProfile({ try await $0.setOwnInterests(ids.sorted()) }) {
+                    $0.interestIDs = ids
+                    $0.prerequisites.interest = !ids.isEmpty
+                }
             },
             savePurposes: { purposes in
+                try requireSession()
                 let values = purposes.sorted { $0.rawValue < $1.rawValue }.compactMap {
                     EncounterBackend.ProfilePurpose(rawValue: $0.rawValue)
                 }
-                return try await self.writeProfile { try await $0.setOwnPurposes(values) }
+                return try await self.writeProfile({ try await $0.setOwnPurposes(values) }) { $0.purposes = purposes }
             },
             setDiscovery: { enabled in
-                try await self.writeProfile { try await $0.setDiscovery(enabled: enabled) }
+                try requireSession()
+                return try await self.writeProfile({ try await $0.setDiscovery(enabled: enabled) }) { $0.discoveryOn = enabled }
             },
             requestBluetooth: {
-                guard self.state.isSignedIn else { throw ProfileActionError(code: .notAuthenticated) }
+                try requireSession()
                 do {
                     let bluetooth = try await requestBluetooth()
-                    _ = try await self.loadOwnProfile()
+                    guard self.sessionGeneration == epoch else { return bluetooth }
+                    _ = try? await self.loadOwnProfile()
+                    guard self.sessionGeneration == epoch else { return bluetooth }
                     return bluetoothState?() ?? bluetooth
                 }
                 catch is CancellationError { throw CancellationError() }
-                catch let error as ProfileActionError { throw error }
-                catch { throw Self.presentationError(error) }
+                catch {
+                    let failure = error as? ProfileActionError ?? Self.presentationError(error)
+                    if failure.code == .notAuthenticated { await self.rejectDeadSession(generation: epoch) }
+                    throw failure
+                }
             },
             setMinimumSharedInterests: { value in
-                try await self.writeProfile { try await $0.setMinimumSharedInterests(value) }
+                try requireSession()
+                return try await self.writeProfile({ try await $0.setMinimumSharedInterests(value) }) { $0.minimumSharedInterests = value }
             },
             setFieldVisibility: { field, level in
+                try requireSession()
                 guard let field = EncounterBackend.ProfileField(rawValue: field.rawValue),
                       let level = EncounterBackend.VisibilityLevel(rawValue: level.rawValue) else {
                     throw ProfileActionError(code: .invalidInput, fields: ["field", "level"])
                 }
-                return try await self.writeProfile { try await $0.setFieldVisibility(field: field, level: level) }
+                return try await self.writeProfile({ try await $0.setFieldVisibility(field: field, level: level) }) {
+                    if let field = EncounterUI.ProfileField(rawValue: field.rawValue),
+                       let level = EncounterUI.VisibilityLevel(rawValue: level.rawValue) { $0.fieldVisibility[field] = level }
+                }
             })
     }
 
-    private func writeProfile(_ write: @MainActor (OwnAccountService) async throws -> Void) async throws -> OwnProfileState {
-        let fresh = try await ownAccountOperation { service in
-            try await write(service)
-            return try await service.getOwnProfile()
+    private func writeProfile(_ write: @MainActor (OwnAccountService) async throws -> Void,
+                              applying: (inout OwnProfileState) -> Void) async throws -> OwnProfileState {
+        let epoch = sessionGeneration
+        var accepted = profile ?? OwnProfileState()
+        try await ownAccountOperation(write)
+        applying(&accepted)
+        // The mutation is committed. A later read cannot turn it into a failed write.
+        do { return try await loadOwnProfile() }
+        catch {
+            if sessionGeneration == epoch, state.isSignedIn { publishProfile(accepted, stale: true) }
+            return accepted
         }
-        let state = Self.present(fresh)
-        profile = state
-        return state
     }
 
     private func ownAccountOperation<Value>(_ operation: @MainActor (OwnAccountService) async throws -> Value) async throws -> Value {
         guard case .signedIn(let user) = state, let service else { throw ProfileActionError(code: .notAuthenticated) }
+        let epoch = sessionGeneration
         do {
             let result = try await operation(service)
-            guard state == .signedIn(user) else { throw ProfileActionError(code: .notAuthenticated) }
+            guard sessionGeneration == epoch, state == .signedIn(user) else { throw ProfileActionError(code: .notAuthenticated) }
             return result
         } catch is CancellationError { throw CancellationError() }
-        catch let error as ProfileActionError { throw error }
-        catch { throw Self.presentationError(error) }
+        catch {
+            let failure = error as? ProfileActionError ?? Self.presentationError(error)
+            if failure.code == .notAuthenticated { await rejectDeadSession(generation: epoch) }
+            throw failure
+        }
     }
 
     static func present(_ profile: OwnProfile) -> OwnProfileState {

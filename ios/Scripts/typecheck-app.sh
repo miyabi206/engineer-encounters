@@ -39,6 +39,8 @@ done
 # Match project.yml exclusions anchored to $(SRCROOT)/App, regardless of checkout ancestors.
 # App/Development includes DevelopmentWelcomeView, temporary account Auth construction and both DevelopmentDiagnostics
 # and DevelopmentAccount string tables; neither source nor table ships in Internal/Release.
+# App/Diagnostics includes DiagnosticsParticipationControl in Development/Internal only;
+# check-release-artifact.sh verifies its binary marker alongside DiagnosticsView.
 # Collect arguments individually, preserving the package include paths above.
 case "$configuration" in
     Development) set -- "$@" -D DEVELOPMENT_BUILD ;;

@@ -20,17 +20,31 @@ struct AccountRootView: View {
     }
 
     var body: some View {
-        Group {
+        VStack(spacing: 16) {
+            if flow.savedWithStaleProfile {
+                Text(AccountStrings.text("savedStale"))
+                Button(AccountStrings.text("retry")) { Task { await flow.refresh() } }
+            }
             switch flow.root {
+            case .restoring:
+                ProgressView(AccountStrings.text("restoring"))
             case .welcome:
                 NavigationStack { welcome }
             case .loadingProfile:
-                ProgressView(AccountStrings.text("loadingProfile"))
+                NavigationStack {
+                    VStack(spacing: 16) {
+                        ProgressView(AccountStrings.text("loadingProfile"))
+                        diagnosticsLink
+                    }
+                }
             case .profileUnavailable:
-                VStack(spacing: 16) {
-                    Text(AccountStrings.text("profileError"))
-                    Button(AccountStrings.text("retry")) { Task { await flow.refresh() } }
-                }.padding()
+                NavigationStack {
+                    VStack(spacing: 16) {
+                        Text(AccountStrings.text("profileError"))
+                        Button(AccountStrings.text("retry")) { Task { await flow.refresh() } }
+                        diagnosticsLink
+                    }.padding()
+                }
             case .onboarding:
                 if let model = flow.onboarding { OnboardingView(model: model) }
             case .settings:
@@ -64,6 +78,17 @@ struct AccountRootView: View {
         }
         #if DEVELOPMENT_BUILD
         DevelopmentDiagnosticsEntry(composition: composition)
+        #elseif INTERNAL_BUILD
+        diagnosticsLink
+        #endif
+    }
+
+    @ViewBuilder
+    private var diagnosticsLink: some View {
+        #if DEVELOPMENT_BUILD || INTERNAL_BUILD
+        if flow.offersDiagnostics {
+            NavigationLink(DiagnosticsStrings.text("title")) { DiagnosticsView(composition: composition) }
+        }
         #endif
     }
 }

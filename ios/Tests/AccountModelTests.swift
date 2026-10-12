@@ -78,7 +78,7 @@ final class AccountModelTests: XCTestCase {
         var states: [AccountState] = []
         let subscription = composition.account.$state.sink { states.append($0) }
         await composition.waitForRestoration()
-        XCTAssertEqual(states, [.signedOut, .signedInPending(appBackendTestUser), .signedIn(appBackendTestUser)])
+        XCTAssertEqual(states, [.restoring, .signedInPending(appBackendTestUser), .signedIn(appBackendTestUser)])
         XCTAssertTrue(composition.runtime?.tokenIssuer is ServerTokenIssuer)
         await composition.refresh()
         zone.value = "Europe/London"
@@ -112,8 +112,10 @@ final class AccountModelTests: XCTestCase {
         let local = KeychainTokenBatchStore(service: "EngineerEncounters.Development.LocalTestTokens", client: keychain)
         try await local.save(EncounterSamples.batch())
         #endif
+        composition.account.onboardingCompletion.finish(appBackendTestUser)
         try await composition.account.signOut()
         XCTAssertEqual(composition.account.state, .signedOut)
+        XCTAssertFalse(composition.account.onboardingCompletion.contains(appBackendTestUser))
         let session = try await store.load()
         let batch = try await server.load()
         let pending = try await queue.pending()

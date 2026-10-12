@@ -2,3 +2,5 @@
 "profileError" = "Your profile could not be loaded. Please try again.";
 "retry" = "Retry";
 "continueSetup" = "Continue setup";
+"restoring" = "Restoring your account…";
+"savedStale" = "Saved. The displayed profile may be out of date. Refresh to read it again.";
