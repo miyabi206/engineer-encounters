@@ -13,17 +13,21 @@ public enum DiscoverOperation: Equatable, Sendable {
     case favorite(String, Bool), save(String, String, Bool), delete(String)
 }
 
-/// Caller-owned, memory-only state shared by Discover routes. Every refresh drops protected
-/// content before awaiting authorization. Epochs fence late results after sign-out/access loss.
+/// Caller-owned, memory-only state. Refreshes preserve authorized content; each resource
+/// has its own fence, and an access epoch invalidates all responses on authorization loss.
 @MainActor
 public final class DiscoverModel: ObservableObject {
-    @Published public private(set) var feed: [EncounterCard] = []
-    @Published public private(set) var favorites: [EncounterCard] = []
+    @Published public private(set) var feed: [EncounterFeedCard] = []
+    @Published public private(set) var favorites: [EncounterFeedCard] = []
     @Published public private(set) var savedLinks: [EncounterSavedLink] = []
-    @Published public private(set) var card: EncounterCard?
+    @Published public private(set) var card: EncounterDetail?
     @Published public private(set) var feedState: DiscoverLoadState = .idle
     @Published public private(set) var detailState: DiscoverLoadState = .idle
     @Published public private(set) var favoritesState: DiscoverLoadState = .idle
+    @Published public private(set) var savedLinksState: DiscoverLoadState = .idle
+    @Published public private(set) var feedTruncated = false
+    @Published public private(set) var favoritesTruncated = false
+    @Published public private(set) var savedLinksTruncated = false
     @Published public private(set) var discoveryOn: Bool
     @Published public private(set) var isAuthorized: Bool
     @Published public private(set) var isWriting = false
@@ -31,81 +35,158 @@ public final class DiscoverModel: ObservableObject {
     @Published public private(set) var failedOperation: DiscoverOperation?
     public let actions: DiscoverActions
     private var epoch: UInt = 0
+    private var feedEpoch: UInt = 0
+    private var favoritesEpoch: UInt = 0
+    private var savedEpoch: UInt = 0
+    private var detailEpoch: UInt = 0
+    private var feedContentEpoch: UInt = 0
+    private var favoritesContentEpoch: UInt = 0
+    private var savedContentEpoch: UInt = 0
+    private var detailContentEpoch: UInt = 0
+    private var removalEpoch: UInt = 0
+    private var removedAt: [String: UInt] = [:]
+    private var canRetryAuthorization = false
+    private var requestedFeed = false
+    private var requestedFavorites = false
+    private var requestedSavedLinks = false
+    private var requestedCardID: String?
 
     public init(actions: DiscoverActions, discoveryOn: Bool, isAuthorized: Bool = true) {
         self.actions = actions; self.discoveryOn = discoveryOn; self.isAuthorized = isAuthorized
     }
 
     public var canRead: Bool { discoveryOn && isAuthorized }
+    private var canLoad: Bool { discoveryOn && (isAuthorized || canRetryAuthorization) }
     public var dayGroups: [EncounterDayGroup] { EncounterDayGroup.grouped(feed) }
     public var favoriteDayGroups: [EncounterDayGroup] { EncounterDayGroup.grouped(favorites) }
 
-    /// Call for sign-out, failed authorization, account changes and visibility changes.
-    /// Calling with the same values still invalidates every in-flight response and card.
-    public func receiveAccess(discoveryOn: Bool, isAuthorized: Bool) {
-        clearProtectedContent()
+    /// Composition calls this on sign-out or an authorization/participation change.
+    /// Returning access reloads requested screens, including an open detail, without a tap.
+    @discardableResult
+    public func receiveAccess(discoveryOn: Bool, isAuthorized: Bool) -> Task<Void, Never>? {
+        let wasReadable = canRead
+        if !discoveryOn || !isAuthorized { clearProtectedContent() }
         self.discoveryOn = discoveryOn; self.isAuthorized = isAuthorized
+        canRetryAuthorization = false
+        if !wasReadable && canRead {
+            let token = epoch
+            return Task {
+                guard self.current(token) else { return }
+                async let feed: Void = self.reloadFeedIfRequested(token)
+                async let favorites: Void = self.reloadFavoritesIfRequested(token)
+                async let saved: Void = self.reloadSavedIfRequested(token)
+                async let card: Void = self.reloadCardIfRequested(token)
+                _ = await (feed, favorites, saved, card)
+            }
+        }
+        return nil
+    }
+
+    private func reloadFeedIfRequested(_ token: UInt) async {
+        guard current(token), requestedFeed else { return }
+        await loadFeed()
+    }
+    private func reloadFavoritesIfRequested(_ token: UInt) async {
+        guard current(token), requestedFavorites else { return }
+        await loadFavorites()
+    }
+    private func reloadSavedIfRequested(_ token: UInt) async {
+        guard current(token), requestedSavedLinks else { return }
+        await loadSavedLinks()
+    }
+    private func reloadCardIfRequested(_ token: UInt) async {
+        guard current(token), let id = requestedCardID else { return }
+        await loadCard(id)
     }
 
     public func clearProtectedContent() {
         epoch &+= 1
+        feedEpoch &+= 1; favoritesEpoch &+= 1; savedEpoch &+= 1; detailEpoch &+= 1
         feed = []; favorites = []; savedLinks = []; card = nil
-        feedState = .idle; detailState = .idle; favoritesState = .idle
+        feedState = .idle; detailState = .idle; favoritesState = .idle; savedLinksState = .idle
+        feedTruncated = false; favoritesTruncated = false; savedLinksTruncated = false
+        removedAt = [:]
         isWriting = false; deletion = .none; failedOperation = nil
     }
 
     public func loadFeed() async {
-        guard canRead, feedState != .loading else { return }
-        clearProtectedContent()
-        let token = epoch
+        requestedFeed = true
+        guard canLoad else { return }
+        feedEpoch &+= 1
+        let token = epoch, resource = feedEpoch, removals = removalEpoch
         feedState = .loading
         do {
             let result = try await actions.loadFeed()
-            guard current(token) else { return }
-            feed = result; feedState = .loaded
+            guard current(token), resource == feedEpoch else { return }
+            authorizeRead()
+            feedContentEpoch &+= 1
+            feed = result.cards.filter { (removedAt[$0.id] ?? 0) <= removals }; feedTruncated = result.truncated; feedState = .loaded
         } catch {
-            guard current(token) else { return }
-            handleReadFailure(error)
-            feedState = .failed
+            guard current(token), resource == feedEpoch else { return }
+            if let failure = error as? ProfileActionError,
+               failure.code == .prerequisiteMissing, failure.fields.contains("discovery") {
+                receiveAccess(discoveryOn: false, isAuthorized: isAuthorized)
+            } else {
+                handleReadFailure(error); feedState = .failed
+            }
         }
     }
 
     public func loadCard(_ id: String) async {
-        guard canRead, detailState != .loading else { return }
-        clearProtectedContent()
-        let token = epoch
+        requestedCardID = id
+        guard canLoad else { return }
+        detailEpoch &+= 1
+        let token = epoch, resource = detailEpoch
         detailState = .loading
         do {
             let result = try await actions.loadCard(id)
-            guard current(token) else { return }
-            guard let result, result.id == id else {
-                remove(id); detailState = .missing; return
+            guard current(token), resource == detailEpoch else { return }
+            authorizeRead()
+            guard let result, result.card.id == id else {
+                remove(id); card = nil; detailState = .missing; return
             }
+            detailContentEpoch &+= 1
             card = result; detailState = .loaded
         } catch {
-            guard current(token) else { return }
-            if isNotFound(error) { remove(id); detailState = .missing }
+            guard current(token), resource == detailEpoch else { return }
+            if isNotFound(error) { remove(id); card = nil; detailState = .missing }
             else { handleReadFailure(error); detailState = .failed }
         }
     }
 
     public func loadFavorites() async {
-        guard canRead, favoritesState != .loading else { return }
-        clearProtectedContent()
-        let token = epoch
+        requestedFavorites = true
+        guard canLoad else { return }
+        favoritesEpoch &+= 1
+        let token = epoch, resource = favoritesEpoch, removals = removalEpoch
         favoritesState = .loading
         do {
-            let people = try await actions.loadFavorites()
-            guard current(token) else { return }
-            let links = try await actions.loadSavedLinks()
-            guard current(token) else { return }
-            favorites = people.filter(\.favorite)
-            savedLinks = links.filter { $0.link.saved }
-            favoritesState = .loaded
+            let result = try await actions.loadFavorites()
+            guard current(token), resource == favoritesEpoch else { return }
+            authorizeRead()
+            favoritesContentEpoch &+= 1
+            favorites = result.cards.filter { (removedAt[$0.id] ?? 0) <= removals }; favoritesTruncated = result.truncated; favoritesState = .loaded
         } catch {
-            guard current(token) else { return }
-            handleReadFailure(error)
-            favoritesState = .failed
+            guard current(token), resource == favoritesEpoch else { return }
+            handleReadFailure(error); favoritesState = .failed
+        }
+    }
+
+    public func loadSavedLinks() async {
+        requestedSavedLinks = true
+        guard canLoad else { return }
+        savedEpoch &+= 1
+        let token = epoch, resource = savedEpoch, removals = removalEpoch
+        savedLinksState = .loading
+        do {
+            let result = try await actions.loadSavedLinks()
+            guard current(token), resource == savedEpoch else { return }
+            authorizeRead()
+            savedContentEpoch &+= 1
+            savedLinks = result.links.filter { (removedAt[$0.encounterID] ?? 0) <= removals }; savedLinksTruncated = result.truncated; savedLinksState = .loaded
+        } catch {
+            guard current(token), resource == savedEpoch else { return }
+            handleReadFailure(error); savedLinksState = .failed
         }
     }
 
@@ -128,8 +209,7 @@ public final class DiscoverModel: ObservableObject {
         deletion = .none
     }
 
-    /// Mark approval synchronously before SwiftUI dismisses its confirmation surface.
-    /// Dismissal must not cancel a confirmed write before its async task starts.
+    /// Mark approval before SwiftUI dismisses its confirmation surface.
     public func approveDeletion() {
         guard canRead, !isWriting, case let .confirming(id) = deletion else { return }
         deletion = .deleting(id)
@@ -154,11 +234,21 @@ public final class DiscoverModel: ObservableObject {
         return failedOperation == nil && canRead
     }
 
-    private func current(_ token: UInt) -> Bool { token == epoch && canRead }
+    private func current(_ token: UInt) -> Bool { token == epoch && canLoad }
+    private func authorizeRead() { isAuthorized = true; canRetryAuthorization = false }
+
+    private func currentWrite(_ token: UInt, id: String, removals: UInt) -> Bool {
+        guard current(token) else { return false }
+        guard (removedAt[id] ?? 0) <= removals else {
+            isWriting = false; failedOperation = nil
+            return false
+        }
+        return true
+    }
 
     private func find(_ id: String) -> EncounterCard? {
-        if card?.id == id { return card }
-        return feed.first { $0.id == id } ?? favorites.first { $0.id == id }
+        if card?.card.id == id { return card?.card }
+        return feed.first { $0.id == id }?.card ?? favorites.first { $0.id == id }?.card
     }
 
     private func perform(_ operation: DiscoverOperation) async {
@@ -168,102 +258,116 @@ public final class DiscoverModel: ObservableObject {
         case let .favorite(value, _), let .save(value, _, _): id = value
         case .delete: return
         }
-        // Saved-link-only S10 context need not include its owner's profile.
         guard find(id) != nil || savedLinks.contains(where: { $0.encounterID == id }) else { return }
         let beforeFeed = feed, beforeFavorites = favorites, beforeLinks = savedLinks, beforeCard = card
-        let token = epoch
+        let token = epoch, removals = removalEpoch
+        let feedToken = feedContentEpoch, favoritesToken = favoritesContentEpoch
+        let savedToken = savedContentEpoch, detailToken = detailContentEpoch
         isWriting = true; failedOperation = nil
-        optimistic(operation)
+        update(operation)
         do {
-            let result: EncounterCard?
             switch operation {
-            case let .favorite(id, value): result = try await actions.setFavorite(id, value)
+            case let .favorite(id, value):
+                let result = try await actions.setFavorite(id, value)
+                guard currentWrite(token, id: id, removals: removals) else { return }
+                guard result.encounterID == id else { throw DiscoverActionError.unavailable }
+                update(.favorite(result.encounterID, result.favorite))
             case let .save(id, linkID, value):
+                let result: EncounterSavedResult
                 if value { result = try await actions.saveLink(id, linkID) }
                 else { result = try await actions.unsaveLink(id, linkID) }
+                guard currentWrite(token, id: id, removals: removals) else { return }
+                guard result.encounterID == id, result.linkID == linkID else { throw DiscoverActionError.unavailable }
+                update(.save(result.encounterID, result.linkID, result.saved))
             case .delete: return
             }
-            guard current(token) else { return }
-            if let result, result.id == id { apply(result) }
-            else { remove(id) }
             isWriting = false
         } catch {
-            guard current(token) else { return }
+            guard currentWrite(token, id: id, removals: removals) else { return }
             if isAuthorizationFailure(error) {
-                receiveAccess(discoveryOn: discoveryOn, isAuthorized: false)
+                loseAuthorization()
             } else if isNotFound(error) {
                 remove(id); isWriting = false
             } else {
-                feed = beforeFeed; favorites = beforeFavorites; savedLinks = beforeLinks; card = beforeCard
+                // A failed write cannot restore snapshots over newer reads.
+                if feedContentEpoch == feedToken { feed = beforeFeed }
+                if favoritesContentEpoch == favoritesToken { favorites = beforeFavorites }
+                if savedContentEpoch == savedToken { savedLinks = beforeLinks }
+                if detailContentEpoch == detailToken { card = beforeCard }
                 failedOperation = operation; isWriting = false
             }
         }
     }
 
-    private func optimistic(_ operation: DiscoverOperation) {
+    /// Flag-only results change only the named encounter or reference, never visible metadata.
+    private func update(_ operation: DiscoverOperation) {
         switch operation {
         case let .favorite(id, value):
-            guard var changed = find(id) else { return }
-            changed.favorite = value
-            apply(changed)
+            let source = feed.first { $0.id == id } ?? favorites.first { $0.id == id }
+                ?? find(id).map { EncounterFeedCard(card: $0, favorite: value) }
+            if card?.card.id == id { card?.favorite = value }
+            if let index = feed.firstIndex(where: { $0.id == id }) { feed[index].favorite = value }
+            if let index = favorites.firstIndex(where: { $0.id == id }) {
+                if value { favorites[index].favorite = value } else { favorites.remove(at: index) }
+            } else if favoritesState == .loaded, favorites.count < 200, value, var source {
+                source.favorite = value; favorites.append(source)
+            }
         case let .save(id, linkID, value):
-            if var changed = find(id), let index = changed.links.firstIndex(where: { $0.id == linkID }) {
-                changed.links[index].saved = value; apply(changed)
-            } else {
-                savedLinks.removeAll { $0.encounterID == id && $0.link.id == linkID && !value }
+            if card?.card.id == id, card?.card.links.contains(where: { $0.id == linkID }) == true {
+                if value { card?.savedLinkIDs.insert(linkID) }
+                else { card?.savedLinkIDs.remove(linkID) }
+            }
+            let key = EncounterSavedLink.ID(encounterID: id, linkID: linkID)
+            if !value { savedLinks.removeAll { $0.id == key } }
+            else if savedLinksState == .loaded, savedLinks.count < 200, !savedLinks.contains(where: { $0.id == key }),
+                    let owner = find(id), let link = owner.links.first(where: { $0.id == linkID }) {
+                savedLinks.append(EncounterSavedLink(encounterID: id, day: owner.day, kind: owner.kind, link: link))
             }
         case .delete: break
         }
     }
 
-    /// Replace whole authorized cards, also purging links that are now private.
-    private func apply(_ value: EncounterCard) {
-        if let index = feed.firstIndex(where: { $0.id == value.id }) { feed[index] = value }
-        if card?.id == value.id { card = value }
-        if let index = favorites.firstIndex(where: { $0.id == value.id }) {
-            if value.favorite { favorites[index] = value } else { favorites.remove(at: index) }
-        } else if value.favorite { favorites.append(value) }
-        let fresh = value.links.filter(\.saved).map { EncounterSavedLink(encounterID: value.id, link: $0) }
-        // Keep the caller's order for existing saved links; append only new references.
-        savedLinks = savedLinks.compactMap { old in
-            old.encounterID == value.id ? fresh.first { $0.id == old.id } : old
-        }
-        for item in fresh where !savedLinks.contains(where: { $0.id == item.id }) { savedLinks.append(item) }
-    }
-
     private func remove(_ id: String) {
+        // Only the removed encounter is fenced; unrelated loads still finish normally.
+        feedContentEpoch &+= 1; favoritesContentEpoch &+= 1; savedContentEpoch &+= 1; detailContentEpoch &+= 1
+        removalEpoch &+= 1
+        removedAt[id] = removalEpoch
         feed.removeAll { $0.id == id }; favorites.removeAll { $0.id == id }
         savedLinks.removeAll { $0.encounterID == id }
-        if card?.id == id { card = nil; detailState = .missing }
+        if requestedCardID == id {
+            detailEpoch &+= 1
+            card = nil; detailState = .missing; requestedCardID = nil
+        } else if card?.card.id == id { card = nil }
         deletion = .none
     }
 
     private func delete(_ id: String) async -> Bool {
         guard canRead, !isWriting, find(id) != nil else { return false }
-        let token = epoch
+        let token = epoch, removals = removalEpoch
         isWriting = true; failedOperation = nil; deletion = .deleting(id)
         do {
             try await actions.deleteEncounter(id)
-            guard current(token) else { return false }
+            guard currentWrite(token, id: id, removals: removals) else { return false }
             remove(id); isWriting = false
             return true
         } catch {
-            guard current(token) else { return false }
-            if isAuthorizationFailure(error) {
-                receiveAccess(discoveryOn: discoveryOn, isAuthorized: false)
-            } else if isNotFound(error) {
-                remove(id); isWriting = false; return true
-            } else {
-                deletion = .failed(id); failedOperation = .delete(id); isWriting = false
-            }
+            guard currentWrite(token, id: id, removals: removals) else { return false }
+            if isAuthorizationFailure(error) { loseAuthorization() }
+            else if isNotFound(error) { remove(id); isWriting = false; return true }
+            else { deletion = .failed(id); failedOperation = .delete(id); isWriting = false }
             return false
         }
     }
 
     private func handleReadFailure(_ error: Error) {
-        // A failed fresh response may never leave another screen's protected cache behind.
+        if isAuthorizationFailure(error) { loseAuthorization() }
+    }
+
+    private func loseAuthorization() {
         clearProtectedContent()
-        if isAuthorizationFailure(error) { isAuthorized = false }
+        isAuthorized = false
+        // A Retry may recheck authorization; explicit sign-out never permits this.
+        canRetryAuthorization = true
     }
 
     private func isAuthorizationFailure(_ error: Error) -> Bool {

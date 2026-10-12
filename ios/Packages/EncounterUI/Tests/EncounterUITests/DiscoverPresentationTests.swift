@@ -9,7 +9,7 @@ final class DiscoverPresentationTests: XCTestCase {
                      EncounterCard(id: "c", kind: .session, day: new),
                      EncounterCard(id: "a", kind: .qr, day: new),
                      EncounterCard(id: "b", kind: .ambient, day: old)]
-        let groups = EncounterDayGroup.grouped(cards)
+        let groups = EncounterDayGroup.grouped(cards.map { EncounterFeedCard(card: $0, favorite: false) })
         XCTAssertEqual(groups.map(\.day), [new, old])
         XCTAssertEqual(groups.map { $0.cards.map(\.id) }, [["c", "a"], ["z", "b"]])
         XCTAssertTrue(EncounterDayGroup.grouped([]).isEmpty)
@@ -21,18 +21,19 @@ final class DiscoverPresentationTests: XCTestCase {
         let interest = InterestOption(id: "test", labelJapanese: "テスト", labelEnglish: "Test")
         let shell = EncounterCard(id: "shell", kind: .ambient, day: .init(year: 2026, month: 10, day: 1),
                                   displayName: "Name", introduction: "Intro", interests: [interest],
-                                  sharedInterestIDs: ["test"], purposes: [.discovery], contactDetail: "Contact",
-                                  links: [DiscoverTestDriver.link()], favorite: true, isShell: true)
+                                  purposes: [.discovery], contactDetail: "Contact",
+                                  links: [DiscoverTestDriver.link()], isShell: true)
         XCTAssertNil(shell.displayName); XCTAssertNil(shell.introduction); XCTAssertNil(shell.contactDetail)
-        XCTAssertTrue(shell.interests.isEmpty); XCTAssertTrue(shell.sharedInterests.isEmpty)
+        XCTAssertTrue(shell.interests.isEmpty); XCTAssertTrue(EncounterFeedCard(card: shell, favorite: true, sharedInterestIDs: ["test"]).sharedInterests.isEmpty)
         XCTAssertTrue(shell.purposes.isEmpty); XCTAssertTrue(shell.links.isEmpty)
-        XCTAssertTrue(shell.favorite)
+        XCTAssertTrue(EncounterDetail(card: shell, favorite: true, savedLinkIDs: []).favorite)
         let card = EncounterCard(id: "visible", kind: .qr, day: shell.day, displayName: " \n ",
-                                 introduction: "", interests: [interest], sharedInterestIDs: ["test", "private"],
+                                 introduction: "", interests: [interest],
                                  contactDetail: "\t")
         XCTAssertNil(card.displayName); XCTAssertNil(card.introduction); XCTAssertNil(card.contactDetail)
-        XCTAssertEqual(card.sharedInterestIDs, ["test"])
-        XCTAssertEqual(card.sharedInterests, [interest])
+        let feedCard = EncounterFeedCard(card: card, favorite: false, sharedInterestIDs: ["test", "private"])
+        XCTAssertEqual(feedCard.sharedInterestIDs, ["test"])
+        XCTAssertEqual(feedCard.sharedInterests, [interest])
     }
 
     func testDaysAreLocaleFormattedWithoutTimeAndOptionalLinkTextIsOmitted() {
@@ -76,7 +77,7 @@ final class DiscoverPresentationTests: XCTestCase {
             XCTAssertEqual(sample.links.count, 1)
             XCTAssertEqual(sample.links.first?.url.host, "example.com")
             XCTAssertEqual(sample.links.first?.url.scheme, "https")
-            XCTAssertFalse(sample.links.contains { $0.saved || $0.verified })
+            XCTAssertFalse(sample.links.contains { $0.verified })
         }
     }
 }

@@ -14,6 +14,16 @@ final class DiscoverStringsTests: XCTestCase {
         }
     }
 
+    func testTruncatedExplanationAndImpersonationWordingInBothLanguages() {
+        XCTAssertEqual(DiscoverStrings.localized("truncated", language: "en"),
+                       "Only the first 200 currently authorized entries are displayed.")
+        XCTAssertEqual(DiscoverStrings.localized("truncated", language: "ja"),
+                       "現在表示が許可されている項目のうち、最初の200件だけを表示しています。")
+        XCTAssertEqual(DiscoverStrings.localized("reportImpersonation", language: "en"), "Report impersonation")
+        XCTAssertEqual(DiscoverStrings.localized("reportImpersonation", language: "ja"), "なりすましを通報")
+        XCTAssertFalse(DiscoverString.allCases.contains { $0.rawValue == "all" })
+    }
+
     func testScreenWordingAndCountTokensAreVerbatim() {
         XCTAssertEqual(DiscoverStrings.localized("feedSubtitle", language: "ja"), "すれちがった人の作品を見てみよう")
         XCTAssertEqual(DiscoverStrings.localized("authorizedOnly", language: "en"), "Only information shared with you")

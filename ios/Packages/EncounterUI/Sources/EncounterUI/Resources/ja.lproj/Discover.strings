@@ -6,7 +6,6 @@
 "viewSession" = "セッションを見る";
 "qrExchange" = "QR交換";
 "yourInterests" = "あなたの興味";
-"all" = "すべて";
 "favorites" = "お気に入り";
 "sharedCount" = "共通の興味：{count}件";
 "shell" = "公開されている情報はありません";
@@ -70,3 +69,5 @@
 "sampleSource" = "サンプル";
 "sampleWork" = "サンプルの作品";
 "sampleDescription" = "リンクの表示例です";
+"truncated" = "現在表示が許可されている項目のうち、最初の200件だけを表示しています。";
+"reportImpersonation" = "なりすましを通報";

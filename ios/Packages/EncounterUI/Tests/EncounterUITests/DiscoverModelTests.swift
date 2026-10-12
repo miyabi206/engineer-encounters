@@ -3,24 +3,23 @@ import XCTest
 
 final class DiscoverModelTests: XCTestCase {
     @MainActor
-    func testFeedLoadingDropsContentAndFailureDoesNotDeclareEmpty() async {
+    func testFeedRefreshPreservesContentAndOrdinaryFailureDoesNotDeclareEmpty() async {
         let driver = DiscoverTestDriver()
         let model = driver.model()
         await model.loadFeed()
         XCTAssertEqual(model.feedState, .loaded)
         XCTAssertEqual(model.feed.map(\.id), ["card"])
-        let gate = DiscoverTestGate<[EncounterCard]>()
+        let gate = DiscoverTestGate<EncounterCardList>()
         driver.feedHook = { try await gate.wait() }
         let loading = Task { await model.loadFeed() }
         await gate.entered()
         XCTAssertEqual(model.feedState, .loading)
-        XCTAssertTrue(model.feed.isEmpty)
-        XCTAssertTrue(model.favorites.isEmpty); XCTAssertTrue(model.savedLinks.isEmpty); XCTAssertNil(model.card)
+        XCTAssertEqual(model.feed.map(\.id), ["card"])
         gate.resolve(.failure(DiscoverActionError.unavailable))
         await loading.value
         XCTAssertEqual(model.feedState, .failed)
-        XCTAssertTrue(model.dayGroups.isEmpty)
-        driver.feedHook = { [] }
+        XCTAssertEqual(model.dayGroups.first?.cards.map(\.id), ["card"])
+        driver.feedHook = { .init(cards: [], truncated: false) }
         await model.loadFeed()
         XCTAssertEqual(model.feedState, .loaded)
         XCTAssertTrue(model.feed.isEmpty)
@@ -30,8 +29,9 @@ final class DiscoverModelTests: XCTestCase {
     func testFavoriteIsOptimisticDuplicateWritesAreDisabledAndFailureRollsBack() async {
         let driver = DiscoverTestDriver()
         let model = driver.model()
+        await model.loadFavorites()
         await model.loadCard("card")
-        let gate = DiscoverTestGate<EncounterCard?>()
+        let gate = DiscoverTestGate<EncounterFavoriteResult>()
         driver.favoriteHook = { _, _ in try await gate.wait() }
         let writing = Task { await model.setFavorite("card", favorite: true) }
         await gate.entered()
@@ -59,8 +59,8 @@ final class DiscoverModelTests: XCTestCase {
         driver.cards = [DiscoverTestDriver.card(id: "z", favorite: true),
                         DiscoverTestDriver.card(id: "a", favorite: true)]
         let model = driver.model()
-        await model.loadFavorites()
-        let gate = DiscoverTestGate<EncounterCard?>()
+        await model.loadFavorites(); await model.loadSavedLinks()
+        let gate = DiscoverTestGate<EncounterFavoriteResult>()
         driver.favoriteHook = { _, _ in try await gate.wait() }
         let writing = Task { await model.setFavorite("z", favorite: false) }
         await gate.entered()
@@ -76,23 +76,24 @@ final class DiscoverModelTests: XCTestCase {
         let driver = DiscoverTestDriver()
         let model = driver.model()
         await model.loadCard("card")
-        let saving = DiscoverTestGate<EncounterCard?>()
+        await model.loadSavedLinks()
+        let saving = DiscoverTestGate<EncounterSavedResult>()
         driver.saveHook = { _, _, _ in try await saving.wait() }
         let task = Task { await model.setSaved("card", linkID: "link", saved: true) }
         await saving.entered()
-        XCTAssertEqual(model.card?.links.first?.saved, true)
-        XCTAssertEqual(model.savedLinks.map(\.id), ["link"])
+        XCTAssertEqual(model.card.map { $0.savedLinkIDs.contains("link") }, true)
+        XCTAssertEqual(model.savedLinks.map { $0.link.id }, ["link"])
         saving.resolve(.failure(DiscoverActionError.unavailable))
         await task.value
-        XCTAssertEqual(model.card?.links.first?.saved, false)
+        XCTAssertEqual(model.card.map { $0.savedLinkIDs.contains("link") }, false)
         XCTAssertTrue(model.savedLinks.isEmpty)
         XCTAssertEqual(model.failedOperation, .save("card", "link", true))
         driver.saveHook = nil
         let retried = await model.retryOperation()
         XCTAssertTrue(retried)
-        XCTAssertEqual(model.card?.links.first?.saved, true)
+        XCTAssertEqual(model.card.map { $0.savedLinkIDs.contains("link") }, true)
         await model.setSaved("card", linkID: "link", saved: false)
-        XCTAssertEqual(model.card?.links.first?.saved, false)
+        XCTAssertEqual(model.card.map { $0.savedLinkIDs.contains("link") }, false)
         XCTAssertTrue(model.savedLinks.isEmpty)
         XCTAssertEqual(driver.writes, ["save", "save", "unsave"])
     }
@@ -102,43 +103,49 @@ final class DiscoverModelTests: XCTestCase {
         let driver = DiscoverTestDriver()
         driver.cards = [DiscoverTestDriver.card(saved: true)]
         let model = driver.model()
-        await model.loadFavorites()
+        await model.loadFavorites(); await model.loadSavedLinks()
         XCTAssertTrue(model.favorites.isEmpty)
-        XCTAssertEqual(model.savedLinks.map(\.id), ["link"])
-        let gate = DiscoverTestGate<EncounterCard?>()
+        XCTAssertEqual(model.savedLinks.map { $0.link.id }, ["link"])
+        let gate = DiscoverTestGate<EncounterSavedResult>()
         driver.saveHook = { _, _, _ in try await gate.wait() }
         let task = Task { await model.setSaved("card", linkID: "link", saved: false) }
         await gate.entered()
         XCTAssertTrue(model.savedLinks.isEmpty)
         gate.resolve(.failure(DiscoverActionError.unavailable))
         await task.value
-        XCTAssertEqual(model.savedLinks.map(\.id), ["link"])
-        driver.saveHook = { _, _, _ in nil }
+        XCTAssertEqual(model.savedLinks.map { $0.link.id }, ["link"])
+        driver.saveHook = { id, linkID, value in .init(encounterID: id, linkID: linkID, saved: value) }
         let retried = await model.retryOperation()
         XCTAssertTrue(retried)
         XCTAssertTrue(model.savedLinks.isEmpty)
     }
 
     @MainActor
-    func testFavoritesPublishOnlyAfterBothFreshResponsesAndClearOnError() async {
+    func testFavoritesAndSavedLinksPublishIndependentlyAndPreserveContentOnFailure() async {
         let driver = DiscoverTestDriver()
         driver.cards = [DiscoverTestDriver.card(favorite: true, saved: true)]
         let model = driver.model()
-        let gate = DiscoverTestGate<[EncounterSavedLink]>()
-        driver.savedHook = { try await gate.wait() }
-        let task = Task { await model.loadFavorites() }
-        await gate.entered()
-        XCTAssertEqual(model.favoritesState, .loading)
-        XCTAssertTrue(model.favorites.isEmpty); XCTAssertTrue(model.savedLinks.isEmpty)
-        gate.resolve(.failure(DiscoverActionError.unavailable))
-        await task.value
-        XCTAssertEqual(model.favoritesState, .failed)
-        XCTAssertTrue(model.favorites.isEmpty)
-        driver.savedHook = nil
         await model.loadFavorites()
+        let gate = DiscoverTestGate<EncounterSavedLinkList>()
+        driver.savedHook = { try await gate.wait() }
+        let task = Task { await model.loadSavedLinks() }
+        await gate.entered()
         XCTAssertEqual(model.favoritesState, .loaded)
         XCTAssertEqual(model.favorites.map(\.id), ["card"])
-        XCTAssertEqual(model.savedLinks.map(\.id), ["link"])
+        XCTAssertEqual(model.savedLinksState, .loading)
+        gate.resolve(.failure(DiscoverActionError.unavailable))
+        await task.value
+        XCTAssertEqual(model.savedLinksState, .failed)
+        XCTAssertEqual(model.favorites.map(\.id), ["card"])
+        driver.savedHook = nil
+        await model.loadSavedLinks()
+        XCTAssertEqual(model.savedLinksState, .loaded)
+        XCTAssertEqual(model.savedLinks.map { $0.link.id }, ["link"])
+        driver.favoritesHook = { throw DiscoverActionError.unavailable }
+        await model.loadFavorites()
+        XCTAssertEqual(model.favoritesState, .failed)
+        XCTAssertEqual(model.favorites.map(\.id), ["card"])
+        XCTAssertEqual(model.savedLinks.map { $0.link.id }, ["link"])
     }
 
     @MainActor
@@ -180,7 +187,7 @@ final class DiscoverModelTests: XCTestCase {
         let driver = DiscoverTestDriver()
         driver.cards = [DiscoverTestDriver.card(favorite: true, saved: true)]
         let model = driver.model()
-        await model.loadFavorites()
+        await model.loadFavorites(); await model.loadSavedLinks()
         model.requestDeletion("card")
         let deleted = await model.confirmDeletion()
         XCTAssertTrue(deleted)
@@ -207,11 +214,11 @@ final class DiscoverModelTests: XCTestCase {
         let driver = DiscoverTestDriver()
         driver.cards = [DiscoverTestDriver.card(favorite: true, saved: true)]
         let model = driver.model()
-        await model.loadFavorites()
+        await model.loadFavorites(); await model.loadSavedLinks()
         model.receiveAccess(discoveryOn: false, isAuthorized: true)
         XCTAssertTrue(model.favorites.isEmpty); XCTAssertTrue(model.savedLinks.isEmpty)
         let before = driver.reads
-        await model.loadFeed(); await model.loadFavorites(); await model.loadCard("card")
+        await model.loadFeed(); await model.loadFavorites(); await model.loadSavedLinks(); await model.loadCard("card")
         XCTAssertEqual(driver.reads, before)
         model.receiveAccess(discoveryOn: true, isAuthorized: true)
         await model.loadFeed()
@@ -225,12 +232,12 @@ final class DiscoverModelTests: XCTestCase {
         for signedIn in [false, true] {
             let driver = DiscoverTestDriver()
             let model = driver.model()
-            let gate = DiscoverTestGate<[EncounterCard]>()
+            let gate = DiscoverTestGate<EncounterCardList>()
             driver.feedHook = { try await gate.wait() }
             let task = Task { await model.loadFeed() }
             await gate.entered()
             model.receiveAccess(discoveryOn: false, isAuthorized: signedIn)
-            gate.resolve(.success(driver.cards))
+            gate.resolve(.success(driver.feedResult))
             await task.value
             XCTAssertTrue(model.feed.isEmpty)
             XCTAssertEqual(model.feedState, .idle)
@@ -256,11 +263,11 @@ final class DiscoverModelTests: XCTestCase {
     }
 
     @MainActor
-    func testRefreshFencesLateMutationFailureAndDoesNotRestoreOldProtectedContent() async {
+    func testFeedRefreshDoesNotCancelDetailMutationAndRollbackKeepsFreshFeed() async {
         let driver = DiscoverTestDriver()
         let model = driver.model()
         await model.loadCard("card")
-        let gate = DiscoverTestGate<EncounterCard?>()
+        let gate = DiscoverTestGate<EncounterFavoriteResult>()
         driver.favoriteHook = { _, _ in try await gate.wait() }
         let task = Task { await model.setFavorite("card", favorite: true) }
         await gate.entered()
@@ -269,20 +276,21 @@ final class DiscoverModelTests: XCTestCase {
         gate.resolve(.failure(DiscoverActionError.unavailable))
         await task.value
         XCTAssertEqual(model.feed.map(\.id), ["fresh"])
-        XCTAssertNil(model.card)
+        XCTAssertEqual(model.card?.card.id, "card")
+        XCTAssertEqual(model.card?.favorite, false)
         XCTAssertTrue(model.favorites.isEmpty)
-        XCTAssertNil(model.failedOperation)
+        XCTAssertEqual(model.failedOperation, .favorite("card", true))
     }
 
     @MainActor
-    func testMissingCardAndExpiredRetentionRemoveContextWithoutStaleFallback() async {
+    func testMissingCardAndNotFoundWriteRemoveContextWithoutStaleFallback() async {
         let driver = DiscoverTestDriver()
         let model = driver.model()
         await model.loadCard("absent")
         XCTAssertEqual(model.detailState, .missing)
         XCTAssertNil(model.card)
         await model.loadCard("card")
-        driver.favoriteHook = { _, _ in nil }
+        driver.favoriteHook = { _, _ in throw DiscoverActionError.notFound }
         await model.setFavorite("card", favorite: true)
         XCTAssertNil(model.card)
         XCTAssertEqual(model.detailState, .missing)
@@ -291,20 +299,44 @@ final class DiscoverModelTests: XCTestCase {
     }
 
     @MainActor
-    func testFreshWriteResponseReplacesPrivateFieldsAndPurgesPrivateSavedLinks() async {
+    func testFlagOnlyWritesPreservePrivateFieldsAndUnrelatedSavedReferences() async {
+        let driver = DiscoverTestDriver()
+        driver.cards = [DiscoverTestDriver.card(saved: true), DiscoverTestDriver.card(id: "other", saved: true)]
+        let model = driver.model()
+        await model.loadFeed()
+        await model.loadFavorites()
+        await model.loadSavedLinks()
+        await model.loadCard("card")
+        let before = model.card?.card
+        await model.setFavorite("card", favorite: true)
+        XCTAssertEqual(model.card?.card, before)
+        XCTAssertEqual(model.card?.favorite, true)
+        XCTAssertEqual(model.card?.savedLinkIDs, ["link"])
+        XCTAssertEqual(model.feed.first { $0.id == "other" }?.favorite, false)
+        XCTAssertEqual(model.savedLinks.count, 2)
+        await model.setSaved("card", linkID: "link", saved: false)
+        XCTAssertEqual(model.card?.card, before)
+        XCTAssertEqual(model.card?.favorite, true)
+        XCTAssertEqual(model.savedLinks.map(\.encounterID), ["other"])
+    }
+
+    @MainActor
+    func testFreshAuthorizedReadsPurgePrivateFieldsAndHiddenSavedReferences() async {
         let driver = DiscoverTestDriver()
         driver.cards = [DiscoverTestDriver.card(saved: true)]
         let model = driver.model()
         await model.loadCard("card")
-        driver.favoriteHook = { id, value in
-            EncounterCard(id: id, kind: .ambient, day: DiscoverTestDriver.day, favorite: value, isShell: true)
-        }
-        await model.setFavorite("card", favorite: true)
-        XCTAssertEqual(model.card?.isShell, true)
-        XCTAssertNil(model.card?.displayName)
-        XCTAssertEqual(model.card?.links, [])
+        await model.loadSavedLinks()
+        driver.cards = [.init(card: EncounterCard(id: "card", kind: .ambient, day: DiscoverTestDriver.day,
+                                                 isShell: true), favorite: false, savedLinkIDs: [])]
+        await model.loadCard("card")
+        await model.loadSavedLinks()
+        XCTAssertEqual(model.card?.card.isShell, true)
+        XCTAssertNil(model.card?.card.displayName)
+        XCTAssertEqual(model.card?.card.links, [])
         XCTAssertTrue(model.savedLinks.isEmpty)
     }
+
 }
 
 @MainActor
@@ -313,33 +345,47 @@ final class DiscoverTestDriver {
     var cards = [DiscoverTestDriver.card()]
     var writes: [String] = []
     var reads: [String] = []
-    var feedHook: (@MainActor () async throws -> [EncounterCard])?
-    var savedHook: (@MainActor () async throws -> [EncounterSavedLink])?
-    var favoriteHook: (@MainActor (String, Bool) async throws -> EncounterCard?)?
-    var saveHook: (@MainActor (String, String, Bool) async throws -> EncounterCard?)?
+    var feedHook: (@MainActor () async throws -> EncounterCardList)?
+    var favoritesHook: (@MainActor () async throws -> EncounterCardList)?
+    var savedHook: (@MainActor () async throws -> EncounterSavedLinkList)?
+    var cardHook: (@MainActor (String) async throws -> EncounterDetail?)?
+    var favoriteHook: (@MainActor (String, Bool) async throws -> EncounterFavoriteResult)?
+    var saveHook: (@MainActor (String, String, Bool) async throws -> EncounterSavedResult)?
     var deleteHook: (@MainActor (String) async throws -> Void)?
 
-    nonisolated static func link(saved: Bool = false) -> EncounterLinkCard {
-        .init(id: "link", source: "Source", title: "Work", url: URL(string: "https://example.com")!, saved: saved)
+    nonisolated static func link() -> EncounterLinkCard {
+        .init(id: "link", source: "Source", title: "Work", url: URL(string: "https://example.com")!)
     }
-    nonisolated static func card(id: String = "card", favorite: Bool = false, saved: Bool = false) -> EncounterCard {
-        .init(id: id, kind: .ambient, day: day, displayName: "Name", links: [link(saved: saved)], favorite: favorite)
+    nonisolated static func card(id: String = "card", favorite: Bool = false, saved: Bool = false) -> EncounterDetail {
+        .init(card: .init(id: id, kind: .ambient, day: day, displayName: "Name", links: [link()]),
+              favorite: favorite, savedLinkIDs: saved ? ["link"] : [])
+    }
+    var feedResult: EncounterCardList {
+        .init(cards: cards.map { .init(card: $0.card, favorite: $0.favorite) }, truncated: false)
+    }
+    var savedResult: EncounterSavedLinkList {
+        .init(links: cards.flatMap { detail in
+            detail.card.links.filter { detail.savedLinkIDs.contains($0.id) }.map {
+                EncounterSavedLink(encounterID: detail.card.id, day: detail.card.day, kind: detail.card.kind, link: $0)
+            }
+        }, truncated: false)
     }
 
     func model() -> DiscoverModel {
         DiscoverModel(actions: .init(loadFeed: {
             self.reads.append("feed")
             if let hook = self.feedHook { return try await hook() }
-            return self.cards
+            return self.feedResult
         }, loadCard: { id in
             self.reads.append("card")
-            return self.cards.first { $0.id == id }
+            if let hook = self.cardHook { return try await hook(id) }
+            return self.cards.first { $0.card.id == id }
         }, setFavorite: { id, value in
             self.writes.append("favorite:\(value)")
             if let hook = self.favoriteHook { return try await hook(id, value) }
-            guard let index = self.cards.firstIndex(where: { $0.id == id }) else { return nil }
+            guard let index = self.cards.firstIndex(where: { $0.card.id == id }) else { throw DiscoverActionError.notFound }
             self.cards[index].favorite = value
-            return self.cards[index]
+            return .init(encounterID: id, favorite: value)
         }, saveLink: { id, linkID in
             self.writes.append("save")
             return try await self.save(id, linkID: linkID, saved: true)
@@ -349,25 +395,25 @@ final class DiscoverTestDriver {
         }, deleteEncounter: { id in
             self.writes.append("delete")
             if let hook = self.deleteHook { try await hook(id) }
-            self.cards.removeAll { $0.id == id }
+            self.cards.removeAll { $0.card.id == id }
         }, loadFavorites: {
             self.reads.append("favorites")
-            return self.cards.filter(\.favorite)
+            if let hook = self.favoritesHook { return try await hook() }
+            return .init(cards: self.feedResult.cards.filter(\.favorite), truncated: false)
         }, loadSavedLinks: {
             self.reads.append("saved")
             if let hook = self.savedHook { return try await hook() }
-            return self.cards.flatMap { card in
-                card.links.filter(\.saved).map { EncounterSavedLink(encounterID: card.id, link: $0) }
-            }
+            return self.savedResult
         }), discoveryOn: true)
     }
 
-    private func save(_ id: String, linkID: String, saved: Bool) async throws -> EncounterCard? {
+    private func save(_ id: String, linkID: String, saved: Bool) async throws -> EncounterSavedResult {
         if let hook = saveHook { return try await hook(id, linkID, saved) }
-        guard let cardIndex = cards.firstIndex(where: { $0.id == id }),
-              let linkIndex = cards[cardIndex].links.firstIndex(where: { $0.id == linkID }) else { return nil }
-        cards[cardIndex].links[linkIndex].saved = saved
-        return cards[cardIndex]
+        guard let index = cards.firstIndex(where: { $0.card.id == id }),
+              cards[index].card.links.contains(where: { $0.id == linkID }) else { throw DiscoverActionError.notFound }
+        if saved { cards[index].savedLinkIDs.insert(linkID) }
+        else { cards[index].savedLinkIDs.remove(linkID) }
+        return .init(encounterID: id, linkID: linkID, saved: saved)
     }
 }
 

@@ -41,17 +41,16 @@ public struct EncounterLinkCard: Identifiable, Equatable, Sendable {
     public let openingText: String?
     public let url: URL
     public let verified: Bool
-    public var saved: Bool
 
     public init(id: String, source: String, title: String, description: String? = nil,
                 tags: [String] = [], mainLanguage: String? = nil, openingText: String? = nil,
-                url: URL, verified: Bool = false, saved: Bool = false) {
+                url: URL, verified: Bool = false) {
         self.id = id; self.source = source; self.title = title
         self.description = EncounterCard.nonempty(description)
         self.tags = tags.filter { EncounterCard.nonempty($0) != nil }
         self.mainLanguage = EncounterCard.nonempty(mainLanguage)
         self.openingText = EncounterCard.nonempty(openingText)
-        self.url = url; self.verified = verified; self.saved = saved
+        self.url = url; self.verified = verified
     }
 }
 
@@ -64,29 +63,24 @@ public struct EncounterCard: Identifiable, Equatable, Sendable {
     public let displayName: String?
     public let introduction: String?
     public let interests: [InterestOption]
-    public let sharedInterestIDs: Set<String>
     public let purposes: Set<ProfilePurpose>
     public let contactDetail: String?
-    public internal(set) var links: [EncounterLinkCard]
-    public var favorite: Bool
+    public let links: [EncounterLinkCard]
     public let isShell: Bool
 
     public init(id: String, kind: EncounterKind, day: EncounterDay, displayName: String? = nil,
                 introduction: String? = nil, interests: [InterestOption] = [],
-                sharedInterestIDs: Set<String> = [], purposes: Set<ProfilePurpose> = [],
+                purposes: Set<ProfilePurpose> = [],
                 contactDetail: String? = nil, links: [EncounterLinkCard] = [],
-                favorite: Bool = false, isShell: Bool = false) {
+                isShell: Bool = false) {
         self.id = id; self.kind = kind; self.day = day; self.isShell = isShell
         self.displayName = isShell ? nil : Self.nonempty(displayName)
         self.introduction = isShell ? nil : Self.nonempty(introduction)
         self.interests = isShell ? [] : interests
-        self.sharedInterestIDs = isShell ? [] : sharedInterestIDs.intersection(Set(interests.map(\.id)))
         self.purposes = isShell ? [] : purposes
         self.contactDetail = isShell ? nil : Self.nonempty(contactDetail)
-        self.links = isShell ? [] : links; self.favorite = favorite
+        self.links = isShell ? [] : links
     }
-
-    public var sharedInterests: [InterestOption] { interests.filter { sharedInterestIDs.contains($0.id) } }
 
     static func nonempty(_ value: String?) -> String? {
         guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
@@ -94,24 +88,95 @@ public struct EncounterCard: Identifiable, Equatable, Sendable {
     }
 }
 
+/// The single-card contract includes the caller's state, separate from visible card fields.
+public struct EncounterDetail: Equatable, Sendable {
+    public let card: EncounterCard
+    public var favorite: Bool
+    public var savedLinkIDs: Set<String>
+
+    public init(card: EncounterCard, favorite: Bool, savedLinkIDs: Set<String>) {
+        self.card = card; self.favorite = favorite
+        self.savedLinkIDs = savedLinkIDs.intersection(Set(card.links.map(\.id)))
+    }
+}
+
+public struct EncounterFeedCard: Identifiable, Equatable, Sendable {
+    public var id: String { card.id }
+    public var day: EncounterDay { card.day }
+    public let card: EncounterCard
+    public var favorite: Bool
+    public let sharedInterestIDs: Set<String>?
+
+    public init(card: EncounterCard, favorite: Bool, sharedInterestIDs: Set<String>? = nil) {
+        self.card = card; self.favorite = favorite
+        self.sharedInterestIDs = card.isShell ? nil : sharedInterestIDs.map { $0.intersection(Set(card.interests.map(\.id))) }
+    }
+
+    public var sharedInterests: [InterestOption] {
+        card.interests.filter { sharedInterestIDs?.contains($0.id) == true }
+    }
+}
+
+public struct EncounterCardList: Equatable, Sendable {
+    public let cards: [EncounterFeedCard]
+    public let truncated: Bool
+    public init(cards: [EncounterFeedCard], truncated: Bool) {
+        self.cards = cards; self.truncated = truncated
+    }
+}
+
 public struct EncounterDayGroup: Identifiable, Equatable, Sendable {
     public var id: EncounterDay { day }
     public let day: EncounterDay
-    public let cards: [EncounterCard]
+    public let cards: [EncounterFeedCard]
 
     /// The caller supplies matching order; grouping never sorts cards inside a day.
-    public static func grouped(_ cards: [EncounterCard]) -> [Self] {
+    public static func grouped(_ cards: [EncounterFeedCard]) -> [Self] {
         let groups = Dictionary(grouping: cards, by: \.day)
         return groups.keys.sorted(by: >).map { Self(day: $0, cards: groups[$0] ?? []) }
     }
 }
 
 public struct EncounterSavedLink: Identifiable, Equatable, Sendable {
-    public var id: String { link.id }
+    public struct ID: Hashable, Sendable {
+        public let encounterID: String
+        public let linkID: String
+        public init(encounterID: String, linkID: String) {
+            self.encounterID = encounterID; self.linkID = linkID
+        }
+    }
+    public var id: ID { ID(encounterID: encounterID, linkID: link.id) }
     public let encounterID: String
-    public var link: EncounterLinkCard
-    public init(encounterID: String, link: EncounterLinkCard) {
-        self.encounterID = encounterID; self.link = link
+    public let day: EncounterDay
+    public let kind: EncounterKind
+    public let link: EncounterLinkCard
+    public init(encounterID: String, day: EncounterDay, kind: EncounterKind, link: EncounterLinkCard) {
+        self.encounterID = encounterID; self.day = day; self.kind = kind; self.link = link
+    }
+}
+
+public struct EncounterSavedLinkList: Equatable, Sendable {
+    public let links: [EncounterSavedLink]
+    public let truncated: Bool
+    public init(links: [EncounterSavedLink], truncated: Bool) {
+        self.links = links; self.truncated = truncated
+    }
+}
+
+public struct EncounterFavoriteResult: Equatable, Sendable {
+    public let encounterID: String
+    public let favorite: Bool
+    public init(encounterID: String, favorite: Bool) {
+        self.encounterID = encounterID; self.favorite = favorite
+    }
+}
+
+public struct EncounterSavedResult: Equatable, Sendable {
+    public let encounterID: String
+    public let linkID: String
+    public let saved: Bool
+    public init(encounterID: String, linkID: String, saved: Bool) {
+        self.encounterID = encounterID; self.linkID = linkID; self.saved = saved
     }
 }
 
@@ -119,27 +184,26 @@ public enum DiscoverActionError: Error, Equatable, Sendable {
     case authorizationFailed, notFound, unavailable
 }
 
-/// Composition supplies I/O. Writes return a freshly authorized card, or nil when access ended
-/// (including removal of the last retention reference). No card is persisted by this package.
+/// Composition supplies I/O. These results mirror the server contract; no card is persisted.
 @MainActor
 public struct DiscoverActions {
-    public var loadFeed: @MainActor () async throws -> [EncounterCard]
-    public var loadCard: @MainActor (String) async throws -> EncounterCard?
-    public var setFavorite: @MainActor (String, Bool) async throws -> EncounterCard?
-    public var saveLink: @MainActor (String, String) async throws -> EncounterCard?
-    public var unsaveLink: @MainActor (String, String) async throws -> EncounterCard?
+    public var loadFeed: @MainActor () async throws -> EncounterCardList
+    public var loadCard: @MainActor (String) async throws -> EncounterDetail?
+    public var setFavorite: @MainActor (String, Bool) async throws -> EncounterFavoriteResult
+    public var saveLink: @MainActor (String, String) async throws -> EncounterSavedResult
+    public var unsaveLink: @MainActor (String, String) async throws -> EncounterSavedResult
     public var deleteEncounter: @MainActor (String) async throws -> Void
-    public var loadFavorites: @MainActor () async throws -> [EncounterCard]
-    public var loadSavedLinks: @MainActor () async throws -> [EncounterSavedLink]
+    public var loadFavorites: @MainActor () async throws -> EncounterCardList
+    public var loadSavedLinks: @MainActor () async throws -> EncounterSavedLinkList
 
-    public init(loadFeed: @escaping @MainActor () async throws -> [EncounterCard],
-                loadCard: @escaping @MainActor (String) async throws -> EncounterCard?,
-                setFavorite: @escaping @MainActor (String, Bool) async throws -> EncounterCard?,
-                saveLink: @escaping @MainActor (String, String) async throws -> EncounterCard?,
-                unsaveLink: @escaping @MainActor (String, String) async throws -> EncounterCard?,
+    public init(loadFeed: @escaping @MainActor () async throws -> EncounterCardList,
+                loadCard: @escaping @MainActor (String) async throws -> EncounterDetail?,
+                setFavorite: @escaping @MainActor (String, Bool) async throws -> EncounterFavoriteResult,
+                saveLink: @escaping @MainActor (String, String) async throws -> EncounterSavedResult,
+                unsaveLink: @escaping @MainActor (String, String) async throws -> EncounterSavedResult,
                 deleteEncounter: @escaping @MainActor (String) async throws -> Void,
-                loadFavorites: @escaping @MainActor () async throws -> [EncounterCard],
-                loadSavedLinks: @escaping @MainActor () async throws -> [EncounterSavedLink]) {
+                loadFavorites: @escaping @MainActor () async throws -> EncounterCardList,
+                loadSavedLinks: @escaping @MainActor () async throws -> EncounterSavedLinkList) {
         self.loadFeed = loadFeed; self.loadCard = loadCard; self.setFavorite = setFavorite
         self.saveLink = saveLink; self.unsaveLink = unsaveLink; self.deleteEncounter = deleteEncounter
         self.loadFavorites = loadFavorites; self.loadSavedLinks = loadSavedLinks
@@ -156,6 +220,7 @@ public struct DiscoverNavigationActions {
     public var openDiscoverySettings: @MainActor () -> Void
     public var openProfileEditing: @MainActor () -> Void
     public var openReportOrBlock: @MainActor (EncounterCard) -> Void
+    public var reportImpersonation: @MainActor (EncounterCard, String) -> Void
     public var openSample: @MainActor () -> Void
     public var openOwnLinks: @MainActor () -> Void
     public var openSystemSettings: @MainActor () -> Void
@@ -170,6 +235,7 @@ public struct DiscoverNavigationActions {
                 openDiscoverySettings: @escaping @MainActor () -> Void,
                 openProfileEditing: @escaping @MainActor () -> Void,
                 openReportOrBlock: @escaping @MainActor (EncounterCard) -> Void,
+                reportImpersonation: @escaping @MainActor (EncounterCard, String) -> Void,
                 openSample: @escaping @MainActor () -> Void,
                 openOwnLinks: @escaping @MainActor () -> Void,
                 openSystemSettings: @escaping @MainActor () -> Void,
@@ -178,7 +244,8 @@ public struct DiscoverNavigationActions {
         self.openEncounter = openEncounter; self.openFavorites = openFavorites
         self.openSession = openSession; self.openQR = openQR
         self.openDiscoverySettings = openDiscoverySettings; self.openProfileEditing = openProfileEditing
-        self.openReportOrBlock = openReportOrBlock; self.openSample = openSample
+        self.openReportOrBlock = openReportOrBlock; self.reportImpersonation = reportImpersonation
+        self.openSample = openSample
         self.openOwnLinks = openOwnLinks; self.openSystemSettings = openSystemSettings
         self.openBluetoothRecovery = openBluetoothRecovery
         self.back = back; self.encounterRemoved = encounterRemoved

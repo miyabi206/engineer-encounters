@@ -23,7 +23,7 @@ public struct DiscoverFeedView: View {
                 interests: [InterestOption], sessionActive: Bool,
                 bluetooth: DiscoverBluetoothStatus, prerequisites: ProfilePrerequisites = .init(),
                 ownState: DiscoverLoadState = .loaded,
-                retryOwnState: @escaping @MainActor () async -> Void = {},
+                retryOwnState: @escaping @MainActor () async -> Void,
                 retryBluetooth: @escaping @MainActor () async -> Void) {
         self.model = model; self.sample = sample; self.navigation = navigation
         self.interests = interests; self.sessionActive = sessionActive; self.bluetooth = bluetooth
@@ -34,7 +34,8 @@ public struct DiscoverFeedView: View {
     public var body: some View {
         DiscoverPage(title: .discover) {
             Text(DiscoverStrings.text(.feedSubtitle)).foregroundStyle(.secondary)
-            if !model.discoveryOn {
+            if DiscoverFeedContent.select(discoveryOn: model.discoveryOn, isAuthorized: model.isAuthorized,
+                                          state: model.feedState, hasCards: !model.feed.isEmpty) == .discoveryOff {
                 DiscoverDiscoveryOffPanel(sample: sample, prerequisites: prerequisites, state: ownState,
                                           navigation: navigation, retry: retryOwnState)
             } else {
@@ -46,40 +47,35 @@ public struct DiscoverFeedView: View {
                     DiscoverInterestChips(interests: interests, action: navigation.openProfileEditing)
                 }
                 DiscoverAdaptiveActions {
-                    Text(DiscoverStrings.text(.all)).font(.headline).accessibilityAddTraits(.isSelected)
-                    Button(DiscoverStrings.text(.favorites), action: navigation.openFavorites)
+                    ForEach(DiscoverFeedShortcut.allCases, id: \.self) { shortcut in
+                        Button(DiscoverStrings.text(shortcut.label)) { shortcut.open(using: navigation) }
+                            .buttonStyle(.bordered)
+                    }
                 }
                 if bluetooth != .available {
                     DiscoverBluetoothUnavailablePanel(status: bluetooth, discoveryOn: true,
                                                        navigation: navigation, retry: retryBluetooth)
                 }
-                if !model.isAuthorized {
+                switch DiscoverFeedContent.select(discoveryOn: model.discoveryOn, isAuthorized: model.isAuthorized,
+                                                  state: model.feedState, hasCards: !model.feed.isEmpty) {
+                case .discoveryOff: EmptyView()
+                case .loading: DiscoverSkeleton()
+                case .failure:
                     DiscoverFailure { await model.loadFeed() }
                     SampleEncounterTile(model: sample, context: .emptyFeed, navigation: navigation)
-                } else {
-                    switch model.feedState {
-                    case .idle, .loading: DiscoverSkeleton()
-                    case .failed, .missing:
-                        DiscoverFailure { await model.loadFeed() }
-                        SampleEncounterTile(model: sample, context: .emptyFeed, navigation: navigation)
-                    case .loaded:
-                        if model.feed.isEmpty {
-                            DiscoverEmptyFeedPanel(sample: sample, sessionActive: sessionActive,
-                                                   bluetooth: bluetooth, navigation: navigation)
-                        } else {
-                            DiscoverDayGroups(groups: model.dayGroups, navigation: navigation)
-                        }
-                    }
+                case .empty:
+                    DiscoverEmptyFeedPanel(sample: sample, sessionActive: sessionActive,
+                                           bluetooth: bluetooth, navigation: navigation)
+                case .cards:
+                    DiscoverDayGroups(groups: model.dayGroups, navigation: navigation)
                 }
+                if model.feedTruncated { Text(DiscoverStrings.text(.truncated)).foregroundStyle(.secondary) }
                 Text(DiscoverStrings.text(.pace)).font(.callout).foregroundStyle(.secondary)
             }
         }
         .task { await model.loadFeed() }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { Task { await model.loadFeed() } }
-        }
-        .onChange(of: model.discoveryOn) { _, enabled in
-            if enabled { Task { await model.loadFeed() } }
         }
     }
 }
@@ -92,12 +88,14 @@ public struct EncounterDetailView: View {
     @Environment(\.locale) private var locale
     private let encounterID: String
     private let viewerPurposes: Set<ProfilePurpose>
+    private let viewerInterestIDs: Set<String>
     private let navigation: DiscoverNavigationActions
 
     public init(encounterID: String, model: DiscoverModel, viewerPurposes: Set<ProfilePurpose>,
+                viewerInterestIDs: Set<String>,
                 navigation: DiscoverNavigationActions) {
         self.encounterID = encounterID; self.model = model
-        self.viewerPurposes = viewerPurposes; self.navigation = navigation
+        self.viewerPurposes = viewerPurposes; self.viewerInterestIDs = viewerInterestIDs; self.navigation = navigation
     }
 
     public var body: some View {
@@ -117,7 +115,8 @@ public struct EncounterDetailView: View {
                 case .failed: DiscoverFailure { await model.loadCard(encounterID) }
                 case .missing: EmptyView()
                 case .loaded:
-                    if let card = model.card, card.id == encounterID {
+                    if let detail = model.card, detail.card.id == encounterID {
+                        let card = detail.card
                         DiscoverSurface {
                             EncounterIdentity(displayName: card.displayName)
                             if let introduction = card.introduction { Text(introduction) }
@@ -125,13 +124,17 @@ public struct EncounterDetailView: View {
                             Text(DiscoverStrings.text(card.kind.discoverLabel)).font(.callout).foregroundStyle(.secondary)
                             if card.isShell { Text(DiscoverStrings.text(.shell)) }
                             EncounterProfileSections(interests: card.interests, purposes: card.purposes,
-                                                     sharedInterests: card.sharedInterests,
+                                                     sharedInterests: card.interests.filter { viewerInterestIDs.contains($0.id) },
                                                      sharedPurposes: card.purposes.intersection(viewerPurposes))
                         }
                         if card.links.isEmpty { Text(DiscoverStrings.text(.noLinks)).foregroundStyle(.secondary) }
                         ForEach(card.links) { link in
-                            EncounterLinkView(link: link, isSample: false, disabled: model.isWriting) {
-                                Task { await model.setSaved(card.id, linkID: link.id, saved: !link.saved) }
+                            EncounterLinkView(link: link, isSample: false, saved: detail.savedLinkIDs.contains(link.id),
+                                              disabled: model.isWriting, reportImpersonation: {
+                                EncounterDetailControls.report(card: card, linkID: link.id, navigation: navigation)
+                            }) {
+                                Task { await model.setSaved(card.id, linkID: link.id,
+                                                           saved: !detail.savedLinkIDs.contains(link.id)) }
                             }
                         }
                         if let contact = card.contactDetail {
@@ -151,12 +154,12 @@ public struct EncounterDetailView: View {
         .toolbar {
             ToolbarItem(placement: .topBarLeading) { Button(DiscoverStrings.text(.back), action: navigation.back) }
             ToolbarItem(placement: .topBarTrailing) {
-                if model.canRead, model.detailState == .loaded, let card = model.card, card.id == encounterID {
+                if model.canRead, model.detailState == .loaded, let detail = model.card, detail.card.id == encounterID {
                     Button {
-                        Task { await model.setFavorite(card.id, favorite: !card.favorite) }
+                        Task { await model.setFavorite(detail.card.id, favorite: !detail.favorite) }
                     } label: {
-                        Label(DiscoverStrings.text(card.favorite ? .removeFavorite : .addFavorite),
-                              systemImage: card.favorite ? "star.fill" : "star")
+                        Label(DiscoverStrings.text(EncounterDetailControls(detail: detail).favoriteLabel),
+                              systemImage: detail.favorite ? "star.fill" : "star")
                     }.disabled(model.isWriting)
                 }
             }
@@ -173,7 +176,7 @@ public struct EncounterDetailView: View {
         } message: {
             Text(DiscoverStrings.text(.deleteExplanation))
         }
-        .task { await model.loadCard(encounterID) }
+        .task(id: encounterID) { await model.loadCard(encounterID) }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { Task { await model.loadCard(encounterID) } }
         }
@@ -207,7 +210,7 @@ public struct SampleEncounterDetailView: View {
                                              sharedInterests: [], sharedPurposes: [])
                 }
                 ForEach(fixture.links) { link in
-                    EncounterLinkView(link: link, isSample: true, disabled: false, toggleSaved: {})
+                    EncounterLinkView(link: link, isSample: true, saved: false, disabled: false, toggleSaved: {})
                 }
             }
         }
@@ -218,7 +221,7 @@ public struct SampleEncounterDetailView: View {
     }
 }
 
-/// S10. Both segments are authorized together before either is shown.
+/// S10. Encounter favorites and saved references load independently.
 @MainActor
 public struct DiscoverFavoritesView: View {
     @ObservedObject private var model: DiscoverModel
@@ -228,17 +231,21 @@ public struct DiscoverFavoritesView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     private let navigation: DiscoverNavigationActions
     private let prerequisites: ProfilePrerequisites
+    private let ownState: DiscoverLoadState
+    private let retryOwnState: @MainActor () async -> Void
 
     public init(model: DiscoverModel, sample: SampleEncounterModel, navigation: DiscoverNavigationActions,
-                prerequisites: ProfilePrerequisites = .init()) {
+                prerequisites: ProfilePrerequisites = .init(), ownState: DiscoverLoadState = .loaded,
+                retryOwnState: @escaping @MainActor () async -> Void) {
         self.model = model; self.sample = sample; self.navigation = navigation
-        self.prerequisites = prerequisites
+        self.prerequisites = prerequisites; self.ownState = ownState; self.retryOwnState = retryOwnState
     }
 
     public var body: some View {
         DiscoverPage(title: .favorites) {
             if !model.discoveryOn {
-                DiscoverDiscoveryOffPanel(sample: sample, prerequisites: prerequisites, navigation: navigation)
+                DiscoverDiscoveryOffPanel(sample: sample, prerequisites: prerequisites, state: ownState,
+                                          navigation: navigation, retry: retryOwnState)
             } else {
                 if dynamicTypeSize.isAccessibilitySize {
                     VStack(alignment: .leading, spacing: 12) {
@@ -253,30 +260,28 @@ public struct DiscoverFavoritesView: View {
                         Text(DiscoverStrings.text(.savedLinks)).tag(DiscoverFavoritesSegment.savedLinks)
                     }.pickerStyle(.segmented)
                 }
-                if !model.isAuthorized {
-                    DiscoverFailure { await model.loadFavorites() }
-                } else {
-                    switch model.favoritesState {
-                    case .idle, .loading: DiscoverSkeleton()
-                    case .failed, .missing: DiscoverFailure { await model.loadFavorites() }
-                    case .loaded:
-                        if segment == .encounters {
-                            if model.favorites.isEmpty { empty(.noFavorites) }
-                            DiscoverDayGroups(groups: model.favoriteDayGroups, navigation: navigation,
-                                              removeFavorite: { id in
-                                Task { await model.setFavorite(id, favorite: false) }
-                            }, disabled: model.isWriting)
-                        } else {
-                            if model.savedLinks.isEmpty { empty(.noSavedLinks) }
-                            ForEach(model.savedLinks) { item in
-                                EncounterLinkView(link: item.link, isSample: false, disabled: model.isWriting,
-                                                  viewEncounter: { navigation.openEncounter(item.encounterID) }) {
-                                    Task { await model.setSaved(item.encounterID, linkID: item.link.id, saved: false) }
-                                }
+                switch !model.isAuthorized ? .failed : (segment == .encounters ? model.favoritesState : model.savedLinksState) {
+                case .idle, .loading: DiscoverSkeleton()
+                case .failed, .missing: DiscoverFailure { await loadSelectedSegment() }
+                case .loaded:
+                    if segment == .encounters {
+                        if model.favorites.isEmpty { empty(.noFavorites) }
+                        DiscoverDayGroups(groups: model.favoriteDayGroups, navigation: navigation,
+                                          removeFavorite: { id in
+                            Task { await model.setFavorite(id, favorite: false) }
+                        }, disabled: model.isWriting)
+                        if model.favoritesTruncated { Text(DiscoverStrings.text(.truncated)).foregroundStyle(.secondary) }
+                    } else {
+                        if model.savedLinks.isEmpty { empty(.noSavedLinks) }
+                        ForEach(model.savedLinks) { item in
+                            EncounterLinkView(link: item.link, isSample: false, saved: true, disabled: model.isWriting,
+                                              viewEncounter: { navigation.openEncounter(item.encounterID) }) {
+                                Task { await model.setSaved(item.encounterID, linkID: item.link.id, saved: false) }
                             }
                         }
-                        DiscoverWriteFailure(model: model)
+                        if model.savedLinksTruncated { Text(DiscoverStrings.text(.truncated)).foregroundStyle(.secondary) }
                     }
+                    DiscoverWriteFailure(model: model)
                 }
             }
         }
@@ -284,13 +289,15 @@ public struct DiscoverFavoritesView: View {
         .toolbar {
             ToolbarItem(placement: .topBarLeading) { Button(DiscoverStrings.text(.back), action: navigation.back) }
         }
-        .task { await model.loadFavorites() }
+        .task(id: segment) { await loadSelectedSegment() }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { Task { await model.loadFavorites() } }
+            if phase == .active { Task { await loadSelectedSegment() } }
         }
-        .onChange(of: model.discoveryOn) { _, enabled in
-            if enabled { Task { await model.loadFavorites() } }
-        }
+    }
+
+    private func loadSelectedSegment() async {
+        if segment == .encounters { await model.loadFavorites() }
+        else { await model.loadSavedLinks() }
     }
 
     private func empty(_ key: DiscoverString) -> some View {
@@ -316,9 +323,11 @@ public struct DiscoverBluetoothUnavailablePanel: View {
     }
 
     public var body: some View {
-        if status != .available {
+        if DiscoverBluetoothContent.select(status) != .hidden {
             DiscoverSurface {
-                DiscoverHeading(key: .bluetoothUnavailable)
+                if case .unavailable = DiscoverBluetoothContent.select(status) {
+                    DiscoverHeading(key: .bluetoothUnavailable)
+                }
                 switch status {
                 case .poweredOff: Text(DiscoverStrings.text(.bluetoothOff))
                 case .denied: Text(DiscoverStrings.text(.bluetoothDenied))
@@ -350,7 +359,7 @@ public struct DiscoverDiscoveryOffPanel: View {
 
     public init(sample: SampleEncounterModel, prerequisites: ProfilePrerequisites,
                 state: DiscoverLoadState = .loaded, navigation: DiscoverNavigationActions,
-                retry: @escaping @MainActor () async -> Void = {}) {
+                retry: @escaping @MainActor () async -> Void) {
         self.sample = sample; self.prerequisites = prerequisites
         self.state = state; self.navigation = navigation; self.retry = retry
     }
@@ -359,15 +368,15 @@ public struct DiscoverDiscoveryOffPanel: View {
         DiscoverSurface {
             DiscoverHeading(key: .discoveryOff)
             Text(DiscoverStrings.text(.notParticipating))
-            switch state {
-            case .idle, .loading: DiscoverSkeleton()
-            case .failed, .missing: DiscoverFailure(retry: retry)
-            case .loaded:
+            switch DiscoverPrerequisiteContent.select(state: state, prerequisites: prerequisites) {
+            case .loading: DiscoverSkeleton()
+            case .failure: DiscoverFailure(retry: retry)
+            case let .guidance(editProfile, editLinks):
                 Button(DiscoverStrings.text(.enableDiscovery), action: navigation.openDiscoverySettings)
-                if !prerequisites.displayName || !prerequisites.introduction || !prerequisites.interest {
+                if editProfile {
                     Button(DiscoverStrings.text(.editProfile), action: navigation.openProfileEditing)
                 }
-                if !prerequisites.link { Button(DiscoverStrings.text(.ownLinks), action: navigation.openOwnLinks) }
+                if editLinks { Button(DiscoverStrings.text(.ownLinks), action: navigation.openOwnLinks) }
             }
             Text(DiscoverStrings.text(.canEdit)).foregroundStyle(.secondary)
         }
@@ -493,8 +502,7 @@ struct DiscoverSessionControls: View {
     var body: some View {
         DiscoverAdaptiveActions {
             Button(DiscoverStrings.text(sessionActive ? .viewSession : .startSession)) {
-                if bluetooth == .available { navigation.openSession() }
-                else { navigation.openBluetoothRecovery() }
+                DiscoverSessionDestination.select(sessionActive: sessionActive, bluetooth: bluetooth).open(using: navigation)
             }.buttonStyle(.borderedProminent)
             Button(DiscoverStrings.text(.qrExchange), action: navigation.openQR).buttonStyle(.bordered)
         }
@@ -530,15 +538,16 @@ struct DiscoverDayGroups: View {
     var body: some View {
         ForEach(groups) { group in
             Text(group.day.formatted(locale: locale)).font(.title2).accessibilityAddTraits(.isHeader)
-            ForEach(group.cards) { card in
+            ForEach(group.cards) { entry in
+                let card = entry.card
                 DiscoverSurface {
                     Button { navigation.openEncounter(card.id) } label: {
                         VStack(alignment: .leading, spacing: 12) {
                             EncounterIdentity(displayName: card.displayName)
                             if card.isShell { Text(DiscoverStrings.text(.shell)) }
-                            if !card.sharedInterests.isEmpty {
-                                Text(DiscoverStrings.sharedCount(card.sharedInterests.count, locale: locale))
-                                DiscoverInterestChips(interests: card.sharedInterests)
+                            if !entry.sharedInterests.isEmpty {
+                                Text(DiscoverStrings.sharedCount(entry.sharedInterests.count, locale: locale))
+                                DiscoverInterestChips(interests: entry.sharedInterests)
                             }
                             Text(DiscoverStrings.text(card.kind.discoverLabel)).foregroundStyle(.secondary)
                             if let link = card.links.first {
@@ -655,8 +664,10 @@ struct EncounterVerification: View {
 struct EncounterLinkView: View {
     let link: EncounterLinkCard
     let isSample: Bool
+    let saved: Bool
     let disabled: Bool
     var viewEncounter: (@MainActor () -> Void)? = nil
+    var reportImpersonation: (@MainActor () -> Void)? = nil
     let toggleSaved: @MainActor () -> Void
     var body: some View {
         DiscoverSurface {
@@ -671,8 +682,11 @@ struct EncounterLinkView: View {
             Link(DiscoverStrings.text(.openOriginal), destination: link.url)
             if let viewEncounter { Button(DiscoverStrings.text(.viewEncounter), action: viewEncounter) }
             if !isSample {
-                Button(DiscoverStrings.text(link.saved ? .unsaveLink : .saveLink), action: toggleSaved)
+                Button(DiscoverStrings.text(saved ? .unsaveLink : .saveLink), action: toggleSaved)
                     .disabled(disabled)
+                if let reportImpersonation {
+                    Button(DiscoverStrings.text(.reportImpersonation), action: reportImpersonation).disabled(disabled)
+                }
             }
         }
     }

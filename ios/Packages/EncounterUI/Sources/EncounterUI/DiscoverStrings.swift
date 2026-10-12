@@ -2,7 +2,7 @@ import Foundation
 
 enum DiscoverString: String, CaseIterable {
     case discover, feedSubtitle, discoveryEnabled, background, startSession, viewSession, qrExchange
-    case yourInterests, all, favorites, sharedCount, shell, ambient, session
+    case yourInterests, favorites, sharedCount, shell, ambient, session
     case qrKind, viewWork, pace, encounter, authorizedOnly, purposes, common
     case openOriginal, saveLink, unsaveLink, addFavorite, removeFavorite, noLinks, contact
     case safety, deleteEncounter, deleteExplanation, sampleEncounter, encounters, savedLinks, noFavorites
@@ -11,7 +11,7 @@ enum DiscoverString: String, CaseIterable {
     case canEdit, viewSample, dismissSample, emptyFeed, dailyReport, fictional, back
     case cancel, retry, loading, loadError, verified, unverified, interests
     case discoveryPurpose, collaborationPurpose, writeError, unverifiedExplanation, sampleName, sampleIntroduction, sampleSource
-    case sampleWork, sampleDescription
+    case sampleWork, sampleDescription, truncated, reportImpersonation
 }
 
 enum DiscoverStrings {

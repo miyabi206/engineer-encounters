@@ -6,7 +6,6 @@
 "viewSession" = "View session";
 "qrExchange" = "QR exchange";
 "yourInterests" = "Your interests";
-"all" = "All";
 "favorites" = "Favorites";
 "sharedCount" = "{count} shared interests";
 "shell" = "No information is shared with you";
@@ -70,3 +69,5 @@
 "sampleSource" = "Example";
 "sampleWork" = "Example work";
 "sampleDescription" = "An example of a shared link";
+"truncated" = "Only the first 200 currently authorized entries are displayed.";
+"reportImpersonation" = "Report impersonation";
