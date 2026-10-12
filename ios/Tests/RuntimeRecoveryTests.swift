@@ -40,7 +40,7 @@ final class RuntimeRecoveryTests: XCTestCase {
             "register_time_zone": [.response(appAccountOK())], "submit_receipts": [.held]
         ])
         let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(),
-            transport: transport, sessionStore: InMemorySessionStore(session: try appBackendTestSession()),
+            transport: transport, keychain: AppMemoryKeychain(), sessionStore: InMemorySessionStore(session: try appBackendTestSession()),
             serverTokenStore: InMemoryTokenBatchStore(), signedOutTokenStore: InMemoryTokenBatchStore(),
             queueOpener: { queue }, now: { appBackendTestNow })
         await composition.waitForRestoration()
@@ -78,7 +78,7 @@ final class RuntimeRecoveryTests: XCTestCase {
         let sessions = InMemorySessionStore(session: try appBackendTestSession())
         let queue = InMemoryReceiptQueue()
         let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(),
-            transport: transport, sessionStore: sessions, serverTokenStore: tokens,
+            transport: transport, keychain: AppMemoryKeychain(), sessionStore: sessions, serverTokenStore: tokens,
             signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { queue }, now: { appBackendTestNow })
         await composition.waitForRestoration()
         let oldRuntime = try XCTUnwrap(composition.runtime)
@@ -120,7 +120,7 @@ final class RuntimeRecoveryTests: XCTestCase {
         let defaults = appBackendDefaults()
         ParticipationFlag(defaults: defaults).isEnabled = true
         let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults,
-            transport: transport, sessionStore: InMemorySessionStore(session: try appBackendTestSession()),
+            transport: transport, keychain: AppMemoryKeychain(), sessionStore: InMemorySessionStore(session: try appBackendTestSession()),
             serverTokenStore: tokens, signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { InMemoryReceiptQueue() },
             transportFactory: { await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock) },
             clock: clock, uploadScheduler: ManualReceiptUploadScheduler(), now: { appBackendTestNow })
@@ -225,7 +225,7 @@ final class RuntimeRecoveryTests: XCTestCase {
         ParticipationFlag(defaults: defaults).isEnabled = true
         let transport = AppBackendTransport()
         let composition = AppComposition(configuration: nil, defaults: defaults, transport: transport,
-            signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { InMemoryReceiptQueue() }, transportFactory: {
+            keychain: AppMemoryKeychain(), signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { InMemoryReceiptQueue() }, transportFactory: {
                 await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)
             }, clock: clock)
         var pauses = 0
@@ -252,7 +252,7 @@ final class RuntimeRecoveryTests: XCTestCase {
         var opens = 0
         var builds = 0
         let composition = AppComposition(configuration: nil, defaults: appBackendDefaults(),
-            signedOutTokenStore: tokens, queueOpener: { opens += 1; return queue }, transportFactory: {
+            keychain: AppMemoryKeychain(), signedOutTokenStore: tokens, queueOpener: { opens += 1; return queue }, transportFactory: {
                 builds += 1
                 return await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: ManualEncounterClock())
             })

@@ -73,7 +73,7 @@ final class AccountModelTests: XCTestCase {
         let store = InMemorySessionStore(session: try appBackendTestSession())
         let zone = AppTestTimeZone("Asia/Tokyo")
         let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(),
-            transport: transport, sessionStore: store, serverTokenStore: InMemoryTokenBatchStore(),
+            transport: transport, keychain: AppMemoryKeychain(), sessionStore: store, serverTokenStore: InMemoryTokenBatchStore(),
             queueOpener: { InMemoryReceiptQueue() }, now: { appBackendTestNow }, timeZone: { zone.value })
         var states: [AccountState] = []
         let subscription = composition.account.$state.sink { states.append($0) }
@@ -146,7 +146,7 @@ final class AccountModelTests: XCTestCase {
         var builds = 0
         let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults,
             transport: AppBackendTransport([HTTPResponse(data: Data(), statusCode: 204)]),
-            sessionStore: InMemorySessionStore(session: try appBackendTestSession()),
+            keychain: AppMemoryKeychain(), sessionStore: InMemorySessionStore(session: try appBackendTestSession()),
             serverTokenStore: InMemoryTokenBatchStore(batch: try EncounterSamples.batch()),
             queueOpener: { InMemoryReceiptQueue() }, transportFactory: {
                 builds += 1
@@ -166,7 +166,7 @@ final class AccountModelTests: XCTestCase {
         let queue = InMemoryReceiptQueue()
         let server = InMemoryTokenBatchStore(batch: try EncounterSamples.batch())
         let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(),
-            transport: transport, sessionStore: InMemorySessionStore(), serverTokenStore: server,
+            transport: transport, keychain: AppMemoryKeychain(), sessionStore: InMemorySessionStore(), serverTokenStore: server,
             queueOpener: { queue }, now: { appBackendTestNow }, timeZone: { "Asia/Tokyo" })
         await composition.waitForRestoration()
         await composition.refreshLocalSummary()
@@ -197,7 +197,7 @@ final class AccountModelTests: XCTestCase {
         let sessions = InMemorySessionStore()
         let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(),
             transport: AppBackendTransport([appBackendAuthResponse(), HTTPResponse(data: Data(), statusCode: 500)]),
-            sessionStore: sessions, serverTokenStore: InMemoryTokenBatchStore(),
+            keychain: AppMemoryKeychain(), sessionStore: sessions, serverTokenStore: InMemoryTokenBatchStore(),
             signedOutTokenStore: InMemoryTokenBatchStore(),
             queueOpener: { InMemoryReceiptQueue() }, now: { appBackendTestNow })
         await composition.waitForRestoration()

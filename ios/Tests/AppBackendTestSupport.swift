@@ -3,6 +3,7 @@ import EncounterDomain
 import EncounterDomainTestSupport
 import EncounterStorage
 import Foundation
+import Security
 import XCTest
 @testable import EngineerEncounters
 
@@ -49,18 +50,24 @@ actor AppMemoryKeychain: KeychainClient {
     private(set) var services: Set<String> = []
     private(set) var reads = 0
     private var failSessionDeletion = false
+    private var unavailable = false
+    private(set) var deletionAttempts = 0
     private(set) var sessionDeletionAttempts = 0
     private(set) var sessionWrites = 0
     func read(service: String, account: String) async throws -> Data? {
         reads += 1
+        if unavailable { throw TokenBatchStorageError.keychainStatus(errSecInteractionNotAllowed) }
         return values[service + ":" + account]
     }
     func writeOrReplace(_ data: Data, service: String, account: String) async throws {
+        if unavailable { throw TokenBatchStorageError.keychainStatus(errSecInteractionNotAllowed) }
         services.insert(service)
         if service == KeychainSessionStore.service { sessionWrites += 1 }
         values[service + ":" + account] = data
     }
     func delete(service: String, account: String) async throws {
+        deletionAttempts += 1
+        if unavailable { throw TokenBatchStorageError.keychainStatus(errSecInteractionNotAllowed) }
         if service == KeychainSessionStore.service {
             sessionDeletionAttempts += 1
             if failSessionDeletion { throw BackendError.storageFailure }
@@ -68,6 +75,7 @@ actor AppMemoryKeychain: KeychainClient {
         values[service + ":" + account] = nil
     }
     func setSessionDeletionFailure(_ value: Bool) { failSessionDeletion = value }
+    func setUnavailable(_ value: Bool) { unavailable = value }
     func corruptSession() { values[KeychainSessionStore.service + ":current"] = Data("invalid".utf8) }
 }
 

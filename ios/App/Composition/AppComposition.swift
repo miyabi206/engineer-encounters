@@ -23,6 +23,7 @@ final class AppComposition: ObservableObject {
     private var queueOpener: @MainActor () async throws -> any ReceiptQueue
     private let suppliedQueueOpener: (@MainActor () async throws -> any ReceiptQueue)?
     private var storageReady = false
+    @Published private var keychainUnavailable = false
     private var storageWasCleared = false
     private var legacyStorageCleared = false
     private let transportFactory: @MainActor () async -> any BluetoothTransport
@@ -126,6 +127,7 @@ final class AppComposition: ObservableObject {
         isParticipating = participation.isEnabled
         account.prepareForSessionChange = { [weak self] in try await self?.prepareForSessionChange() }
         account.sessionDidChange = { [weak self] force in await self?.recreateRuntime(force: force) }
+        account.canRefreshSession = { [weak self] in self?.keychainUnavailable == false }
         binding?.onReplacement = { [weak self] in
             let runtime = self?.runtime
             let issuer = self?.serverIssuer
@@ -148,7 +150,11 @@ final class AppComposition: ObservableObject {
 
     func waitForRestoration() async { await restorationTask?.value }
 
-    var status: EncounterRuntimeStatus { runtime?.status ?? EncounterRuntimeStatus() }
+    var status: EncounterRuntimeStatus {
+        var status = runtime?.status ?? EncounterRuntimeStatus()
+        status.storageUnavailable = status.storageUnavailable || keychainUnavailable
+        return status
+    }
 
     func setParticipation(_ enabled: Bool) async {
         participation.isEnabled = enabled
@@ -177,6 +183,10 @@ final class AppComposition: ObservableObject {
 
     func refresh() async {
         await waitForRestoration()
+        if keychainUnavailable {
+            if account.state == .signedInPending(nil) { await account.restore() }
+            else { await recreateRuntime(force: true) }
+        }
         await account.refresh()
         guard !sessionChangeInProgress else { return }
         if !storageReady { await recreateRuntime(force: true) }
@@ -207,6 +217,7 @@ final class AppComposition: ObservableObject {
     func retryDiagnostics() async {
         await waitForRestoration()
         guard !sessionChangeInProgress else { return }
+        if keychainUnavailable { await refresh(); return }
         if trialLog.state == .failed { trialLog.retry() }
         if isParticipating {
             trialRecorder.beginIfNeeded(metadata: trialMetadata, reason: .launch)
@@ -246,6 +257,7 @@ final class AppComposition: ObservableObject {
 
     private func recreateRuntime(force: Bool) async {
         guard binding?.isCurrent != false else { return }
+        let force = force || keychainUnavailable
         sessionChangeInProgress = false
         if let sessions = account.sessions { client = clientFactory?(sessions) }
         if force, let runtime {
@@ -274,6 +286,17 @@ final class AppComposition: ObservableObject {
     private func prepareStorageBinding() async -> Bool {
         guard let binding else { return true }
         guard binding.isCurrent else { return false }
+        do {
+            if !legacyStorageCleared {
+                // Earlier builds have no binding, even when their backend happens to match.
+                try await KeychainTokenBatchStore(service: Self.serverTokenService, client: keychain).clear()
+                try await KeychainTokenBatchStore(client: keychain).clear()
+            }
+            keychainUnavailable = false
+        } catch {
+            keychainUnavailable = true
+            return false
+        }
         let user: UUID?
         switch account.state {
         case .signedIn(let id), .signedInPending(.some(let id)): user = id
@@ -283,9 +306,6 @@ final class AppComposition: ObservableObject {
         let owner = BackendStorageOwner(backend: binding.backend, account: user)
         do {
             if !legacyStorageCleared {
-                // Earlier builds have no binding, even when their backend happens to match.
-                try await KeychainTokenBatchStore(service: Self.serverTokenService, client: keychain).clear()
-                try await KeychainTokenBatchStore(client: keychain).clear()
                 if suppliedQueueOpener == nil {
                     let legacy = try await EncounterRuntime.openDefaultQueue()
                     try await legacy.removeAll()
@@ -305,14 +325,20 @@ final class AppComposition: ObservableObject {
             queueOpener = suppliedQueueOpener ?? { try await EncounterRuntime.openBoundQueue(namespace: owner.namespace) }
             storageWasCleared = false
             return true
-        } catch { return false }
+        } catch {
+            if case .keychainStatus = error as? TokenBatchStorageError { keychainUnavailable = true }
+            return false
+        }
     }
 
     private func makeRuntime() -> EncounterRuntime {
         if let runtime { return runtime }
         let store: any TokenBatchStore
         let issuer: (any TokenIssuer)?
-        if account.state.isSignedIn, let client {
+        if keychainUnavailable {
+            store = InMemoryTokenBatchStore()
+            issuer = nil
+        } else if account.state.isSignedIn, let client {
             if storageReady, let binding, let owner = binding.owner {
                 store = BoundTokenBatchStore(store: serverTokenStore, binding: binding, owner: owner)
             } else { store = InMemoryTokenBatchStore() }
@@ -332,7 +358,10 @@ final class AppComposition: ObservableObject {
             uploadFactory = { ReceiptUploader(client: client, queue: $0) }
         } else { uploadFactory = nil }
         let openQueue: @MainActor () async throws -> any ReceiptQueue
-        if storageReady, let binding, let owner = binding.owner {
+        if keychainUnavailable {
+            // Failed quarantine cannot prepare a radio or expose a persisted receipt queue.
+            openQueue = { throw BackendError.storageFailure }
+        } else if storageReady, let binding, let owner = binding.owner {
             let opener = queueOpener
             openQueue = { BoundReceiptQueue(queue: try await opener(), binding: binding, owner: owner) }
         } else if binding != nil {

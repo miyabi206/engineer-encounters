@@ -24,6 +24,106 @@ final class BackendStorageRecoveryTests: XCTestCase {
         XCTAssertFalse(owner.namespace.contains(appBackendTestUser.uuidString))
     }
 
+    func testUnavailableKeychainQuarantinesRuntimeAndRefreshRetriesBindingAfterRecovery() async throws {
+        for sessionInKeychain in [false, true] {
+            let defaults = appBackendDefaults()
+            ParticipationFlag(defaults: defaults).isEnabled = true
+            let configuration = appBackendTestConfiguration()
+            let keychain = AppMemoryKeychain()
+            let session = try appBackendTestSession()
+            let persisted = KeychainSessionStore(backendIdentity: BackendStorageBinding.identity(configuration), client: keychain)
+            try await persisted.save(session)
+            let owner = BackendStorageOwner(backend: BackendStorageBinding.identity(configuration), account: session.userID)
+            let tokens = KeychainTokenBatchStore(service: AppComposition.serverTokenService(owner: owner), client: keychain)
+            try await tokens.save(appBackendLongBatch())
+            let legacy = KeychainTokenBatchStore(service: AppComposition.serverTokenService, client: keychain)
+            try await legacy.save(appBackendLongBatch())
+            let queue = InMemoryReceiptQueue()
+            let receipt = appBackendFinalReceipt()
+            try await queue.enqueue(receipt)
+            let acknowledgement = try JSONEncoder().encode([ReceiptStatusTransfer(id: receipt.id, status: .resolved)])
+            let transport = ControlledAppBackendTransport([
+                "register_time_zone": [.response(appAccountOK())],
+                "submit_receipts": [.response(HTTPResponse(data: acknowledgement, statusCode: 200))]
+            ])
+            let clock = ManualEncounterClock()
+            var queueOpens = 0
+            var radioBuilds = 0
+            await keychain.setUnavailable(true)
+            let composition = AppComposition(configuration: configuration, defaults: defaults, transport: transport,
+                keychain: keychain, sessionStore: sessionInKeychain ? nil : InMemorySessionStore(session: session),
+                queueOpener: { queueOpens += 1; return queue }, transportFactory: {
+                    radioBuilds += 1
+                    return await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)
+                }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(), now: { appBackendTestNow })
+            await composition.waitForRestoration()
+            let isolated = try XCTUnwrap(composition.runtime)
+            XCTAssertEqual(composition.account.state, .signedInPending(sessionInKeychain ? nil : session.userID))
+            XCTAssertNil(isolated.tokenIssuer)
+            XCTAssertNil(isolated.uploadTask)
+            XCTAssertTrue(composition.status.storageUnavailable)
+            XCTAssertFalse(composition.status.validTokenAvailable)
+            XCTAssertFalse(composition.status.discoveryOn)
+            XCTAssertEqual(queueOpens, 0)
+            XCTAssertEqual(radioBuilds, 0)
+            let failedAttempts = await keychain.deletionAttempts
+            XCTAssertGreaterThan(failedAttempts, 0)
+            await composition.refresh()
+            let retryAttempts = await keychain.deletionAttempts
+            let requestsWhileUnavailable = await transport.recorded()
+            XCTAssertGreaterThan(retryAttempts, failedAttempts)
+            XCTAssertTrue(requestsWhileUnavailable.isEmpty)
+            XCTAssertFalse(composition.status.validTokenAvailable)
+            XCTAssertTrue(composition.status.storageUnavailable)
+            XCTAssertEqual(queueOpens, 0)
+            XCTAssertEqual(radioBuilds, 0)
+            await keychain.setUnavailable(false)
+            await composition.refresh()
+            XCTAssertEqual(composition.account.state, .signedIn(session.userID))
+            XCTAssertFalse(composition.runtime === isolated)
+            XCTAssertTrue(composition.runtime?.tokenIssuer is ServerTokenIssuer)
+            XCTAssertFalse(composition.status.storageUnavailable)
+            XCTAssertTrue(composition.status.validTokenAvailable)
+            XCTAssertEqual(queueOpens, 1)
+            XCTAssertEqual(radioBuilds, 1)
+            try await appBackendEventually { try await queue.pending().isEmpty }
+            let uploads = await transport.count("submit_receipts")
+            let tokenRequests = await transport.count("issue_token_batch")
+            let retained = try await tokens.load()
+            let quarantined = try await legacy.load()
+            XCTAssertEqual(uploads, 1)
+            XCTAssertEqual(tokenRequests, 0)
+            XCTAssertNotNil(retained)
+            XCTAssertNil(quarantined)
+            await composition.setParticipation(false)
+        }
+    }
+
+    func testHeldAccountSetupAfterBackendReplacementReportsNotAuthenticated() async throws {
+        let defaults = appBackendDefaults()
+        let keychain = AppMemoryKeychain()
+        let oldTransport = ControlledAppBackendTransport([
+            "signin": [.response(appBackendAuthResponse())], "accept_declarations": [.held]
+        ])
+        let first = storageComposition(configuration: appBackendTestConfiguration(), defaults: defaults,
+            keychain: keychain, transport: oldTransport, queue: InMemoryReceiptQueue())
+        await first.waitForRestoration()
+        let signingIn = Task { try await storageSignIn(first) }
+        try await appBackendEventually { await oldTransport.isHeld("accept_declarations") }
+        let other = try XCTUnwrap(BackendConfiguration(address: "https://other.example", publicClientKey: "fixture-key"))
+        let restarted = storageComposition(configuration: other, defaults: defaults, keychain: keychain,
+            transport: ControlledAppBackendTransport([:]), queue: InMemoryReceiptQueue())
+        await restarted.waitForRestoration()
+        await oldTransport.release("accept_declarations", with: appAccountOK())
+        do { try await signingIn.value; XCTFail("An obsolete backend cannot publish its account") }
+        catch { XCTAssertEqual(error as? BackendError, .notAuthenticated) }
+        XCTAssertEqual(restarted.account.state, .signedOut)
+        let stored = try await KeychainSessionStore(backendIdentity: BackendStorageBinding.identity(other), client: keychain).load()
+        let zones = await oldTransport.count("register_time_zone")
+        XCTAssertNil(stored)
+        XCTAssertEqual(zones, 0)
+    }
+
     func testFailedDeletionStaysSignedOutAcrossRestartBlocksSignInAndRetriesUntilSuccess() async throws {
         let defaults = appBackendDefaults()
         let keychain = AppMemoryKeychain()

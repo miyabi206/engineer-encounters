@@ -88,7 +88,7 @@ final class RuntimeBackendTests: XCTestCase {
         // Wire the real composition and backend. The application, rather than this test,
         // must decide that a signed-out runtime has no upload route.
         let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(),
-            transport: transport, sessionStore: InMemorySessionStore(),
+            transport: transport, keychain: AppMemoryKeychain(), sessionStore: InMemorySessionStore(),
             serverTokenStore: InMemoryTokenBatchStore(), signedOutTokenStore: InMemoryTokenBatchStore(),
             queueOpener: { queue }, transportFactory: {
                 await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)
@@ -150,7 +150,7 @@ final class RuntimeBackendTests: XCTestCase {
         let store = HeldAppTokenStore()
         let queue = InMemoryReceiptQueue()
         let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(),
-            transport: transport, sessionStore: InMemorySessionStore(session: try appBackendTestSession()),
+            transport: transport, keychain: AppMemoryKeychain(), sessionStore: InMemorySessionStore(session: try appBackendTestSession()),
             serverTokenStore: store, queueOpener: { queue }, now: { appBackendTestNow })
         await composition.waitForRestoration()
         let oldRuntime = try XCTUnwrap(composition.runtime)

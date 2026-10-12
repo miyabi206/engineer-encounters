@@ -302,7 +302,7 @@ final class AccountFlowTests: XCTestCase {
             let tokens = InMemoryTokenBatchStore(batch: try EncounterSamples.batch())
             let sessions = InMemorySessionStore(session: try appBackendTestSession())
             let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(),
-                transport: transport, sessionStore: sessions, serverTokenStore: tokens,
+                transport: transport, keychain: AppMemoryKeychain(), sessionStore: sessions, serverTokenStore: tokens,
                 signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { queue },
                 transportFactory: { ConsentTestTransport() }, now: { appBackendTestNow }, timeZone: { "Asia/Tokyo" })
             let flow = AccountFlowModel(composition: composition)
@@ -472,7 +472,7 @@ private func appFlowComposition(configuration: BackendConfiguration? = appBacken
     sessionStore: (any SessionStore)? = nil, defaults: UserDefaults? = nil,
     transportFactory: @escaping @MainActor () async -> any BluetoothTransport = { ConsentTestTransport() }) -> AppComposition {
     AppComposition(configuration: configuration, defaults: defaults ?? appBackendDefaults(userID: session?.userID ?? appBackendTestUser), transport: transport,
-        sessionStore: sessionStore ?? InMemorySessionStore(session: session), serverTokenStore: InMemoryTokenBatchStore(),
+        keychain: AppMemoryKeychain(), sessionStore: sessionStore ?? InMemorySessionStore(session: session), serverTokenStore: InMemoryTokenBatchStore(),
         signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { InMemoryReceiptQueue() },
         transportFactory: transportFactory, now: { appBackendTestNow }, timeZone: { "Asia/Tokyo" })
 }

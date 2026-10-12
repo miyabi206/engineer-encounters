@@ -47,6 +47,7 @@ final class AccountModel: ObservableObject {
     private var operationTask: Task<Void, any Error>?
     var prepareForSessionChange: @MainActor () async throws -> Void = {}
     var sessionDidChange: @MainActor (_ recreate: Bool) async -> Void = { _ in }
+    var canRefreshSession: @MainActor () -> Bool = { true }
 
     init(sessions: SessionManager?, service: OwnAccountService?,
          sessionStore: (any SessionStore)? = nil,
@@ -115,6 +116,7 @@ final class AccountModel: ObservableObject {
         guard state == .signedOut else { throw BackendError.invalidRequest }
         guard hasCurrentSessionContext else { throw BackendError.notAuthenticated }
         guard !cleanup.isPending else { throw BackendError.storageFailure }
+        guard canRefreshSession() else { throw BackendError.storageFailure }
         guard let oldSessions = sessions, let sessionStore, let sessionFactory, let serviceFactory else {
             throw BackendError.invalidRequest
         }
@@ -123,7 +125,10 @@ final class AccountModel: ObservableObject {
         let newSessions = sessionFactory(stagedStore)
         let session: BackendSession
         do { session = try await newSessions.establish(using: request) }
-        catch { throw Self.safeError(error) }
+        catch {
+            guard authGeneration == generation, hasCurrentSessionContext else { throw BackendError.notAuthenticated }
+            throw Self.safeError(error)
+        }
         var establishedGeneration: UUID?
         var storageFailed = false
         try await serialize {
@@ -168,13 +173,16 @@ final class AccountModel: ObservableObject {
         guard let epoch = establishedGeneration else { return }
         do {
             try await finishAccountSetup(epoch: epoch)
-            guard epoch == generation else { throw BackendError.notAuthenticated }
+            guard epoch == generation, hasCurrentSessionContext else { throw BackendError.notAuthenticated }
             state = .signedIn(session.userID)
             if storageFailed { throw BackendError.storageFailure }
         } catch BackendError.notAuthenticated {
             await discardDeadSession(epoch: epoch, recreate: true)
             throw BackendError.notAuthenticated
-        } catch { throw Self.safeError(error) }
+        } catch {
+            guard epoch == generation, hasCurrentSessionContext else { throw BackendError.notAuthenticated }
+            throw Self.safeError(error)
+        }
     }
 
     func signOut() async throws {
@@ -209,6 +217,7 @@ final class AccountModel: ObservableObject {
             await discardDeadSession(epoch: generation, recreate: true)
             return
         }
+        guard canRefreshSession() else { return }
         guard state.isSignedIn, let sessions else { return }
         if let refreshTask { await refreshTask.task.value; return }
         let epoch = generation
@@ -251,6 +260,7 @@ final class AccountModel: ObservableObject {
 
     private func finishAccountSetup(epoch: UUID) async throws {
         guard epoch == generation else { throw BackendError.notAuthenticated }
+        guard canRefreshSession() else { throw BackendError.storageFailure }
         if let setupTask { return try await setupTask.task.value }
         let id = UUID()
         let task = Task {

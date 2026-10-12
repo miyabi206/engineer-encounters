@@ -310,7 +310,7 @@ private func makeRecoveryComposition(transport: any HTTPTransport, sessions: any
     defaults: UserDefaults? = nil) -> AppComposition {
     let clock = ManualEncounterClock()
     return AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults ?? appBackendDefaults(),
-        transport: transport, sessionStore: sessions, serverTokenStore: tokens,
+        transport: transport, keychain: AppMemoryKeychain(), sessionStore: sessions, serverTokenStore: tokens,
         signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { queue }, transportFactory: {
             await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)
         }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(), now: { appBackendTestNow }, timeZone: { "Asia/Tokyo" })
