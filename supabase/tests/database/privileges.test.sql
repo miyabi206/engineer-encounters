@@ -114,11 +114,17 @@ insert into unit3_rpc_signatures values
     ('public.delete_own_link(uuid)'),
     ('public.reorder_own_links(uuid[])'),
     ('public.get_github_connection()'),
-    ('public.disconnect_github()');
+    ('public.disconnect_github()'),
+    ('public.start_session()'),
+    ('public.stop_session()'),
+    ('public.get_own_session()'),
+    ('public.issue_qr_code()'),
+    ('public.cancel_qr_code()'),
+    ('public.redeem_qr_code(text)');
 
 select extensions.is((select pg_catalog.count(*) from unit3_rpc_signatures as f
     join pg_catalog.pg_proc as p on p.oid = pg_catalog.to_regprocedure(f.signature)
-    where p.pronamespace = 'public'::regnamespace), 19::bigint, 'all nineteen Unit 3 and Unit 5 public RPCs exist');
+    where p.pronamespace = 'public'::regnamespace), 25::bigint, 'all twenty-five Unit 3, Unit 4 and Unit 5 public RPCs exist');
 
 select extensions.ok(not exists (
     select 1 from pg_catalog.pg_proc as p
@@ -139,7 +145,7 @@ select extensions.is((select pg_catalog.count(*) from pg_catalog.pg_proc as p
     where p.pronamespace = 'public'::regnamespace and not exists (
         select 1 from pg_catalog.pg_depend as d where d.classid = 'pg_catalog.pg_proc'::regclass and d.objid = p.oid
             and d.refclassid = 'pg_catalog.pg_extension'::regclass and d.deptype = 'e')),
-    19::bigint, 'no unlisted public functions or overloads');
+    25::bigint, 'no unlisted public functions or overloads');
 
 create temporary table service_rpc_signatures (signature text primary key);
 insert into service_rpc_signatures values ('service.get_github_identity(uuid)'),

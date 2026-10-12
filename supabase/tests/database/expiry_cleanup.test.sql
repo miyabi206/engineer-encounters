@@ -4,7 +4,7 @@ create extension if not exists pgtap with schema extensions;
 
 grant execute on all functions in schema extensions to anon, authenticated;
 
-select extensions.plan(43);
+select extensions.plan(53);
 
 select extensions.ok(exists (select 1 from pg_catalog.pg_extension where extname = 'pg_cron'),
     'pg_cron is installed');
@@ -213,6 +213,51 @@ set local role authenticated;
 select extensions.throws_ok('select public.register_time_zone(''Asia/Tokyo'')', 'P0001', 'rate_limited',
     'cleanup cannot allow an eleventh registration in the day');
 reset role;
+
+-- The report-person bucket, like zone registration, has a daily span. These
+-- retention tests do not add a report RPC or report table.
+insert into private.account_limit_events (user_id, bucket, occurred_at)
+select 'dddddddd-0000-0000-0000-000000000001'::uuid, 'report_encounter_person', f.event_time
+from (values
+    (timestamptz '2026-10-10 23:59:59.999999+00'),
+    (timestamptz '2026-10-11 00:00:00+00'),
+    (timestamptz '2026-10-11 00:00:00.000001+00'),
+    (timestamptz '2026-10-11 22:00:00+00')
+) as f(event_time);
+select private.cleanup_expired_data(timestamptz '2026-10-11 23:59:59.999999+00');
+select extensions.is((select pg_catalog.count(*) from private.account_limit_events
+    where user_id = 'dddddddd-0000-0000-0000-000000000001' and bucket = 'report_encounter_person'),
+    4::bigint, 'report events survive exactly one day');
+select private.cleanup_expired_data(timestamptz '2026-10-12 00:00:00+00');
+select extensions.is((select pg_catalog.count(*) from private.account_limit_events
+    where user_id = 'dddddddd-0000-0000-0000-000000000001' and bucket = 'report_encounter_person'),
+    3::bigint, 'report cleanup removes only events older than one day');
+select extensions.ok(exists (select 1 from private.account_limit_events
+    where user_id = 'dddddddd-0000-0000-0000-000000000001' and bucket = 'report_encounter_person'
+      and occurred_at = timestamptz '2026-10-11 22:00:00+00'), 'report budget survives beyond one hour');
+select private.cleanup_expired_data(timestamptz '2026-10-12 00:00:00.000001+00');
+select extensions.is((select pg_catalog.count(*) from private.account_limit_events
+    where user_id = 'dddddddd-0000-0000-0000-000000000001' and bucket = 'report_encounter_person'),
+    2::bigint, 'report boundary event is removed immediately after one day');
+
+insert into private.account_limit_events (user_id, bucket, occurred_at)
+select 'dddddddd-0000-0000-0000-000000000001'::uuid, b.bucket, f.event_time
+from (values ('start_session'), ('issue_qr_code'), ('redeem_qr_code')) as b(bucket)
+cross join (values
+    (timestamptz '2026-10-11 22:59:59.999999+00'),
+    (timestamptz '2026-10-11 23:00:00+00'),
+    (timestamptz '2026-10-11 23:00:00.000001+00')
+) as f(event_time);
+select private.cleanup_expired_data(timestamptz '2026-10-12 00:00:00+00');
+select extensions.is((select pg_catalog.count(*) from private.account_limit_events as e
+    where e.user_id = 'dddddddd-0000-0000-0000-000000000001' and e.bucket = b.bucket),
+    2::bigint, b.bucket || ' cleanup retains the hourly boundary')
+from (values ('start_session'), ('issue_qr_code'), ('redeem_qr_code')) as b(bucket);
+select private.cleanup_expired_data(timestamptz '2026-10-12 00:00:00.000001+00');
+select extensions.is((select pg_catalog.count(*) from private.account_limit_events as e
+    where e.user_id = 'dddddddd-0000-0000-0000-000000000001' and e.bucket = b.bucket),
+    1::bigint, b.bucket || ' cleanup removes events beyond the hourly boundary')
+from (values ('start_session'), ('issue_qr_code'), ('redeem_qr_code')) as b(bucket);
 
 select * from extensions.finish();
 rollback;
