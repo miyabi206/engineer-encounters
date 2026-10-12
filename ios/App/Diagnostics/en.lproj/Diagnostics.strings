@@ -29,6 +29,12 @@
 "device" = "Device model";
 "bluetooth" = "Bluetooth";
 "ownSession" = "Own session";
+"sessionActive" = "Active";
+"sessionStarting" = "Starting";
+"sessionStopPending" = "Ended · Stop upload pending";
+"sessionOffline" = "Start refused while offline";
+"sessionFailed" = "Session request failed";
+"sessionEnded" = "No active session";
 "participation" = "Discovery at trial start";
 "noTokenPause" = "Participation paused for lack of a token";
 "storageUnavailable" = "Storage unavailable";

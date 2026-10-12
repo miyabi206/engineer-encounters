@@ -16,6 +16,7 @@ enum DiagnosticsStrings {
 struct DiagnosticsView: View {
     @ObservedObject private var composition: AppComposition
     @ObservedObject private var account: AccountModel
+    @ObservedObject private var session: SessionAdapter
     @ObservedObject private var log: TrialLog
     @ObservedObject private var demo: DemoSwitchSetting
     @DiagnosticsViewState private var isLoading = false
@@ -24,6 +25,7 @@ struct DiagnosticsView: View {
     init(composition: AppComposition) {
         self.composition = composition
         account = composition.account
+        session = composition.sessionAdapter
         log = composition.trialLog
         demo = composition.demoSwitch
     }
@@ -38,7 +40,7 @@ struct DiagnosticsView: View {
                 row("device", metadata.deviceModel)
                 row("bluetooth", composition.status.bluetoothPoweredOff ? text("off") : availability(composition.status.radioAvailability))
                 row("discovery", text(composition.status.discoveryOn ? "on" : "off"))
-                row("ownSession", text("unavailable"))
+                row("ownSession", ownSession)
                 if composition.status.pausedForLackOfToken { Text(text("noTokenPause")) }
                 if composition.status.storageUnavailable { Text(text("storageUnavailable")) }
                 DiagnosticsParticipationControl(composition: composition, isLoading: isLoading, perform: perform)
@@ -195,6 +197,16 @@ struct DiagnosticsView: View {
             Text(value)
         }
         .accessibilityElement(children: .combine)
+    }
+    private var ownSession: String {
+        switch session.state {
+        case .active: text("sessionActive")
+        case .starting: text("sessionStarting")
+        case .stopping: text("sessionStopPending")
+        case .startRefusedOffline: text("sessionOffline")
+        case .failed: text("sessionFailed")
+        case .none: text("sessionEnded")
+        }
     }
     private func text(_ key: String) -> String { DiagnosticsStrings.text(key) }
     private func seconds(_ value: TimeInterval) -> String { String(format: "%.3f s", value) }

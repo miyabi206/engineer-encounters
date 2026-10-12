@@ -142,10 +142,15 @@ actor BoundSessionStore: SessionStore {
     private let store: any SessionStore
     private let binding: BackendStorageBinding
     private var writing: Task<Void, any Error>?
+    private var beforeCredentialClear: (@MainActor @Sendable () async -> Void)?
 
     init(_ store: any SessionStore, binding: BackendStorageBinding) {
         self.store = store
         self.binding = binding
+    }
+
+    func beforeClearingCredentials(_ action: @escaping @MainActor @Sendable () async -> Void) {
+        beforeCredentialClear = action
     }
 
     func load() async throws -> BackendSession? {
@@ -168,6 +173,10 @@ actor BoundSessionStore: SessionStore {
 
     func clear() async throws {
         try await write {
+            guard await self.binding.isCurrent else { throw BackendError.notAuthenticated }
+            // SessionManager also clears on an invalid refresh, before AccountModel gets
+            // the error. Clear the receipt flag before any persisted credential deletion.
+            await self.beforeCredentialClear?()
             guard await self.binding.isCurrent else { throw BackendError.notAuthenticated }
             try await self.binding.cleanup.begin()
             try await self.store.clear()

@@ -69,7 +69,10 @@ extension AccountModel {
             },
             setDiscovery: { enabled in
                 try requireSession()
-                return try await self.writeProfile({ try await $0.setDiscovery(enabled: enabled) }) { $0.discoveryOn = enabled }
+                try await self.discoveryWillChange(enabled)
+                let profile = try await self.writeProfile({ try await $0.setDiscovery(enabled: enabled) }) { $0.discoveryOn = enabled }
+                if self.sessionGeneration == epoch { await self.discoveryDidChange(enabled) }
+                return profile
             },
             requestBluetooth: {
                 try requireSession()

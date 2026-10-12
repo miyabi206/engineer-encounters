@@ -48,6 +48,9 @@ final class AccountModel: ObservableObject {
     var bindingGeneration: @MainActor () -> UUID? = { nil }
     private var operationTask: Task<Void, any Error>?
     var prepareForSessionChange: @MainActor () async throws -> Void = {}
+    var prepareToDiscardSession: @MainActor () async -> Void = {}
+    var discoveryWillChange: @MainActor (Bool) async throws -> Void = { _ in }
+    var discoveryDidChange: @MainActor (Bool) async -> Void = { _ in }
     var sessionDidChange: @MainActor (_ recreate: Bool) async -> Void = { _ in }
     var canRefreshSession: @MainActor () -> Bool = { true }
 
@@ -92,6 +95,8 @@ final class AccountModel: ObservableObject {
             guard epoch == generation, hasCurrentSessionContext else { return }
             guard let stored else {
                 if state.isSignedIn {
+                    await prepareToDiscardSession()
+                    guard epoch == generation, hasCurrentSessionContext else { return }
                     invalidateRefresh()
                     registeredTimeZone = nil
                     pendingDeclarations = nil
@@ -211,6 +216,8 @@ final class AccountModel: ObservableObject {
             defer { self.sessionChangeInProgress = false }
             guard self.hasCurrentSessionContext else { throw BackendError.notAuthenticated }
             guard let sessions = self.sessions else { return }
+            await self.prepareToDiscardSession()
+            guard self.hasCurrentSessionContext else { throw BackendError.notAuthenticated }
             do { try self.cleanup.begin() }
             catch { self.sessionCleanupFailed = true; throw BackendError.storageFailure }
             var storageFailed = false
@@ -332,6 +339,8 @@ final class AccountModel: ObservableObject {
             if self.state == .signedOut { return }
             self.sessionChangeInProgress = true
             defer { self.sessionChangeInProgress = false }
+            await self.prepareToDiscardSession()
+            guard self.hasCurrentSessionContext else { return }
             do { try self.cleanup.begin() }
             catch { self.sessionCleanupFailed = true; self.profile = nil; return }
             self.invalidateRefresh()

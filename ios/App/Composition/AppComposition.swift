@@ -12,6 +12,10 @@ final class AppComposition: ObservableObject {
     private let participation: ParticipationFlag
     let account: AccountModel
     let linkAdapter: LinkAdapter
+    let sessionHolder: SessionHolder
+    let sessionAdapter: SessionAdapter
+    private(set) var sessionServices: SessionBackendServices?
+    private let sessionNetwork = SessionNetworkAvailability()
     private let linkServicesFactory: (@MainActor (SessionManager) -> (OwnLinkService, GitHubLinksService))?
     private var client: RemoteProcedureClient?
     private let clientFactory: (@MainActor (SessionManager) -> RemoteProcedureClient)?
@@ -72,6 +76,7 @@ final class AppComposition: ObservableObject {
          uploadScheduler: (any ReceiptUploadScheduler)? = nil,
          now: @escaping @Sendable () -> Date = { Date() },
          webAuthenticationRunner: (any GitHubWebAuthenticationRunning)? = nil,
+         sessionIsOnline: (@MainActor () -> Bool)? = nil,
          timeZone: @escaping @MainActor () -> String = { TimeZone.current.identifier }) {
         participation = ParticipationFlag(defaults: defaults)
         self.keychain = keychain
@@ -130,6 +135,15 @@ final class AppComposition: ObservableObject {
             account = AccountModel(sessions: nil, service: nil, defaults: defaults, timeZone: timeZone)
         }
         linkAdapter = LinkAdapter(account: account, runner: webAuthenticationRunner ?? SystemGitHubWebAuthenticationRunner())
+        sessionHolder = SessionHolder(clock: clock)
+        let sessionNetwork = sessionNetwork
+        sessionAdapter = SessionAdapter(account: account, holder: sessionHolder,
+            isOnline: sessionIsOnline ?? { sessionNetwork.isOnline })
+        if sessionIsOnline == nil {
+            sessionNetwork.onOnline = { [weak sessionAdapter] in
+                Task { await sessionAdapter?.foreground() }
+            }
+        }
         #if DEVELOPMENT_BUILD || INTERNAL_BUILD
         trialLog = TrialLog()
         trialRecorder = TrialRecorder(log: trialLog)
@@ -137,6 +151,9 @@ final class AppComposition: ObservableObject {
         #endif
         isParticipating = participation.isEnabled
         account.prepareForSessionChange = { [weak self] in try await self?.prepareForSessionChange() }
+        account.prepareToDiscardSession = { [weak self] in await self?.sessionAdapter.prepareToDiscardSession() }
+        account.discoveryWillChange = { [weak self] enabled in try await self?.sessionAdapter.discoveryWillChange(enabled: enabled) }
+        account.discoveryDidChange = { [weak self] enabled in await self?.sessionAdapter.discoveryDidChange(enabled: enabled) }
         account.sessionDidChange = { [weak self] force in await self?.recreateRuntime(force: force) }
         account.canRefreshSession = { [weak self] in
             guard let self, self.storageReady, !self.keychainUnavailable else { return false }
@@ -150,9 +167,11 @@ final class AppComposition: ObservableObject {
             let store = self?.boundSessionStore
             let account = self?.account
             let linkAdapter = self?.linkAdapter
+            let sessionAdapter = self?.sessionAdapter
             let storagePreparation = self?.storagePreparationTask
             runtime?.suspendForAccountChange()
             return Task {
+                await sessionAdapter?.invalidate()
                 await linkAdapter?.invalidate()
                 await issuer?.invalidate()
                 await runtime?.invalidateForAccountChange()
@@ -163,6 +182,9 @@ final class AppComposition: ObservableObject {
         }
         // App.init constructs this even for a Bluetooth background relaunch.
         restorationTask = Task { [weak self] in
+            await self?.boundSessionStore?.beforeClearingCredentials { [weak self] in
+                await self?.sessionAdapter.authorizationWillBeDiscarded()
+            }
             await binding?.predecessorDrain?.value
             await self?.account.restore()
         }
@@ -215,6 +237,8 @@ final class AppComposition: ObservableObject {
         guard !sessionChangeInProgress, !account.sessionChangeInProgress else { return }
         await account.refresh()
         guard !sessionChangeInProgress, !account.sessionChangeInProgress else { return }
+        await sessionAdapter.foreground()
+        guard !sessionChangeInProgress, !account.sessionChangeInProgress else { return }
         await runtime?.refresh()
         #if DEVELOPMENT_BUILD || INTERNAL_BUILD
         trialLog.prune()
@@ -260,6 +284,8 @@ final class AppComposition: ObservableObject {
     private func prepareForSessionChange() async throws {
         sessionChangeInProgress = true
         storageReady = false
+        sessionServices = nil
+        await sessionAdapter.invalidate()
         await linkAdapter.invalidate()
         binding?.invalidatePreparation()
         try await serializeStoragePreparation { try await self.clearStorageForSessionChange() }
@@ -320,6 +346,11 @@ final class AppComposition: ObservableObject {
             serverIssuer = nil
         }
         storageReady = await prepareStorageBinding()
+        if storageReady, account.state.isSignedIn, let client, let owner = binding?.preparedOwner,
+           owner.accountDigest != nil {
+            sessionServices = SessionBackendServices(client: client, account: account, owner: owner)
+        } else { sessionServices = nil }
+        await sessionAdapter.configure(sessionServices)
         sessionChangeInProgress = false
         guard binding?.isCurrent != false else { return }
         guard force || participation.isEnabled || account.state.isSignedIn else { return }
@@ -436,7 +467,12 @@ final class AppComposition: ObservableObject {
         #else
         let approach = PresenceApproach.secondExchange
         #endif
-        let runtime = EncounterRuntime(tokenIssuer: issuer, sessionFlag: { false }, approach: approach,
+        let sessionHolder = sessionHolder
+        let sessionOwner = binding?.preparedOwner
+        let runtime = EncounterRuntime(tokenIssuer: issuer, sessionFlag: {
+            guard let sessionOwner else { return false }
+            return await sessionHolder.isActive(owner: sessionOwner)
+        }, approach: approach,
             transportFactory: transportFactory, queueOpener: openQueue, tokenStore: store, clock: clock,
             uploadFactory: uploadFactory, uploadScheduler: uploadScheduler,
             storageIsReady: { [weak self] in
