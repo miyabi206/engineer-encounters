@@ -88,6 +88,8 @@ final class RuntimeRecoveryTests: XCTestCase {
         try await queue.enqueue(EncounterSamples.receipt())
         var switched = false
         let switching = Task {
+            try await composition.account.signOut()
+            XCTAssertEqual(composition.account.state, .signedOut)
             try await composition.account.signIn(using: AuthRequest(path: "signin", body: Data()),
                 isAdult: true, acceptsTermsAndPrivacy: true, termsVersion: "fixture", privacyVersion: "fixture")
             switched = true
