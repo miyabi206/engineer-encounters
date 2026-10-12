@@ -1,3 +1,5 @@
+create extension if not exists pgcrypto with schema extensions;
+
 create table private.temporary_tokens (
     token_digest bytea primary key check (pg_catalog.octet_length(token_digest) = 32),
     user_id uuid not null references auth.users (id) on delete cascade,
@@ -27,7 +29,7 @@ alter table private.account_limit_events enable row level security;
 
 revoke all on table private.temporary_tokens, private.account_limit_events from public, anon, authenticated;
 
-create function private.record_account_event(account_id uuid, bucket text, event_limit integer, time_span interval)
+create function private.record_account_event(account_id uuid, event_bucket text, event_limit integer, time_span interval)
 returns boolean
 language plpgsql
 set search_path = ''
@@ -35,31 +37,31 @@ as $$
 declare
     event_count bigint;
 begin
-    if account_id is null or bucket is null or pg_catalog.btrim(bucket) = ''
+    if account_id is null or event_bucket is null or private.trim_input(event_bucket) = ''
        or event_limit is null or event_limit < 1 or time_span is null or time_span <= interval '0 seconds' then
         perform private.raise_error('invalid_input');
     end if;
 
-    -- Serialize all buckets for this account, including the token-window check
-    -- in the caller. This lock is compatible with require_caller's key-share
-    -- lock, so concurrent callers do not deadlock on a lock upgrade.
-    perform 1 from auth.users as u where u.id = account_id for no key update;
-    if not found then
+    -- Global order: account namespace 31001, sorted nonce namespace (bigint),
+    -- then sorted pair namespace 31003. Re-entering this account lock is safe.
+    -- The two-integer account key space is disjoint from bigint nonce locks.
+    perform pg_catalog.pg_advisory_xact_lock(31001, pg_catalog.hashtext(account_id::text));
+    if not exists (select 1 from auth.users as u where u.id = account_id) then
         perform private.raise_error('not_authenticated');
     end if;
-
-    insert into private.account_limit_events (user_id, bucket, occurred_at)
-    values (account_id, record_account_event.bucket, pg_catalog.now());
 
     select pg_catalog.count(*) into event_count
     from private.account_limit_events as e
     where e.user_id = account_id
-      and e.bucket = record_account_event.bucket
+      and e.bucket = event_bucket
       and e.occurred_at > pg_catalog.now() - time_span;
-
-    -- Include events from transactions with a later transaction time that
-    -- committed while this transaction waited for the account lock.
-    return event_count > event_limit;
+    -- Count later transaction timestamps too: a waiter can have an older now().
+    if event_count >= event_limit then
+        return true;
+    end if;
+    insert into private.account_limit_events (user_id, bucket, occurred_at)
+    values (account_id, event_bucket, pg_catalog.now());
+    return false;
 end;
 $$;
 
@@ -126,5 +128,5 @@ begin
 end;
 $$;
 
-revoke all on function public.issue_token_batch(bigint) from public, anon;
+revoke all on function public.issue_token_batch(bigint) from public, anon, service_role;
 grant execute on function public.issue_token_batch(bigint) to authenticated;

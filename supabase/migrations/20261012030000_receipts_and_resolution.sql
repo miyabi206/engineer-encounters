@@ -44,7 +44,7 @@ create index encounter_candidates_prior_idx on private.encounter_candidates (pri
 
 -- A date represents a UTC midnight, with no participant or confirmation time.
 create table private.consumed_nonces (
-    nonce_digest bytea primary key check (pg_catalog.octet_length(nonce_digest) = 32),
+    exchange_digest bytea primary key check (pg_catalog.octet_length(exchange_digest) = 32),
     delete_after date not null
 );
 
@@ -84,6 +84,22 @@ alter table private.encounter_views enable row level security;
 revoke all on table private.sessions, private.encounter_candidates, private.consumed_nonces,
     private.encounters, private.encounter_views from public, anon, authenticated;
 
+-- Bind replay protection to the exchange's reciprocal start tokens, not to a
+-- client-chosen nonce alone. Fixed-width digests make concatenation unambiguous.
+create function private.receipt_exchange_digest(nonce_hash bytea, token_a_hash bytea, token_b_hash bytea)
+returns bytea
+language sql
+immutable
+strict
+set search_path = ''
+as $$
+    select pg_catalog.sha256(nonce_hash || least(token_a_hash, token_b_hash)
+        || greatest(token_a_hash, token_b_hash));
+$$;
+
+revoke all on function private.receipt_exchange_digest(bytea, bytea, bytea)
+    from public, anon, authenticated, service_role;
+
 create function public.submit_receipts(receipts jsonb)
 returns jsonb
 language plpgsql
@@ -122,8 +138,9 @@ declare
     status text;
     acknowledgements jsonb := '[]'::jsonb;
     accepted_nonces bytea[] := '{}'::bytea[];
-    resolved_nonces bytea[] := '{}'::bytea[];
-    removed_nonces bytea[];
+    resolved_ids uuid[] := '{}'::uuid[];
+    removed_exchanges bytea[];
+    matched_ids uuid[];
     lock_key bigint;
     pair_key integer;
     encounter_kind text;
@@ -161,9 +178,9 @@ begin
     ) then
         perform private.raise_error('invalid_input', array['receipts']);
     end if;
-    -- Serialize the candidate cap independently of the limiter's implementation.
-    -- This remains valid when the shared helpers stop locking auth.users.
-    perform pg_catalog.pg_advisory_xact_lock(31002, pg_catalog.hashtext(caller::text));
+    -- Take the account lock before sorted nonce locks, then sorted pair locks.
+    -- Namespace 31001 (two integers) is disjoint from bigint nonce lock keys.
+    perform pg_catalog.pg_advisory_xact_lock(31001, pg_catalog.hashtext(caller::text));
     if private.record_account_event(caller, 'submit_receipts', 60, interval '1 minute') then
         perform private.raise_error('rate_limited');
     end if;
@@ -183,7 +200,7 @@ begin
         perform pg_catalog.pg_advisory_xact_lock(lock_key);
     end loop;
     -- Pair locks (in the separate two-integer advisory namespace) also serialize
-    -- different exchanges of one pair while all its candidates are removed.
+    -- different exchanges of one pair while their matched evidence is removed.
     -- Derive pairs solely from live server token ownership, never client IDs.
     for pair_key in
         select distinct pg_catalog.hashtext(least(caller, t.user_id)::text || ':' || greatest(caller, t.user_id)::text)
@@ -274,7 +291,7 @@ begin
                 where t.token_digest = pg_catalog.sha256(pg_catalog.decode(pair->>'peer_token', 'hex'))
                   and t.delete_after > server_seconds;
                 if own_token.user_id is distinct from caller or peer_token.user_id is null
-                    or peer_token.user_id = caller or (peer is not null and peer_token.user_id <> peer) then
+                    or peer_token.user_id = caller then
                     invalid_owner := true;
                 end if;
                 peer := coalesce(peer, peer_token.user_id);
@@ -291,7 +308,10 @@ begin
                 elsif start_seconds <= server_seconds - 172800 then
                     status := 'expired';
                 elsif exists (select 1 from private.consumed_nonces as n
-                    where n.nonce_digest in (nonce, prior_nonce) and n.delete_after > utc_day) then
+                    where n.exchange_digest in (
+                        private.receipt_exchange_digest(nonce, own_digest, peer_digest),
+                        private.receipt_exchange_digest(prior_nonce, own_digest, peer_digest))
+                      and n.delete_after > utc_day) then
                     status := 'consumed';
                 elsif exists (select 1 from private.encounter_candidates as c
                     where c.nonce_digest = nonce and c.uploader_id = caller and c.expires_at <= server_time) then
@@ -309,7 +329,7 @@ begin
                         or old_candidate.start_observed_at <> start_seconds))
                         or exists (select 1 from private.encounter_candidates as c
                             where c.uploader_id = caller and c.receipt_id = submitted_id
-                              and c.nonce_digest <> nonce and c.expires_at > server_time) then
+                              and c.nonce_digest <> nonce and c.expires_at > server_time - interval '300 seconds') then
                         status := 'rejected';
                     else
                         if coalesce(item->'checkpoint', 'null'::jsonb) <> 'null'::jsonb then
@@ -317,12 +337,16 @@ begin
                             checkpoint_peer := pg_catalog.sha256(pg_catalog.decode(item->'checkpoint'->>'peer_token', 'hex'));
                             checkpoint_seconds := (item->'checkpoint'->>'observed_at')::bigint;
                         end if;
-                        -- Expired rows cannot authorize or count against the cap.
+                        -- Expired rows cannot authorize or count against the cap; retain their
+                        -- expired response for the 300-second observation-skew grace.
                         delete from private.encounter_candidates as c
-                        where c.uploader_id = caller and c.expires_at <= server_time;
+                        where c.uploader_id = caller and c.expires_at <= server_time - interval '300 seconds';
                         if old_candidate.uploader_id is null and (select pg_catalog.count(*)
                             from private.encounter_candidates as c where c.uploader_id = caller and c.expires_at > server_time) >= 2000 then
-                            perform private.raise_error('rate_limited');
+                            status := 'candidate';
+                            acknowledgements := acknowledgements || pg_catalog.jsonb_build_array(
+                                pg_catalog.jsonb_build_object('id', submitted_id, 'status', status));
+                            continue;
                         end if;
                         insert into private.encounter_candidates as c (
                             nonce_digest, uploader_id, receipt_id, peer_id, protocol_version, role, prior_nonce_digest,
@@ -351,22 +375,21 @@ begin
     end loop;
 
     -- Visit joined evidence as well when the newly uploaded half was an original.
-    -- Only pairs with a reciprocal counterpart consume a resolution-attempt event.
+    -- Only qualifying reciprocal pairs consume a resolution event.
     for nonce in
         select distinct c.nonce_digest from private.encounter_candidates as c
         where c.uploader_id = caller and c.expires_at > server_time
           and (c.nonce_digest = any(accepted_nonces) or c.prior_nonce_digest = any(accepted_nonces))
         order by c.nonce_digest
     loop
-        if exists (select 1 from private.consumed_nonces as n
-            where n.nonce_digest = nonce and n.delete_after > utc_day) then
-            continue;
-        end if;
         select c.* into a from private.encounter_candidates as c
         where c.nonce_digest = nonce and c.uploader_id = caller and c.expires_at > server_time;
         if not found then continue; end if;
-        if a.prior_nonce_digest is not null and exists (select 1 from private.consumed_nonces as n
-            where n.nonce_digest = a.prior_nonce_digest and n.delete_after > utc_day) then
+        if exists (select 1 from private.consumed_nonces as n
+            where n.exchange_digest in (
+                private.receipt_exchange_digest(nonce, a.start_own_token_digest, a.start_peer_token_digest),
+                private.receipt_exchange_digest(a.prior_nonce_digest, a.start_own_token_digest, a.start_peer_token_digest))
+              and n.delete_after > utc_day) then
             continue;
         end if;
         select c.* into b from private.encounter_candidates as c
@@ -376,9 +399,6 @@ begin
           and c.start_own_token_digest = a.start_peer_token_digest
           and c.start_peer_token_digest = a.start_own_token_digest;
         if not found then continue; end if;
-        if private.record_account_event(caller, 'resolve_receipts', 30, interval '1 minute') then
-            continue;
-        end if;
         encounter_kind := null;
         observation_a := a.start_observed_at;
         observation_b := b.start_observed_at;
@@ -426,6 +446,10 @@ begin
             end if;
         end if;
         if encounter_kind is null then continue; end if;
+        -- Only qualifying pairs spend the resolution budget; refusal stores no event.
+        if private.record_account_event(caller, 'resolve_receipts', 30, interval '1 minute') then
+            continue;
+        end if;
 
         if not exists (select 1 from private.blocks as blocked
             where (blocked.blocker_id = a.uploader_id and blocked.blocked_id = b.uploader_id)
@@ -465,45 +489,46 @@ begin
             end if;
         end if;
 
-        -- Ceil to a UTC day; exactly midnight needs no extra day.
-        nonce_deadline := ((server_time at time zone 'UTC') + interval '48 hours')::date;
-        if (server_time at time zone 'UTC')::time <> time '00:00:00' then
+        -- First UTC midnight at least 48 hours plus skew grace after resolution.
+        nonce_deadline := ((server_time at time zone 'UTC') + interval '48 hours 300 seconds')::date;
+        if ((server_time at time zone 'UTC') + interval '48 hours 300 seconds')::time <> time '00:00:00' then
             nonce_deadline := nonce_deadline + 1;
         end if;
-        -- Consume every removed candidate nonce/reference as well, so removing
-        -- another exchange of this pair cannot let a replay recreate it.
+        -- Delete only matched receipts (and reciprocal originals when present),
+        -- including a blocked resolution. Other dates/exchanges remain pending.
         with removed as (
             delete from private.encounter_candidates as c
-            where (c.uploader_id = a.uploader_id and c.peer_id = b.uploader_id)
-               or (c.uploader_id = b.uploader_id and c.peer_id = a.uploader_id)
-            returning c.nonce_digest, c.prior_nonce_digest
-        ) select pg_catalog.array_agg(distinct n.digest) into removed_nonces
-          from removed as r cross join lateral (values (r.nonce_digest), (r.prior_nonce_digest)) as n(digest)
-          where n.digest is not null;
-        removed_nonces := coalesce(removed_nonces, '{}'::bytea[]) || array[nonce];
-        if a.prior_nonce_digest is not null then
-            removed_nonces := pg_catalog.array_append(removed_nonces, a.prior_nonce_digest);
-        end if;
-        insert into private.consumed_nonces as n (nonce_digest, delete_after)
-        select distinct d.digest, nonce_deadline from pg_catalog.unnest(removed_nonces) as d(digest)
-        on conflict (nonce_digest) do update set delete_after = greatest(n.delete_after, excluded.delete_after);
-        resolved_nonces := resolved_nonces || removed_nonces;
+            where c.uploader_id in (a.uploader_id, b.uploader_id)
+              and (c.nonce_digest = nonce
+                  or (original_pair_found and a.prior_nonce_digest is not null
+                      and c.nonce_digest = a.prior_nonce_digest))
+            returning c.uploader_id, c.receipt_id, c.nonce_digest,
+                c.start_own_token_digest, c.start_peer_token_digest
+        ) select pg_catalog.array_agg(distinct private.receipt_exchange_digest(
+                     r.nonce_digest, r.start_own_token_digest, r.start_peer_token_digest)),
+                 pg_catalog.array_agg(r.receipt_id) filter (where r.uploader_id = caller)
+          into removed_exchanges, matched_ids
+          from removed as r;
+        insert into private.consumed_nonces as n (exchange_digest, delete_after)
+        select distinct d.digest, nonce_deadline from pg_catalog.unnest(removed_exchanges) as d(digest)
+        on conflict (exchange_digest) do update set delete_after = greatest(n.delete_after, excluded.delete_after);
+        resolved_ids := resolved_ids || matched_ids;
     end loop;
 
     -- Only candidates accepted in this call can be upgraded to resolved.
     return (select pg_catalog.jsonb_agg(
         case when ack.value->>'status' = 'candidate' then
-            case when pg_catalog.sha256(pg_catalog.decode(source.value->>'exchange_nonce', 'hex')) = any(resolved_nonces)
+            case when (ack.value->>'id')::uuid = any(resolved_ids)
                 then pg_catalog.jsonb_build_object('id', ack.value->'id', 'status', 'resolved')
                 else ack.value end
             else ack.value end
         order by ack.ordinal)
-        from pg_catalog.jsonb_array_elements(acknowledgements) with ordinality as ack(value, ordinal)
-        join pg_catalog.jsonb_array_elements(receipts) with ordinality as source(value, ordinal) using (ordinal));
+        from pg_catalog.jsonb_array_elements(acknowledgements) with ordinality as ack(value, ordinal));
 exception when foreign_key_violation then
     -- Account deletion may race validation once the shared helpers no longer
     -- lock Auth rows. Never return the participant UUID from a foreign-key error.
     perform private.raise_error('not_found');
+    return null;
 end;
 $$;
 

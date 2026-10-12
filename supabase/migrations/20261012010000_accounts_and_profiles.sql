@@ -2,6 +2,19 @@ create schema private;
 
 revoke all on schema private from public, anon, authenticated;
 
+-- Normalize Unicode White_Space once; NULL and whitespace-only input are absent.
+create function private.trim_input(input_text text)
+returns text
+language sql
+immutable
+set search_path = ''
+as $$
+    select pg_catalog.btrim(coalesce(input_text, ''),
+        U&'\0009\000A\000B\000C\000D\0020\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000');
+$$;
+
+revoke all on function private.trim_input(text) from public, anon, authenticated;
+
 create table private.profiles (
     user_id uuid primary key references auth.users (id) on delete cascade,
     display_name text not null default '' check (pg_catalog.char_length(display_name) <= 30),
@@ -9,13 +22,13 @@ create table private.profiles (
     contact_detail text not null default '' check (pg_catalog.char_length(contact_detail) <= 100),
     discovery_on boolean not null default false,
     age_18_declared boolean not null check (age_18_declared),
-    terms_version text not null check (pg_catalog.btrim(terms_version) <> '' and pg_catalog.char_length(terms_version) <= 32),
-    privacy_version text not null check (pg_catalog.btrim(privacy_version) <> '' and pg_catalog.char_length(privacy_version) <= 32),
+    terms_version text not null check (private.trim_input(terms_version) <> '' and pg_catalog.char_length(private.trim_input(terms_version)) <= 32),
+    privacy_version text not null check (private.trim_input(privacy_version) <> '' and pg_catalog.char_length(private.trim_input(privacy_version)) <= 32),
     moderation_state text not null default 'active' check (moderation_state in ('active', 'hidden', 'suspended'))
 );
 
 create table private.interests (
-    interest_id text primary key check (pg_catalog.btrim(interest_id) <> ''),
+    interest_id text primary key check (private.trim_input(interest_id) <> ''),
     label_ja text not null,
     label_en text not null,
     display_order integer not null default 0
@@ -117,8 +130,7 @@ begin
     if caller is null then
         perform private.raise_error('not_authenticated');
     end if;
-    -- Account deletion cannot race a write after the live-caller check.
-    perform 1 from auth.users as u where u.id = caller for key share;
+    perform 1 from auth.users as u where u.id = caller;
     if not found then
         perform private.raise_error('not_authenticated');
     end if;
@@ -136,18 +148,17 @@ as $$
         select 1
         from private.profiles as p
         join private.notification_preferences as n on n.user_id = p.user_id
-        join pg_catalog.pg_timezone_names as z on z.name = n.time_zone
         where p.user_id = account_id
           and p.age_18_declared
-          and pg_catalog.btrim(p.terms_version) <> ''
-          and pg_catalog.btrim(p.privacy_version) <> ''
+          and private.trim_input(p.terms_version) <> ''
+          and private.trim_input(p.privacy_version) <> ''
           and p.moderation_state = 'active'
     );
 $$;
 
 revoke all on all functions in schema private from public, anon, authenticated;
 
-create function public.accept_declarations(age_18 boolean, terms_version text, privacy_version text)
+create function private.accept_declarations(input_age_18 boolean, input_terms_version text, input_privacy_version text)
 returns void
 language plpgsql
 security definer
@@ -157,13 +168,13 @@ declare
     caller uuid := private.require_caller();
     invalid_fields text[] := '{}'::text[];
 begin
-    if age_18 is distinct from true then
+    if input_age_18 is distinct from true then
         perform private.raise_error('declaration_required');
     end if;
-    if terms_version is null or pg_catalog.btrim(terms_version) = '' or pg_catalog.char_length(terms_version) > 32 then
+    if input_terms_version is null or private.trim_input(input_terms_version) = '' or pg_catalog.char_length(private.trim_input(input_terms_version)) > 32 then
         invalid_fields := pg_catalog.array_append(invalid_fields, 'terms_version');
     end if;
-    if privacy_version is null or pg_catalog.btrim(privacy_version) = '' or pg_catalog.char_length(privacy_version) > 32 then
+    if input_privacy_version is null or private.trim_input(input_privacy_version) = '' or pg_catalog.char_length(private.trim_input(input_privacy_version)) > 32 then
         invalid_fields := pg_catalog.array_append(invalid_fields, 'privacy_version');
     end if;
     if pg_catalog.cardinality(invalid_fields) > 0 then
@@ -171,7 +182,7 @@ begin
     end if;
 
     insert into private.profiles as p (user_id, age_18_declared, terms_version, privacy_version)
-    values (caller, true, accept_declarations.terms_version, accept_declarations.privacy_version)
+    values (caller, true, private.trim_input(input_terms_version), private.trim_input(input_privacy_version))
     on conflict (user_id) do update set
         age_18_declared = true,
         terms_version = excluded.terms_version,
@@ -190,7 +201,19 @@ begin
 end;
 $$;
 
-create function public.register_time_zone(time_zone text)
+-- SQL preserves the RPC argument names without PL/pgSQL column ambiguity.
+create function public.accept_declarations(age_18 boolean, terms_version text, privacy_version text)
+returns void
+language sql
+security definer
+set search_path = ''
+as $$
+    select private.accept_declarations($1, $2, $3);
+$$;
+
+revoke all on function private.accept_declarations(boolean, text, text) from public, anon, authenticated, service_role;
+
+create function private.register_time_zone(input_time_zone text)
 returns void
 language plpgsql
 security definer
@@ -203,17 +226,29 @@ begin
     if not found then
         perform private.raise_error('declaration_required');
     end if;
-    if time_zone is null or not exists (
-        select 1 from pg_catalog.pg_timezone_names as z where z.name = register_time_zone.time_zone
+    if input_time_zone is null or not exists (
+        select 1 from pg_catalog.pg_timezone_names as z where z.name = input_time_zone
     ) then
         perform private.raise_error('invalid_input', array['time_zone']);
     end if;
 
     insert into private.notification_preferences as n (user_id, time_zone)
-    values (caller, register_time_zone.time_zone)
+    values (caller, input_time_zone)
     on conflict (user_id) do update set time_zone = excluded.time_zone;
 end;
 $$;
+
+-- SQL preserves the RPC argument names without PL/pgSQL column ambiguity.
+create function public.register_time_zone(time_zone text)
+returns void
+language sql
+security definer
+set search_path = ''
+as $$
+    select private.register_time_zone($1);
+$$;
+
+revoke all on function private.register_time_zone(text) from public, anon, authenticated, service_role;
 
 create function public.get_own_profile()
 returns jsonb
@@ -245,12 +280,12 @@ begin
         'discovery_on', coalesce(p.discovery_on, false),
         'link_count', (select pg_catalog.count(*) from private.external_links as l where l.owner_id = p.user_id),
         'prerequisites', pg_catalog.jsonb_build_object(
-            'display_name', coalesce(pg_catalog.btrim(p.display_name) <> '', false),
-            'introduction', coalesce(pg_catalog.btrim(p.introduction) <> '', false),
+            'display_name', coalesce(private.trim_input(p.display_name) <> '', false),
+            'introduction', coalesce(private.trim_input(p.introduction) <> '', false),
             'interest', exists (select 1 from private.user_interests as i where i.user_id = p.user_id),
             'link', exists (select 1 from private.external_links as l where l.owner_id = p.user_id)
         ),
-        'declarations_recorded', coalesce(p.age_18_declared and pg_catalog.btrim(p.terms_version) <> '' and pg_catalog.btrim(p.privacy_version) <> '', false),
+        'declarations_recorded', coalesce(p.age_18_declared and private.trim_input(p.terms_version) <> '' and private.trim_input(p.privacy_version) <> '', false),
         'time_zone', n.time_zone,
         'moderation_state', p.moderation_state
     ) into result
@@ -263,7 +298,7 @@ begin
 end;
 $$;
 
-create function public.update_own_profile(display_name text, introduction text, contact_detail text)
+create function private.update_own_profile(input_display_name text, input_introduction text, input_contact_detail text)
 returns void
 language plpgsql
 security definer
@@ -272,9 +307,9 @@ as $$
 declare
     caller uuid := private.require_caller();
     discovering boolean;
-    new_name text := pg_catalog.btrim(coalesce(display_name, ''));
-    new_introduction text := pg_catalog.btrim(coalesce(introduction, ''));
-    new_contact text := pg_catalog.btrim(coalesce(contact_detail, ''));
+    new_name text := private.trim_input(coalesce(input_display_name, ''));
+    new_introduction text := private.trim_input(coalesce(input_introduction, ''));
+    new_contact text := private.trim_input(coalesce(input_contact_detail, ''));
     invalid_fields text[] := '{}'::text[];
     missing_fields text[] := '{}'::text[];
 begin
@@ -311,6 +346,18 @@ begin
 end;
 $$;
 
+-- SQL preserves the RPC argument names without PL/pgSQL column ambiguity.
+create function public.update_own_profile(display_name text, introduction text, contact_detail text)
+returns void
+language sql
+security definer
+set search_path = ''
+as $$
+    select private.update_own_profile($1, $2, $3);
+$$;
+
+revoke all on function private.update_own_profile(text, text, text) from public, anon, authenticated, service_role;
+
 create function public.set_own_interests(interest_ids text[])
 returns void
 language plpgsql
@@ -327,6 +374,8 @@ begin
     end if;
     if interest_ids is null or coalesce(pg_catalog.array_ndims(interest_ids), 1) <> 1
         or pg_catalog.cardinality(interest_ids) > 10
+        or (select pg_catalog.count(distinct selected.interest_id)
+            from pg_catalog.unnest(interest_ids) as selected(interest_id)) > 10
         or exists (
             select 1 from pg_catalog.unnest(interest_ids) as selected(interest_id)
             where selected.interest_id is null or not exists (
@@ -358,7 +407,8 @@ begin
     if not found then
         perform private.raise_error('declaration_required');
     end if;
-    if purposes is null or coalesce(pg_catalog.array_ndims(purposes), 1) <> 1 or exists (
+    if purposes is null or coalesce(pg_catalog.array_ndims(purposes), 1) <> 1
+        or pg_catalog.cardinality(purposes) > 10 or exists (
         select 1 from pg_catalog.unnest(purposes) as selected(purpose)
         where selected.purpose is null or selected.purpose not in ('discovery', 'collaboration')
     ) then
@@ -394,7 +444,7 @@ begin
 end;
 $$;
 
-create function public.set_field_visibility(field text, level text)
+create function private.set_field_visibility(input_field text, input_level text)
 returns void
 language plpgsql
 security definer
@@ -408,10 +458,10 @@ begin
     if not found then
         perform private.raise_error('declaration_required');
     end if;
-    if field is null or field not in ('display_name', 'introduction', 'interests', 'purposes', 'contact_detail') then
+    if input_field is null or input_field not in ('display_name', 'introduction', 'interests', 'purposes', 'contact_detail') then
         invalid_fields := pg_catalog.array_append(invalid_fields, 'field');
     end if;
-    if level is null or level not in ('everyone_eligible', 'compatible_only', 'private') then
+    if input_level is null or input_level not in ('everyone_eligible', 'compatible_only', 'private') then
         invalid_fields := pg_catalog.array_append(invalid_fields, 'level');
     end if;
     if pg_catalog.cardinality(invalid_fields) > 0 then
@@ -419,10 +469,22 @@ begin
     end if;
 
     insert into private.field_visibility as v (owner_id, field, level)
-    values (caller, set_field_visibility.field, set_field_visibility.level)
+    values (caller, input_field, input_level)
     on conflict on constraint field_visibility_pkey do update set level = excluded.level;
 end;
 $$;
+
+-- SQL preserves the RPC argument names without PL/pgSQL column ambiguity.
+create function public.set_field_visibility(field text, level text)
+returns void
+language sql
+security definer
+set search_path = ''
+as $$
+    select private.set_field_visibility($1, $2);
+$$;
+
+revoke all on function private.set_field_visibility(text, text) from public, anon, authenticated, service_role;
 
 create function public.set_discovery(enabled boolean)
 returns void
@@ -445,30 +507,12 @@ begin
     end if;
 
     if not private.account_is_ready(caller) then
-        if profile.age_18_declared is distinct from true then
-            missing_fields := pg_catalog.array_append(missing_fields, 'age_18');
-        end if;
-        if coalesce(pg_catalog.btrim(profile.terms_version), '') = '' then
-            missing_fields := pg_catalog.array_append(missing_fields, 'terms_version');
-        end if;
-        if coalesce(pg_catalog.btrim(profile.privacy_version), '') = '' then
-            missing_fields := pg_catalog.array_append(missing_fields, 'privacy_version');
-        end if;
-        if not exists (
-            select 1 from private.notification_preferences as n
-            join pg_catalog.pg_timezone_names as z on z.name = n.time_zone
-            where n.user_id = caller
-        ) then
-            missing_fields := pg_catalog.array_append(missing_fields, 'time_zone');
-        end if;
-        if profile.moderation_state is distinct from 'active' then
-            missing_fields := pg_catalog.array_append(missing_fields, 'moderation_state');
-        end if;
+        perform private.raise_error('account_not_ready');
     end if;
-    if coalesce(pg_catalog.btrim(profile.display_name), '') = '' then
+    if coalesce(private.trim_input(profile.display_name), '') = '' then
         missing_fields := pg_catalog.array_append(missing_fields, 'display_name');
     end if;
-    if coalesce(pg_catalog.btrim(profile.introduction), '') = '' then
+    if coalesce(private.trim_input(profile.introduction), '') = '' then
         missing_fields := pg_catalog.array_append(missing_fields, 'introduction');
     end if;
     if not exists (select 1 from private.user_interests as i where i.user_id = caller) then
@@ -503,16 +547,16 @@ begin
 end;
 $$;
 
-revoke all on function public.accept_declarations(boolean, text, text) from public, anon;
-revoke all on function public.register_time_zone(text) from public, anon;
-revoke all on function public.get_own_profile() from public, anon;
-revoke all on function public.update_own_profile(text, text, text) from public, anon;
-revoke all on function public.set_own_interests(text[]) from public, anon;
-revoke all on function public.set_own_purposes(text[]) from public, anon;
-revoke all on function public.set_minimum_shared_interests(integer) from public, anon;
-revoke all on function public.set_field_visibility(text, text) from public, anon;
-revoke all on function public.set_discovery(boolean) from public, anon;
-revoke all on function public.list_interests() from public, anon;
+revoke all on function public.accept_declarations(boolean, text, text) from public, anon, service_role;
+revoke all on function public.register_time_zone(text) from public, anon, service_role;
+revoke all on function public.get_own_profile() from public, anon, service_role;
+revoke all on function public.update_own_profile(text, text, text) from public, anon, service_role;
+revoke all on function public.set_own_interests(text[]) from public, anon, service_role;
+revoke all on function public.set_own_purposes(text[]) from public, anon, service_role;
+revoke all on function public.set_minimum_shared_interests(integer) from public, anon, service_role;
+revoke all on function public.set_field_visibility(text, text) from public, anon, service_role;
+revoke all on function public.set_discovery(boolean) from public, anon, service_role;
+revoke all on function public.list_interests() from public, anon, service_role;
 
 grant execute on function public.accept_declarations(boolean, text, text) to authenticated;
 grant execute on function public.register_time_zone(text) to authenticated;

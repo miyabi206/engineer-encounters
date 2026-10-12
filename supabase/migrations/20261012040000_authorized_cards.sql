@@ -48,7 +48,7 @@ $$;
 revoke all on function private.encounter_authorization(uuid, uuid)
     from public, anon, authenticated, service_role;
 
-create function public.get_encounter_card(encounter_id uuid)
+create function private.get_encounter_card(input_encounter_id uuid)
 returns jsonb
 language plpgsql
 security definer
@@ -108,7 +108,7 @@ begin
         where l.owner_id = p.user_id
           and (l.visibility = 'everyone_eligible' or (l.visibility = 'compatible_only' and a.compatible))
     ) as links
-    where e.encounter_id = get_encounter_card.encounter_id
+    where e.encounter_id = input_encounter_id
       and caller in (e.user_a, e.user_b)
       and v.revealed
       and (v.favorite or pg_catalog.now() < pg_catalog.timezone(z.name,
@@ -122,6 +122,18 @@ begin
     return card;
 end;
 $$;
+
+-- SQL preserves the RPC argument names without PL/pgSQL column ambiguity.
+create function public.get_encounter_card(encounter_id uuid)
+returns jsonb
+language sql
+security definer
+set search_path = ''
+as $$
+    select private.get_encounter_card($1);
+$$;
+
+revoke all on function private.get_encounter_card(uuid) from public, anon, authenticated, service_role;
 
 revoke all on function public.get_encounter_card(uuid) from public, anon, authenticated, service_role;
 grant execute on function public.get_encounter_card(uuid) to authenticated;

@@ -42,7 +42,7 @@ create table server_tokens_test.windows (
 grant select on all tables in schema server_tokens_test to anon, authenticated;
 grant insert on server_tokens_test.batches, server_tokens_test.windows to authenticated;
 
-create function server_tokens_test.capture(label text, covered_until bigint default null)
+create function server_tokens_test.capture(test_label text, covered_until bigint default null)
 returns void
 language plpgsql
 set search_path = ''
@@ -51,7 +51,7 @@ declare
     result jsonb := public.issue_token_batch(covered_until);
 begin
     insert into server_tokens_test.batches
-    select label, (result->>'batch_id')::uuid, pg_catalog.jsonb_array_length(result->'windows'),
+    select test_label, (result->>'batch_id')::uuid, pg_catalog.jsonb_array_length(result->'windows'),
         (select pg_catalog.array_agg(k order by k) = array['batch_id', 'windows']
          from pg_catalog.jsonb_object_keys(result) as k)
         and pg_catalog.jsonb_typeof(result->'batch_id') = 'string'
@@ -77,7 +77,7 @@ begin
             ) as ordered), true);
 
     insert into server_tokens_test.windows (label, ordinal, token_digest, valid_from, valid_until)
-    select label, ordinal, pg_catalog.sha256(pg_catalog.decode(w->>'token', 'hex')),
+    select test_label, ordinal, pg_catalog.sha256(pg_catalog.decode(w->>'token', 'hex')),
            (w->>'valid_from')::bigint, (w->>'valid_until')::bigint
     from pg_catalog.jsonb_array_elements(result->'windows') with ordinality as j(w, ordinal);
 end;
@@ -107,7 +107,7 @@ begin
 end;
 $$;
 
-select extensions.plan(142);
+select extensions.plan(144);
 
 -- Catalog and grants: 32 assertions.
 select extensions.ok(c.relrowsecurity, t.name || ' has RLS enabled')
@@ -215,8 +215,8 @@ select public.accept_declarations(true, 'draft', 'draft');
 select server_tokens_test.expect_error('select public.issue_token_batch()', 'account_not_ready', '', 'no registered zone is not ready');
 reset role;
 insert into private.notification_preferences (user_id, time_zone) values ('aaaaaaaa-0000-0000-0000-000000000001', 'invalid/zone');
+select extensions.ok(private.account_is_ready('aaaaaaaa-0000-0000-0000-000000000001'), 'stored zones are validated only at registration');
 set local role authenticated;
-select server_tokens_test.expect_error('select public.issue_token_batch()', 'account_not_ready', '', 'an invalid stored zone is not ready');
 select public.register_time_zone('UTC');
 reset role;
 update private.profiles set moderation_state = 'hidden' where user_id = 'aaaaaaaa-0000-0000-0000-000000000001';
@@ -237,20 +237,20 @@ where user_id = 'aaaaaaaa-0000-0000-0000-000000000001';
 set local role authenticated;
 select server_tokens_test.expect_error('select public.issue_token_batch()', 'account_not_ready', '', 'a false age declaration is not ready');
 reset role;
-update private.profiles set age_18_declared = true, terms_version = ' '
+update private.profiles set age_18_declared = true, terms_version = U&'\00A0\3000' || E'\t\n\r'
 where user_id = 'aaaaaaaa-0000-0000-0000-000000000001';
 set local role authenticated;
-select server_tokens_test.expect_error('select public.issue_token_batch()', 'account_not_ready', '', 'empty terms acceptance is not ready');
+select server_tokens_test.expect_error('select public.issue_token_batch()', 'account_not_ready', '', 'Unicode whitespace terms acceptance is not ready');
 reset role;
-update private.profiles set terms_version = 'draft', privacy_version = ' '
+update private.profiles set terms_version = 'draft', privacy_version = U&'\00A0\3000' || E'\t\n\r'
 where user_id = 'aaaaaaaa-0000-0000-0000-000000000001';
 set local role authenticated;
-select server_tokens_test.expect_error('select public.issue_token_batch()', 'account_not_ready', '', 'empty privacy acceptance is not ready');
+select server_tokens_test.expect_error('select public.issue_token_batch()', 'account_not_ready', '', 'Unicode whitespace privacy acceptance is not ready');
 reset role;
 update private.profiles set privacy_version = 'draft' where user_id = 'aaaaaaaa-0000-0000-0000-000000000001';
 alter table private.profiles add constraint profiles_age_18_declared_check check (age_18_declared);
-alter table private.profiles add constraint profiles_terms_version_check check (pg_catalog.btrim(terms_version) <> '' and pg_catalog.char_length(terms_version) <= 32);
-alter table private.profiles add constraint profiles_privacy_version_check check (pg_catalog.btrim(privacy_version) <> '' and pg_catalog.char_length(privacy_version) <= 32);
+alter table private.profiles add constraint profiles_terms_version_check check (private.trim_input(terms_version) <> '' and pg_catalog.char_length(private.trim_input(terms_version)) <= 32);
+alter table private.profiles add constraint profiles_privacy_version_check check (private.trim_input(privacy_version) <> '' and pg_catalog.char_length(private.trim_input(privacy_version)) <= 32);
 select extensions.is((select pg_catalog.count(*) from private.account_limit_events
     where user_id = 'aaaaaaaa-0000-0000-0000-000000000001'), 0::bigint, 'readiness errors record no limiter events');
 select extensions.is((select pg_catalog.count(*) from private.temporary_tokens
@@ -439,13 +439,23 @@ select extensions.is((select pg_catalog.count(*) from private.temporary_tokens
     where user_id = 'aaaaaaaa-0000-0000-0000-000000000003'),
     (select (horizon - current_window) / 900 + 4 from server_tokens_test.clock), 'the hourly limit does not alter stored digests');
 
--- Reusable helper, separate buckets/accounts, rolling minute cutoff: 10 assertions.
+-- Reusable helper, separate buckets/accounts, rolling minute cutoff: 12 assertions.
 select extensions.ok(not private.record_account_event('aaaaaaaa-0000-0000-0000-000000000004', 'receipt-test', 2, interval '1 minute'), 'the helper accepts its first minute event');
+select extensions.ok(exists (select 1 from pg_catalog.pg_locks as l
+    where l.pid = pg_catalog.pg_backend_pid() and l.locktype = 'advisory'
+      and l.classid = 31001::oid and l.objsubid = 2 and l.granted
+      and l.mode = 'ExclusiveLock'
+      and l.objid = (pg_catalog.hashtext('aaaaaaaa-0000-0000-0000-000000000004')::bigint
+          & 4294967295::bigint)::oid), 'limiter holds the account advisory lock in its separate namespace');
+select server_tokens_test.expect_error($test$select private.record_account_event(
+    'aaaaaaaa-0000-0000-0000-000000000004', U&'\00A0\3000' || E'\t\n\r', 2, interval '1 minute')$test$,
+    'invalid_input', '', 'Unicode whitespace is not a limiter bucket');
+
 select extensions.ok(not private.record_account_event('aaaaaaaa-0000-0000-0000-000000000004', 'receipt-test', 2, interval '1 minute'), 'the helper accepts the event exactly at its limit');
 select extensions.ok(private.record_account_event('aaaaaaaa-0000-0000-0000-000000000004', 'receipt-test', 2, interval '1 minute'), 'the helper reports the event beyond its limit');
 select extensions.is((select pg_catalog.count(*) from private.account_limit_events
-    where user_id = 'aaaaaaaa-0000-0000-0000-000000000004' and bucket = 'receipt-test'), 3::bigint,
-    'the helper records the event even when it returns exceeded');
+    where user_id = 'aaaaaaaa-0000-0000-0000-000000000004' and bucket = 'receipt-test'), 2::bigint,
+    'a refused helper attempt leaves no event');
 select extensions.ok(not private.record_account_event('aaaaaaaa-0000-0000-0000-000000000004', 'resolution-test', 1, interval '1 minute'), 'a named bucket has an independent limit');
 select extensions.ok(not private.record_account_event('aaaaaaaa-0000-0000-0000-000000000001', 'receipt-test', 1, interval '1 minute'), 'another account has an independent limit');
 select extensions.ok(private.record_account_event('aaaaaaaa-0000-0000-0000-000000000004', 'resolution-test', 1, interval '1 minute'), 'the second bucket enforces its own boundary');
@@ -458,9 +468,9 @@ select extensions.ok(private.record_account_event('aaaaaaaa-0000-0000-0000-00000
     'the event just inside the rolling span plus the new event exceeds one');
 select extensions.is((select pg_catalog.count(*) from private.account_limit_events
     where user_id = 'aaaaaaaa-0000-0000-0000-000000000004' and bucket = 'receipt-test'
-    and occurred_at > pg_catalog.now() - interval '1 minute'), 2::bigint, 'events exactly at or before the minute cutoff are excluded');
+    and occurred_at > pg_catalog.now() - interval '1 minute'), 1::bigint, 'events at the cutoff are excluded and refusal adds no event');
 select extensions.is((select pg_catalog.count(*) from private.account_limit_events
-    where user_id = 'aaaaaaaa-0000-0000-0000-000000000004' and bucket = 'receipt-test'), 4::bigint,
+    where user_id = 'aaaaaaaa-0000-0000-0000-000000000004' and bucket = 'receipt-test'), 3::bigint,
     'the helper preserves older events for other spans and later cleanup');
 
 -- Hourly cutoff applies at the API as well: 6 assertions.

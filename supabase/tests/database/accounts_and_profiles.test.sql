@@ -62,7 +62,7 @@ begin
 end;
 $$;
 
-select extensions.plan(448);
+select extensions.plan(486);
 
 select extensions.ok(c.relrowsecurity, t.name || ' has RLS enabled')
 from accounts_profiles_test.tables as t
@@ -221,9 +221,8 @@ where f.signature in ('public.register_time_zone(text)', 'public.update_own_prof
     'public.set_own_interests(text[])', 'public.set_own_purposes(text[])',
     'public.set_minimum_shared_interests(integer)', 'public.set_field_visibility(text,text)');
 
-select accounts_profiles_test.expect_error('select public.set_discovery(true)', 'prerequisite_missing',
-    'age_18,terms_version,privacy_version,time_zone,moderation_state,display_name,introduction,interest,link',
-    'discovery on reports all prerequisites before declarations');
+select accounts_profiles_test.expect_error('select public.set_discovery(true)', 'account_not_ready', '',
+    'discovery on requires readiness before listing profile prerequisites');
 select accounts_profiles_test.expect_error('select public.set_discovery(null)', 'invalid_input', 'enabled', 'discovery rejects a null switch');
 select accounts_profiles_test.expect_error('select public.accept_declarations(false, ''draft'', ''draft'')', 'declaration_required', '', 'age declaration must be true');
 select accounts_profiles_test.expect_error('select public.accept_declarations(null, ''draft'', ''draft'')', 'declaration_required', '', 'age declaration cannot be null');
@@ -267,10 +266,10 @@ select extensions.is((select pg_catalog.jsonb_build_array(pg_catalog.char_length
     from private.profiles where user_id = '11111111-1111-1111-1111-111111111111'), '[32,32]'::jsonb,
     'maximum declaration versions retain characters rather than byte lengths');
 set local role authenticated;
-select extensions.lives_ok('select public.accept_declarations(true, '' 規 '', '' 約 '')', 'opaque version values are accepted without rewriting');
+select extensions.lives_ok('select public.accept_declarations(true, '' 規 '', '' 約 '')', 'version values accept surrounding whitespace');
 reset role;
 select extensions.is((select pg_catalog.jsonb_build_array(terms_version, privacy_version)
-    from private.profiles where user_id = '11111111-1111-1111-1111-111111111111'), '[" 規 "," 約 "]'::jsonb, 'opaque versions retain surrounding spaces');
+    from private.profiles where user_id = '11111111-1111-1111-1111-111111111111'), '["規","約"]'::jsonb, 'versions are stored after trimming');
 set local role authenticated;
 
 select accounts_profiles_test.expect_error(pg_catalog.format('select public.register_time_zone(%L)', v.value),
@@ -441,19 +440,19 @@ select extensions.lives_ok('select public.set_own_interests(array[''関心01''])
 reset role;
 delete from private.notification_preferences where user_id = '11111111-1111-1111-1111-111111111111';
 set local role authenticated;
-select accounts_profiles_test.expect_error('select public.set_discovery(true)', 'prerequisite_missing', 'time_zone', 'discovery requires a registered time zone');
+select accounts_profiles_test.expect_error('select public.set_discovery(true)', 'account_not_ready', '', 'discovery requires a registered time zone');
 reset role;
 insert into private.notification_preferences (user_id, time_zone) values ('11111111-1111-1111-1111-111111111111', '無効な地域');
-select extensions.ok(not private.account_is_ready('11111111-1111-1111-1111-111111111111'), 'an invalid stored zone does not make the account ready');
+select extensions.ok(private.account_is_ready('11111111-1111-1111-1111-111111111111'), 'readiness trusts previously registered zones without catalog validation');
 set local role authenticated;
-select accounts_profiles_test.expect_error('select public.set_discovery(true)', 'prerequisite_missing', 'time_zone', 'discovery requires a valid stored time zone');
+select extensions.lives_ok('select public.set_discovery(true)', 'discovery readiness does not revalidate the stored zone');
 select extensions.lives_ok('select public.register_time_zone(''UTC'')', 'registration restores a valid zone');
 
 reset role;
 update private.profiles set moderation_state = 'hidden' where user_id = '11111111-1111-1111-1111-111111111111';
 select extensions.ok(not private.account_is_ready('11111111-1111-1111-1111-111111111111'), 'hidden accounts are not ready');
 set local role authenticated;
-select accounts_profiles_test.expect_error('select public.set_discovery(true)', 'prerequisite_missing', 'moderation_state', 'hidden accounts cannot enable discovery');
+select accounts_profiles_test.expect_error('select public.set_discovery(true)', 'account_not_ready', '', 'hidden accounts cannot enable discovery');
 select extensions.is(public.get_own_profile()->>'moderation_state', 'hidden', 'own profile returns the live moderation state');
 select extensions.lives_ok('select public.set_discovery(false)', 'hidden accounts can always disable discovery');
 
@@ -461,7 +460,7 @@ reset role;
 update private.profiles set moderation_state = 'suspended', discovery_on = true where user_id = '11111111-1111-1111-1111-111111111111';
 select extensions.ok(not private.account_is_ready('11111111-1111-1111-1111-111111111111'), 'suspended accounts are not ready');
 set local role authenticated;
-select accounts_profiles_test.expect_error('select public.set_discovery(true)', 'prerequisite_missing', 'moderation_state', 'suspended accounts cannot enable discovery');
+select accounts_profiles_test.expect_error('select public.set_discovery(true)', 'account_not_ready', '', 'suspended accounts cannot enable discovery');
 select extensions.lives_ok('select public.set_discovery(false)', 'a suspended account can disable existing discovery');
 select extensions.is(public.get_own_profile()->'discovery_on', 'false'::jsonb, 'discovery is disabled even when readiness was lost');
 
@@ -531,6 +530,84 @@ select extensions.is((select pg_catalog.count(*) from private.external_links whe
 select extensions.is((select pg_catalog.count(*) from private.blocks where blocker_id = '33333333-3333-3333-3333-333333333333'
     or blocked_id = '33333333-3333-3333-3333-333333333333'), 0::bigint, 'Auth deletion cascades to both incoming and outgoing blocks');
 select extensions.is((select pg_catalog.count(*) from private.interests), 11::bigint, 'account deletion preserves the curated interest catalog');
+
+
+-- Unicode whitespace and scalar counts use the same normalizer everywhere.
+reset role;
+select extensions.ok(pg_catalog.pg_get_functiondef('private.require_caller()'::regprocedure)
+    !~* 'for[[:space:]]+(key[[:space:]]+share|share|update|no[[:space:]]+key[[:space:]]+update)',
+    'caller existence check takes no row lock');
+select extensions.ok(pg_catalog.pg_get_functiondef('private.account_is_ready(uuid)'::regprocedure)
+    !~ 'pg_timezone_names', 'readiness does not scan the time zone catalog');
+set local role authenticated;
+set local "request.jwt.claims" = '{"sub":"11111111-1111-1111-1111-111111111111","role":"authenticated"}';
+select public.set_discovery(false);
+select accounts_profiles_test.expect_error(pg_catalog.format('select public.accept_declarations(true, %L, %L)',
+    case when v.field = 'terms_version' then w.value else 'draft' end,
+    case when v.field = 'privacy_version' then w.value else 'draft' end),
+    'invalid_input', v.field, v.field || ' rejects Unicode whitespace ' || w.name)
+from (values ('terms_version'), ('privacy_version')) as v(field)
+cross join (values ('space', ' '), ('tab', E'\t'), ('line feed', E'\n'), ('carriage return', E'\r'),
+    ('no-break space', U&'\00A0'), ('ideographic space', U&'\3000')) as w(name, value);
+select extensions.lives_ok($test$select public.accept_declarations(true,
+    U&'\3000' || repeat(U&'e\0301',16) || E'\t', E'\r\n' || repeat(U&'e\0301',16) || U&'\00A0')$test$,
+    'padded multi-scalar declaration versions accept exactly 32 characters');
+reset role;
+select extensions.is((select pg_catalog.jsonb_build_array(terms_version, privacy_version)
+    from private.profiles where user_id = '11111111-1111-1111-1111-111111111111'),
+    pg_catalog.jsonb_build_array(pg_catalog.repeat(U&'e\0301',16), pg_catalog.repeat(U&'e\0301',16)),
+    'declaration versions retain all 32 scalars and no surrounding whitespace');
+set local role authenticated;
+select accounts_profiles_test.expect_error($test$select public.accept_declarations(true,
+    repeat(U&'e\0301',16) || 'x', repeat(U&'e\0301',16) || 'x')$test$,
+    'invalid_input', 'terms_version,privacy_version', '33-scalar versions are rejected');
+select extensions.lives_ok(pg_catalog.format('select public.update_own_profile(%L, %L, %L)', w.value, w.value, w.value),
+    'profile accepts absent Unicode whitespace ' || w.name)
+from (values ('space', ' '), ('tab', E'\t'), ('line feed', E'\n'), ('carriage return', E'\r'),
+    ('no-break space', U&'\00A0'), ('ideographic space', U&'\3000')) as w(name, value);
+select extensions.is(pg_catalog.jsonb_build_array(public.get_own_profile()->>'display_name',
+    public.get_own_profile()->>'introduction', public.get_own_profile()->>'contact_detail'),
+    '["","",""]'::jsonb, 'all whitespace-only profile fields normalize to absent');
+select extensions.lives_ok($test$select public.update_own_profile(
+    U&'\3000' || repeat(U&'e\0301',15) || E'\t',
+    E'\n' || repeat(U&'e\0301',100) || U&'\00A0',
+    E'\r' || repeat(U&'e\0301',50) || U&'\3000')$test$,
+    'Unicode padding is excluded from multi-scalar profile limits');
+select extensions.is(pg_catalog.jsonb_build_array(public.get_own_profile()->>'display_name',
+    public.get_own_profile()->>'introduction', public.get_own_profile()->>'contact_detail'),
+    pg_catalog.jsonb_build_array(pg_catalog.repeat(U&'e\0301',15), pg_catalog.repeat(U&'e\0301',100),
+        pg_catalog.repeat(U&'e\0301',50)), 'profile stores exactly the permitted scalars');
+select accounts_profiles_test.expect_error(pg_catalog.format('select public.update_own_profile(%L, %L, %L)',
+    case when v.field = 'display_name' then pg_catalog.repeat(U&'e\0301',15) || 'x' else '' end,
+    case when v.field = 'introduction' then pg_catalog.repeat(U&'e\0301',100) || 'x' else '' end,
+    case when v.field = 'contact_detail' then pg_catalog.repeat(U&'e\0301',50) || 'x' else '' end),
+    'invalid_input', v.field, v.field || ' refuses one scalar beyond the limit')
+from (values ('display_name'), ('introduction'), ('contact_detail')) as v(field);
+select extensions.lives_ok('select public.set_own_purposes(array_fill(''discovery''::text, array[10]))',
+    'a ten-element purposes array may repeat its identifier');
+select accounts_profiles_test.expect_error('select public.set_own_purposes(array_fill(''discovery''::text, array[11]))',
+    'invalid_input', 'purposes', 'even repeated purposes cannot exceed ten input elements');
+select extensions.lives_ok('select public.set_own_interests(array_fill(''関心01''::text, array[10]))',
+    'ten duplicate interests count as one distinct selection');
+select extensions.is(public.get_own_profile()->'interests', '["関心01"]'::jsonb, 'the interest set stores distinct identifiers');
+select accounts_profiles_test.expect_error('select public.set_own_interests(array_fill(''関心01''::text, array[11]))',
+    'invalid_input', 'interest_ids', 'even duplicate interests cannot exceed ten input elements');
+select public.set_discovery(true);
+select accounts_profiles_test.expect_error($test$select public.update_own_profile(U&'\00A0\3000' || E'\t\n\r', 'intro', '')$test$,
+    'prerequisite_missing', 'display_name', 'Unicode whitespace cannot remove a discovering name');
+select accounts_profiles_test.expect_error($test$select public.update_own_profile('name', U&'\00A0\3000' || E'\t\n\r', '')$test$,
+    'prerequisite_missing', 'introduction', 'Unicode whitespace cannot remove a discovering introduction');
+select public.set_discovery(false);
+reset role;
+update private.profiles set display_name = U&'\00A0\3000', introduction = E'\t\n\r'
+where user_id = '11111111-1111-1111-1111-111111111111';
+set local role authenticated;
+select extensions.is(public.get_own_profile()->'prerequisites',
+    '{"display_name":false,"introduction":false,"interest":true,"link":true}'::jsonb,
+    'own-profile emptiness handles unnormalized Unicode whitespace too');
+select accounts_profiles_test.expect_error('select public.set_discovery(true)', 'prerequisite_missing',
+    'display_name,introduction', 'only the four discovery fields are named for a ready account');
+reset role;
 
 select * from extensions.finish();
 

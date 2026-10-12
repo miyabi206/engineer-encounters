@@ -298,15 +298,18 @@ end;
 $$;
 revoke all on function authorized_cards_test.item_levels() from public, anon, authenticated, service_role;
 
--- Catalog/privileges: 15; actual role checks: 14; exhaustive truth table: 1792;
+-- Catalog/privileges: 18; actual role checks: 14; exhaustive truth table: 1792;
 -- individual levels: 72; wire values: 9; mixed levels: 4; current settings: 19;
 -- helper edge cases: 6; additional read gates: 31.
-select extensions.plan(1962);
+select extensions.plan(1965);
 
 select extensions.ok(p.prosecdef, 'card is security definer')
 from pg_catalog.pg_proc as p where p.oid = 'public.get_encounter_card(uuid)'::regprocedure;
 select extensions.ok('search_path=""' = any(p.proconfig), 'card has an empty search path')
 from pg_catalog.pg_proc as p where p.oid = 'public.get_encounter_card(uuid)'::regprocedure;
+select extensions.ok(not pg_catalog.has_function_privilege(r.name, 'private.get_encounter_card(uuid)', 'execute'),
+    r.name || ' cannot bypass the named card RPC wrapper')
+from (values ('anon'), ('authenticated'), ('service_role')) as r(name);
 select extensions.is(p.proargnames, array['encounter_id'], 'card exposes only encounter_id')
 from pg_catalog.pg_proc as p where p.oid = 'public.get_encounter_card(uuid)'::regprocedure;
 select extensions.is(pg_catalog.format_type(p.prorettype, null), 'jsonb', 'card returns jsonb')
