@@ -14,10 +14,10 @@ final class RuntimeBackendTests: XCTestCase {
         let scheduler = ManualReceiptUploadScheduler()
         let runtime = try appBackendRuntime(transport: transport, queue: queue, scheduler: scheduler)
         await runtime.start()
-        XCTAssertEqual(scheduler.jobs.count, 1)
+        try await appBackendEventually { scheduler.jobs.count == 1 }
         XCTAssertEqual(scheduler.jobs[0].date, appBackendTestNow.addingTimeInterval(5))
         await runtime.refresh()
-        XCTAssertEqual(scheduler.jobs.count, 2)
+        try await appBackendEventually { scheduler.jobs.count == 2 }
         XCTAssertTrue(scheduler.jobs[0].cancelled)
         runtime.receive(.exchangeCompleted(role: .central, nonceDigest: "fixture-digest"))
         try await appBackendEventually { scheduler.jobs.count == 3 }
@@ -41,12 +41,14 @@ final class RuntimeBackendTests: XCTestCase {
         let runtime = try appBackendRuntime(transport: transport, queue: queue, scheduler: scheduler, clock: clock)
         // Foreground retry also works when the local radio participation switch is off.
         await runtime.refresh()
+        try await appBackendEventually { !scheduler.jobs.isEmpty }
         let job = try XCTUnwrap(scheduler.jobs.first)
         XCTAssertEqual(job.date, appBackendTestNow.addingTimeInterval(5))
         let candidateQueue = try await queue.pending()
         XCTAssertEqual(candidateQueue.first?.uploadStatus, .acceptedAsCandidate)
         await clock.advance(by: job.date.timeIntervalSince(appBackendTestNow))
         await job.operation()
+        try await appBackendEventually { runtime.status.pendingReceiptCount == 0 }
         let pending = try await queue.pending()
         XCTAssertTrue(pending.isEmpty)
         XCTAssertEqual(scheduler.jobs.count, 1)
@@ -64,6 +66,7 @@ final class RuntimeBackendTests: XCTestCase {
         let scheduler = ManualReceiptUploadScheduler()
         let runtime = try appBackendRuntime(transport: transport, queue: queue, scheduler: scheduler)
         await runtime.refresh()
+        try await appBackendEventually { !scheduler.jobs.isEmpty }
         let job = try XCTUnwrap(scheduler.jobs.first)
         XCTAssertEqual(job.date, appBackendTestNow.addingTimeInterval(5))
         await runtime.invalidateForAccountChange()

@@ -11,7 +11,8 @@ final class AppComposition: ObservableObject {
     static let shared = AppComposition()
     private let participation: ParticipationFlag
     let account: AccountModel
-    private let client: RemoteProcedureClient?
+    private var client: RemoteProcedureClient?
+    private let clientFactory: (@MainActor (SessionManager) -> RemoteProcedureClient)?
     private let serverTokenStore: any TokenBatchStore
     private let signedOutTokenStore: any TokenBatchStore
     private var serverIssuer: ServerTokenIssuer?
@@ -37,7 +38,9 @@ final class AppComposition: ObservableObject {
         guard let address = info["BackendURL"] as? String,
               let key = info["BackendPublicKey"] as? String,
               !address.contains("$("), !key.contains("$(") else { return nil }
-        return BackendConfiguration(address: address, publicClientKey: key)
+        guard let configuration = BackendConfiguration(address: address, publicClientKey: key),
+              BuildKind.isDevelopment || configuration.address.scheme?.lowercased() == "https" else { return nil }
+        return configuration
     }
 
     init(configuration: BackendConfiguration? = AppComposition.backendConfiguration(),
@@ -65,13 +68,22 @@ final class AppComposition: ObservableObject {
         self.transportFactory = transportFactory
         self.clock = clock
         self.uploadScheduler = uploadScheduler ?? ClockReceiptUploadScheduler(clock: clock)
-        if let configuration {
-            let sessions = SessionManager(configuration: configuration, transport: transport,
-                store: sessionStore ?? KeychainSessionStore(client: keychain), now: now)
-            let client = RemoteProcedureClient(configuration: configuration, transport: transport, sessions: sessions)
-            self.client = client
-            account = AccountModel(sessions: sessions, service: OwnAccountService(client: client), timeZone: timeZone)
+        if let configuration, BuildKind.isDevelopment || configuration.address.scheme?.lowercased() == "https" {
+            let store = sessionStore ?? KeychainSessionStore(client: keychain)
+            let factory: @MainActor (any SessionStore) -> SessionManager = {
+                SessionManager(configuration: configuration, transport: transport, store: $0, now: now)
+            }
+            let makeClient: @MainActor (SessionManager) -> RemoteProcedureClient = {
+                RemoteProcedureClient(configuration: configuration, transport: transport, sessions: $0)
+            }
+            let sessions = factory(store)
+            clientFactory = makeClient
+            client = makeClient(sessions)
+            account = AccountModel(sessions: sessions, service: OwnAccountService(client: makeClient(sessions)),
+                sessionStore: store, sessionFactory: factory,
+                serviceFactory: { OwnAccountService(client: makeClient($0)) }, timeZone: timeZone)
         } else {
+            clientFactory = nil
             client = nil
             account = AccountModel(sessions: nil, service: nil, timeZone: timeZone)
         }
@@ -94,20 +106,20 @@ final class AppComposition: ObservableObject {
     func setParticipation(_ enabled: Bool) async {
         participation.isEnabled = enabled
         isParticipating = enabled
-        await waitForRestoration()
-        guard !sessionChangeInProgress else { return }
-        if enabled {
-            let runtime = makeRuntime()
-            #if DEVELOPMENT_BUILD || INTERNAL_BUILD
-            trialRecorder.beginIfNeeded(metadata: trialMetadata)
-            #endif
-            await runtime.start()
-        } else {
+        if !enabled {
             await runtime?.stop()
             #if DEVELOPMENT_BUILD || INTERNAL_BUILD
             trialRecorder.close()
             #endif
+            return
         }
+        await waitForRestoration()
+        guard participation.isEnabled, !sessionChangeInProgress else { return }
+        let runtime = makeRuntime()
+        #if DEVELOPMENT_BUILD || INTERNAL_BUILD
+        trialRecorder.beginIfNeeded(metadata: trialMetadata)
+        #endif
+        await runtime.start()
     }
 
     func requestBluetooth() async throws {
@@ -164,21 +176,24 @@ final class AppComposition: ObservableObject {
     private func prepareForSessionChange() async throws {
         sessionChangeInProgress = true
         runtime?.suspendForAccountChange()
-        // Invalidation drains a save before clearing; the old runtime also drains uploads.
+        // Drain local saves and queue writes, never an outstanding network request.
         await serverIssuer?.invalidate()
         await runtime?.invalidateForAccountChange()
         runtime = nil
         runtimeStatusSubscription = nil
         serverIssuer = nil
+        var storageFailed = false
+        do { try await serverTokenStore.clear() } catch { storageFailed = true }
         do {
-            try await serverTokenStore.clear()
             let queue = try await queueOpener()
             try await queue.removeAll()
-        } catch { throw BackendError.storageFailure }
+        } catch { storageFailed = true }
+        if storageFailed { throw BackendError.storageFailure }
     }
 
     private func recreateRuntime(force: Bool) async {
         sessionChangeInProgress = false
+        if let sessions = account.sessions { client = clientFactory?(sessions) }
         guard force || participation.isEnabled || account.state.isSignedIn else { return }
         let runtime = makeRuntime()
         if participation.isEnabled {

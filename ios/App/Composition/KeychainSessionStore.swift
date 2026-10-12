@@ -41,3 +41,23 @@ struct KeychainSessionStore: SessionStore {
         catch { throw BackendError.storageFailure }
     }
 }
+
+/// A new provider session cannot overwrite the current account until local cleanup completes.
+actor StagedSessionStore: SessionStore {
+    private var session: BackendSession?
+    private var persistentStore: (any SessionStore)?
+
+    func load() async throws -> BackendSession? { session }
+    func save(_ session: BackendSession) async throws {
+        self.session = session
+        try await persistentStore?.save(session)
+    }
+    func clear() async throws {
+        session = nil
+        try await persistentStore?.clear()
+    }
+    func activate(_ store: any SessionStore) async throws {
+        persistentStore = store
+        if let session { try await store.save(session) }
+    }
+}

@@ -75,6 +75,14 @@ for configuration in Development Internal Release; do
             failed=1
         fi
     else
+        backend_address=$(plutil -extract BackendURL raw "$app/Info.plist")
+        case "$backend_address" in
+            ""|[hH][tT][tT][pP][sS]://?*) ;;
+            *)
+                echo "$configuration: backend address must use HTTPS" >&2
+                failed=1
+                ;;
+        esac
         for key in NSAppTransportSecurity NSLocalNetworkUsageDescription; do
             if plutil -extract "$key" raw "$app/Info.plist" >/dev/null 2>&1; then
                 echo "$configuration: forbidden Info.plist key: $key" >&2

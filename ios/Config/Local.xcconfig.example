@@ -2,10 +2,13 @@
 DEVELOPMENT_TEAM = YOUR_TEAM_ID
 APP_BUNDLE_IDENTIFIER = io.github.your-account.EngineerEncounters
 
-// Optional backend; empty values leave it unavailable. Use a public client key only.
-// The empty expansion separates the slashes so xcconfig does not truncate the URL.
-BACKEND_URL = https:/$()/YOUR_BACKEND_HOST
-BACKEND_PUBLIC_KEY = YOUR_PUBLIC_CLIENT_KEY
-// For a phone and local Supabase, use the Mac's LAN address rather than localhost:
-// BACKEND_URL = http:/$()/YOUR_MAC_LAN_ADDRESS:54321
-// Development permits local networking; Internal and Release have no ATS exceptions.
+// Optional backends: configure each build kind independently with a public client key.
+DEVELOPMENT_BACKEND_URL =
+DEVELOPMENT_BACKEND_PUBLIC_KEY =
+INTERNAL_BACKEND_URL =
+INTERNAL_BACKEND_PUBLIC_KEY =
+RELEASE_BACKEND_URL =
+RELEASE_BACKEND_PUBLIC_KEY =
+// In an address, use /$()/ between the scheme's colon and the host so xcconfig
+// preserves both slashes. Only Development accepts HTTP/local networking.
+// Internal and Release require HTTPS and have no ATS exceptions.

@@ -21,15 +21,21 @@ settings:
     SWIFT_VERSION: 6.0
   configs:
     Development:
+      BACKEND_URL: $(DEVELOPMENT_BACKEND_URL)
+      BACKEND_PUBLIC_KEY: $(DEVELOPMENT_BACKEND_PUBLIC_KEY)
       SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEVELOPMENT_BUILD
       EXCLUDED_SOURCE_FILE_NAMES: ""
       INFOPLIST_PREPROCESSOR_DEFINITIONS: DEVELOPMENT_BACKEND_NETWORKING=1
     # App/Development also contains DevelopmentWelcomeView; its control and text stay Development-only.
     Internal:
+      BACKEND_URL: $(INTERNAL_BACKEND_URL)
+      BACKEND_PUBLIC_KEY: $(INTERNAL_BACKEND_PUBLIC_KEY)
       SWIFT_ACTIVE_COMPILATION_CONDITIONS: INTERNAL_BUILD
       EXCLUDED_SOURCE_FILE_NAMES: "$(inherited) $(SRCROOT)/App/Development/* DevelopmentDiagnostics.strings DevelopmentAccount.strings"
       INFOPLIST_PREPROCESSOR_DEFINITIONS: DEVELOPMENT_BACKEND_NETWORKING=0
     Release:
+      BACKEND_URL: $(RELEASE_BACKEND_URL)
+      BACKEND_PUBLIC_KEY: $(RELEASE_BACKEND_PUBLIC_KEY)
       SWIFT_ACTIVE_COMPILATION_CONDITIONS: ""
       EXCLUDED_SOURCE_FILE_NAMES: "$(inherited) $(SRCROOT)/App/Development/* $(SRCROOT)/App/Diagnostics/* DevelopmentDiagnostics.strings DevelopmentAccount.strings Diagnostics.strings"
       INFOPLIST_PREPROCESSOR_DEFINITIONS: DEVELOPMENT_BACKEND_NETWORKING=0
@@ -68,6 +74,13 @@ targets:
       - path: Tests
         excludes:
           - "*.sh"
+      # Hosted tests verify the build inputs without reading the private Local.xcconfig.
+      - path: project.yml
+        buildPhase: resources
+      - path: Config/Shared.xcconfig
+        buildPhase: resources
+      - path: Config/Local.xcconfig.example
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_IDENTIFIER).Tests

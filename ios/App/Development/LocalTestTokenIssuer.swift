@@ -30,4 +30,14 @@ actor LocalTestTokenIssuer: TokenIssuer {
         try await store.save(TokenBatch(windows: windows))
     }
 }
+
+@MainActor
+extension EncounterRuntime {
+    /// Preserve radio-only Development startup without placing any server request in its chain.
+    func replenishLocalTokens(at now: Date) async -> Bool? {
+        guard let issuer = tokenIssuer as? LocalTestTokenIssuer else { return nil }
+        do { try await issuer.replenish(at: now); return true }
+        catch { return false }
+    }
+}
 #endif

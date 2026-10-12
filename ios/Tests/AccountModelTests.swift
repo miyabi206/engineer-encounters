@@ -78,7 +78,7 @@ final class AccountModelTests: XCTestCase {
         var states: [AccountState] = []
         let subscription = composition.account.$state.sink { states.append($0) }
         await composition.waitForRestoration()
-        XCTAssertEqual(states, [.signedOut, .signedIn(appBackendTestUser)])
+        XCTAssertEqual(states, [.signedOut, .signedInPending(appBackendTestUser), .signedIn(appBackendTestUser)])
         XCTAssertTrue(composition.runtime?.tokenIssuer is ServerTokenIssuer)
         await composition.refresh()
         zone.value = "Europe/London"
@@ -189,7 +189,7 @@ final class AccountModelTests: XCTestCase {
         XCTAssertFalse(composition.account.temporarySignInTitle.isEmpty)
     }
 
-    func testFailedTemporarySignInDoesNotPublishSignedInOrUseServerIssuer() async throws {
+    func testDeclarationFailureKeepsEstablishedSessionAndServerIssuer() async throws {
         let sessions = InMemorySessionStore()
         let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(),
             transport: AppBackendTransport([appBackendAuthResponse(), HTTPResponse(data: Data(), statusCode: 500)]),
@@ -201,11 +201,11 @@ final class AccountModelTests: XCTestCase {
         let subscription = composition.account.$state.sink { states.append($0) }
         do { try await composition.account.signInTemporaryAccount(isAdult: true, acceptsTermsAndPrivacy: true); XCTFail("Declaration failure must fail sign-in") }
         catch { XCTAssertEqual(error as? BackendError, .transportFailure) }
-        XCTAssertTrue(states.allSatisfy { $0 == .signedOut })
+        XCTAssertEqual(states, [.signedOut, .signedInPending(appBackendTestUser)])
         let remainingSession = try await sessions.load()
-        XCTAssertNil(remainingSession)
+        XCTAssertNotNil(remainingSession)
         await composition.refreshLocalSummary()
-        XCTAssertTrue(composition.runtime?.tokenIssuer is LocalTestTokenIssuer)
+        XCTAssertTrue(composition.runtime?.tokenIssuer is ServerTokenIssuer)
         withExtendedLifetime(subscription) {}
     }
     #endif

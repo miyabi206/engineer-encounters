@@ -4,11 +4,13 @@ import Foundation
 import EncounterUI
 
 enum AccountState: Equatable {
-    case unavailable, signedOut, signedIn(UUID)
+    case unavailable, signedOut, signedInPending(UUID?), signedIn(UUID)
 
     var isSignedIn: Bool {
-        if case .signedIn = self { return true }
-        return false
+        switch self {
+        case .signedIn, .signedInPending: true
+        default: false
+        }
     }
 }
 
@@ -17,8 +19,20 @@ final class AccountModel: ObservableObject {
     @Published private(set) var state: AccountState {
         didSet { if state != oldValue { profile = nil } }
     }
-    private let sessions: SessionManager?
-    let service: OwnAccountService?
+    private(set) var sessions: SessionManager?
+    private(set) var service: OwnAccountService?
+    private let sessionStore: (any SessionStore)?
+    private let sessionFactory: (@MainActor (any SessionStore) -> SessionManager)?
+    private let serviceFactory: (@MainActor (SessionManager) -> OwnAccountService)?
+    private var generation = UUID()
+    private var refreshTask: (id: UUID, task: Task<Void, Never>)?
+    private struct Declarations {
+        let age18: Bool
+        let terms: String
+        let privacy: String
+    }
+    private var pendingDeclarations: Declarations?
+    private var setupTask: (id: UUID, task: Task<Void, any Error>)?
     @Published var profile: OwnProfileState?
     private let timeZone: @MainActor () -> String
     private var registeredTimeZone: String?
@@ -27,89 +41,180 @@ final class AccountModel: ObservableObject {
     var sessionDidChange: @MainActor (_ recreate: Bool) async -> Void = { _ in }
 
     init(sessions: SessionManager?, service: OwnAccountService?,
+         sessionStore: (any SessionStore)? = nil,
+         sessionFactory: (@MainActor (any SessionStore) -> SessionManager)? = nil,
+         serviceFactory: (@MainActor (SessionManager) -> OwnAccountService)? = nil,
          timeZone: @escaping @MainActor () -> String = { TimeZone.current.identifier }) {
         self.sessions = sessions
         self.service = service
+        self.sessionStore = sessionStore
+        self.sessionFactory = sessionFactory
+        self.serviceFactory = serviceFactory
         self.timeZone = timeZone
         state = sessions == nil ? .unavailable : .signedOut
     }
 
     func restore() async {
-        try? await serialize {
-            guard let sessions = self.sessions else {
-                await self.sessionDidChange(false)
-                return
-            }
-            do {
-                let session = try await sessions.session()
-                self.state = .signedIn(session.userID)
-                // Offline restoration must still select server storage, never local test tokens.
-                try? await self.registerTimeZoneIfNeeded()
-            } catch { self.state = .signedOut }
-            await self.sessionDidChange(false)
+        guard let sessions else {
+            await sessionDidChange(false)
+            return
         }
+        let epoch = generation
+        var canRefresh = true
+        do {
+            // Reading credentials chooses storage without refreshing over the network.
+            let stored: BackendSession?
+            if let sessionStore { stored = try await sessionStore.load() }
+            else { stored = try await sessions.session() }
+            guard epoch == generation else { return }
+            guard let stored else { throw BackendError.notAuthenticated }
+            state = .signedInPending(stored.userID)
+        } catch BackendError.notAuthenticated {
+            await discardDeadSession(epoch: epoch, recreate: false)
+            return
+        } catch {
+            guard epoch == generation else { return }
+            // A locked/unavailable Keychain is not evidence that the user signed out.
+            state = .signedInPending(nil)
+            canRefresh = false
+        }
+        guard epoch == generation else { return }
+        await sessionDidChange(false)
+        guard epoch == generation, canRefresh else { return }
+        await refresh()
     }
 
-    /// Provider-neutral entry point; provider request construction lives outside composition.
+    /// Authenticate in isolated storage; an unsuccessful provider request leaves the old account intact.
     func signIn(using request: AuthRequest, isAdult: Bool, acceptsTermsAndPrivacy: Bool,
                 termsVersion: String, privacyVersion: String) async throws {
         guard isAdult && acceptsTermsAndPrivacy else { throw BackendError.declarationRequired }
-        try await serialize {
-            guard let sessions = self.sessions, let service = self.service else {
-                throw BackendError.invalidRequest
-            }
-            try await self.prepareForSessionChange()
-            try await sessions.clear()
-            self.state = .signedOut
-            self.registeredTimeZone = nil
-            do {
-                let session = try await sessions.establish(using: request)
-                try await service.acceptDeclarations(age18: isAdult, termsVersion: termsVersion,
-                                                     privacyVersion: privacyVersion)
-                try await self.registerTimeZoneIfNeeded()
-                self.state = .signedIn(session.userID)
-            } catch {
-                try? await sessions.clear()
-                await self.sessionDidChange(true)
-                throw Self.safeError(error)
-            }
-            await self.sessionDidChange(true)
+        guard let oldSessions = sessions, let sessionStore, let sessionFactory, let serviceFactory else {
+            throw BackendError.invalidRequest
         }
+        let authGeneration = generation
+        let stagedStore = StagedSessionStore()
+        let newSessions = sessionFactory(stagedStore)
+        let session: BackendSession
+        do { session = try await newSessions.establish(using: request) }
+        catch { throw Self.safeError(error) }
+        var establishedGeneration: UUID?
+        var storageFailed = false
+        try await serialize {
+            guard authGeneration == self.generation else { throw BackendError.notAuthenticated }
+            self.invalidateRefresh()
+            do { try await self.prepareForSessionChange() }
+            catch {
+                // The old manager still owns the actual session if cleanup did not complete.
+                await self.sessionDidChange(true)
+                throw error
+            }
+            do { try await oldSessions.clear() } catch { storageFailed = true }
+            do { try await stagedStore.activate(sessionStore) } catch { storageFailed = true }
+            self.sessions = newSessions
+            self.service = serviceFactory(newSessions)
+            self.registeredTimeZone = nil
+            self.pendingDeclarations = Declarations(age18: isAdult, terms: termsVersion, privacy: privacyVersion)
+            self.state = .signedInPending(session.userID)
+            // Recreate/start before either of the account setup requests.
+            await self.sessionDidChange(true)
+            establishedGeneration = self.generation
+        }
+        guard let epoch = establishedGeneration else { return }
+        do {
+            try await finishAccountSetup(epoch: epoch)
+            guard epoch == generation else { throw BackendError.notAuthenticated }
+            state = .signedIn(session.userID)
+            if storageFailed { throw BackendError.storageFailure }
+        } catch BackendError.notAuthenticated {
+            await discardDeadSession(epoch: epoch, recreate: true)
+            throw BackendError.notAuthenticated
+        } catch { throw Self.safeError(error) }
     }
 
     func signOut() async throws {
         try await serialize {
             guard let sessions = self.sessions else { return }
-            try await self.prepareForSessionChange()
-            do { try await sessions.clear() }
-            catch { throw BackendError.storageFailure }
+            self.invalidateRefresh()
+            var storageFailed = false
+            do { try await self.prepareForSessionChange() } catch { storageFailed = true }
+            // SessionManager clears its in-memory account even when persistence fails.
+            do { try await sessions.clear() } catch { storageFailed = true }
             self.registeredTimeZone = nil
+            self.pendingDeclarations = nil
             self.state = .signedOut
             await self.sessionDidChange(true)
+            if storageFailed { throw BackendError.storageFailure }
         }
     }
 
     func refresh() async {
-        try? await serialize {
-            guard self.state.isSignedIn, let sessions = self.sessions else { return }
+        guard state.isSignedIn, let sessions else { return }
+        if let refreshTask { await refreshTask.task.value; return }
+        let epoch = generation
+        let id = UUID()
+        let task = Task { [weak self] in
+            guard let self else { return }
             do {
-                _ = try await sessions.session()
-                try await self.registerTimeZoneIfNeeded()
+                let session = try await sessions.session()
+                guard epoch == self.generation else { return }
+                try await self.finishAccountSetup(epoch: epoch)
+                guard epoch == self.generation else { return }
+                self.state = .signedIn(session.userID)
             } catch BackendError.notAuthenticated {
-                try await self.prepareForSessionChange()
-                try await sessions.clear()
-                self.registeredTimeZone = nil
-                self.state = .signedOut
-                await self.sessionDidChange(true)
+                await self.discardDeadSession(epoch: epoch, recreate: true)
+            } catch {
+                guard epoch == self.generation else { return }
+                if case .signedIn(let id) = self.state { self.state = .signedInPending(id) }
             }
         }
+        refreshTask = (id, task)
+        await task.value
+        if refreshTask?.id == id { refreshTask = nil }
     }
 
-    private func registerTimeZoneIfNeeded() async throws {
-        let zone = timeZone()
-        guard zone != registeredTimeZone, let service else { return }
-        try await service.registerTimeZone(zone)
-        registeredTimeZone = zone
+    private func finishAccountSetup(epoch: UUID) async throws {
+        guard epoch == generation else { throw BackendError.notAuthenticated }
+        if let setupTask { return try await setupTask.task.value }
+        let id = UUID()
+        let task = Task {
+            guard epoch == self.generation else { throw BackendError.notAuthenticated }
+            if let declarations = self.pendingDeclarations, let service = self.service {
+                try await service.acceptDeclarations(age18: declarations.age18, termsVersion: declarations.terms,
+                                                     privacyVersion: declarations.privacy)
+                guard epoch == self.generation else { throw BackendError.notAuthenticated }
+                self.pendingDeclarations = nil
+            }
+            let zone = self.timeZone()
+            if zone != self.registeredTimeZone, let service = self.service {
+                try await service.registerTimeZone(zone)
+                guard epoch == self.generation else { throw BackendError.notAuthenticated }
+                self.registeredTimeZone = zone
+            }
+        }
+        setupTask = (id, task)
+        defer { if setupTask?.id == id { setupTask = nil } }
+        try await task.value
+    }
+
+    private func invalidateRefresh() {
+        generation = UUID()
+        refreshTask?.task.cancel()
+        refreshTask = nil
+        setupTask?.task.cancel()
+        setupTask = nil
+    }
+
+    private func discardDeadSession(epoch: UUID, recreate: Bool) async {
+        try? await serialize {
+            guard epoch == self.generation, let sessions = self.sessions else { return }
+            self.invalidateRefresh()
+            try? await self.prepareForSessionChange()
+            try? await sessions.clear()
+            self.registeredTimeZone = nil
+            self.pendingDeclarations = nil
+            self.state = .signedOut
+            await self.sessionDidChange(recreate)
+        }
     }
 
     private func serialize(_ operation: @escaping @MainActor () async throws -> Void) async throws {

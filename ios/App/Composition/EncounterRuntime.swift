@@ -31,6 +31,9 @@ final class EncounterRuntime: ObservableObject {
     private let uploadFactory: (@MainActor (any ReceiptQueue) -> ReceiptUploader)?
     private let uploadScheduler: any ReceiptUploadScheduler
     private var uploader: ReceiptUploader?
+    private var uploadQueue: AccountReceiptQueue?
+    private(set) var uploadTask: Task<Void, Never>?
+    private var uploadRequested = false
     private var scheduledUpload: (any ReceiptUploadCancellation)?
     private var uploadGeneration = UUID()
     private var validForAccount = true
@@ -40,7 +43,11 @@ final class EncounterRuntime: ObservableObject {
     private var participationOn = false
     private var presenceApproach: PresenceApproach
     private var eventObservers: [UUID: @MainActor (EncounterEngineEvent) -> Void] = [:]
-    private var tokenTopUpInFlight = false
+    private(set) var tokenTopUpTask: Task<Void, Never>?
+    private var scheduledTokenTopUp: (any ReceiptUploadCancellation)?
+    private var tokenGeneration = UUID()
+    private var tokenRetryDelay: TimeInterval = 5
+    private var localTopUpFailed = false
 
     init(tokenIssuer: (any TokenIssuer)?, sessionFlag: @escaping @Sendable () async -> Bool,
          approach: PresenceApproach = .secondExchange,
@@ -102,47 +109,52 @@ final class EncounterRuntime: ObservableObject {
             await self.engine?.stop()
             self.engineRunning = false
             guard await self.prepare() else { return }
-            await self.replenishTokens()
+            let locallyPrepared = await self.prepareLocalTokensForStart()
             guard self.participationOn, self.validForAccount else { return }
             self.engineRunning = true
             await self.engine?.start()
-            await self.uploadReceipts()
+            if !locallyPrepared { self.requestTokenTopUp() }
+            self.triggerUpload()
             await self.updateLocalSummary()
         }
     }
 
     func stop() async {
         participationOn = false
+        cancelTokenTopUp()
         await serialize {
             await self.engine?.stop()
             self.engineRunning = false
             self.status.discoveryOn = false
             self.status.pausedForLackOfToken = false
-            await self.updateLocalSummary()
+            if self.validForAccount { await self.updateLocalSummary() }
         }
     }
 
     func refresh() async {
+        // Preserve the no-backend, participation-off early return from the radio-only app.
+        guard participationOn || uploadFactory != nil else { return }
         await serialize {
             guard self.validForAccount else { return }
             guard self.participationOn else {
-                await self.uploadReceipts()
+                self.triggerUpload()
                 await self.updateLocalSummary()
                 return
             }
+            var locallyPrepared = false
             if self.status.storageUnavailable || !self.engineRunning {
                 await self.engine?.stop()
                 self.engineRunning = false
                 guard await self.prepare() else { return }
-                await self.replenishTokens()
+                locallyPrepared = await self.prepareLocalTokensForStart()
                 guard self.participationOn, self.validForAccount else { return }
                 self.engineRunning = true
                 await self.engine?.start()
             } else {
-                await self.replenishTokens()
                 await self.engine?.refresh()
             }
-            await self.uploadReceipts()
+            if !locallyPrepared { self.requestTokenTopUp() }
+            self.triggerUpload()
             await self.updateLocalSummary()
         }
     }
@@ -152,6 +164,9 @@ final class EncounterRuntime: ObservableObject {
         validForAccount = false
         participationOn = false
         uploadGeneration = UUID()
+        uploadTask?.cancel()
+        uploadRequested = false
+        cancelTokenTopUp()
         scheduledUpload?.cancel()
         scheduledUpload = nil
         eventTask?.cancel()
@@ -161,11 +176,13 @@ final class EncounterRuntime: ObservableObject {
     func invalidateForAccountChange() async {
         suspendForAccountChange()
         await stop()
+        await uploadQueue?.invalidate()
     }
 
     #if DEVELOPMENT_BUILD || INTERNAL_BUILD
     func selectPresenceApproach(_ approach: PresenceApproach) async {
         await serialize {
+            guard self.validForAccount else { return }
             self.presenceApproach = approach
             await self.engine?.selectPresenceApproach(approach)
         }
@@ -199,9 +216,11 @@ final class EncounterRuntime: ObservableObject {
             // Start the recorder's new clock before restarting discovery.
             onSuccess()
             if self.participationOn, await self.prepare(), let engine = self.engine {
-                await self.replenishTokens()
+                let locallyPrepared = await self.prepareLocalTokensForStart()
+                guard self.participationOn, self.validForAccount else { return }
                 self.engineRunning = true
                 await engine.start()
+                if !locallyPrepared { self.requestTokenTopUp() }
             }
             await self.updateLocalSummary()
         }
@@ -261,12 +280,77 @@ final class EncounterRuntime: ObservableObject {
         return queue != nil
     }
 
-    private func replenishTokens() async {
-        // A failed Keychain read/write leaves token eligibility to the engine.
-        guard validForAccount, let tokenIssuer else { return }
+    private func prepareLocalTokensForStart() async -> Bool {
+        #if DEVELOPMENT_BUILD
         let time = await clock.now()
-        guard validForAccount else { return }
-        try? await tokenIssuer.replenish(at: time.wall)
+        guard validForAccount, participationOn else { return false }
+        let prepared = await replenishLocalTokens(at: time.wall)
+        localTopUpFailed = prepared == false
+        return prepared == true
+        #else
+        return false
+        #endif
+    }
+
+    private func cancelTokenTopUp() {
+        tokenGeneration = UUID()
+        scheduledTokenTopUp?.cancel()
+        scheduledTokenTopUp = nil
+        tokenTopUpTask?.cancel()
+        tokenTopUpTask = nil
+        tokenRetryDelay = 5
+        localTopUpFailed = false
+    }
+
+    private func requestTokenTopUp() {
+        guard validForAccount, participationOn, engineRunning, let tokenIssuer,
+              tokenTopUpTask == nil, scheduledTokenTopUp == nil else { return }
+        let generation = tokenGeneration
+        let alreadyFailed = localTopUpFailed
+        localTopUpFailed = false
+        tokenTopUpTask = Task { [weak self] in
+            guard let self else { return }
+            let time = await self.clock.now()
+            guard self.validForAccount, self.participationOn, generation == self.tokenGeneration else { return }
+            // Only local lifecycle work is serialized. A held request cannot hold up stop/sign-out.
+            if !alreadyFailed { try? await tokenIssuer.replenish(at: time.wall) }
+            guard self.validForAccount, self.participationOn, generation == self.tokenGeneration else { return }
+            await self.serialize {
+                guard self.validForAccount, self.participationOn, generation == self.tokenGeneration else { return }
+                await self.engine?.refresh()
+                await self.updateTokenStatus()
+            }
+            guard self.validForAccount, self.participationOn, generation == self.tokenGeneration else { return }
+            if self.status.validTokenAvailable {
+                self.tokenTopUpTask = nil
+                self.tokenRetryDelay = 5
+                return
+            }
+            let retryTime = await self.clock.now()
+            guard self.validForAccount, self.participationOn, generation == self.tokenGeneration else { return }
+            let next = retryTime.wall.addingTimeInterval(self.tokenRetryDelay)
+            self.tokenRetryDelay = min(900, self.tokenRetryDelay * 2)
+            let retryGeneration = UUID()
+            self.tokenGeneration = retryGeneration
+            self.scheduledTokenTopUp = self.uploadScheduler.schedule(at: next) { [weak self] in
+                guard let self, self.validForAccount, self.participationOn,
+                      retryGeneration == self.tokenGeneration else { return }
+                self.scheduledTokenTopUp?.cancel()
+                self.scheduledTokenTopUp = nil
+                await self.serialize {
+                    guard self.validForAccount, self.participationOn, retryGeneration == self.tokenGeneration else { return }
+                    await self.updateTokenStatus()
+                    if self.status.validTokenAvailable {
+                        self.tokenRetryDelay = 5
+                        await self.engine?.refresh()
+                    }
+                }
+                guard self.validForAccount, self.participationOn, retryGeneration == self.tokenGeneration,
+                      !self.status.validTokenAvailable else { return }
+                self.requestTokenTopUp()
+            }
+            self.tokenTopUpTask = nil
+        }
     }
 
     func receive(_ event: EncounterEngineEvent) {
@@ -279,34 +363,12 @@ final class EncounterRuntime: ObservableObject {
             if enabled { status.pausedForLackOfToken = false }
         case .participationPausedForLackOfToken:
             status.pausedForLackOfToken = participationOn
-            guard participationOn, let tokenIssuer, !tokenTopUpInFlight else {
-                Task {
-                    await self.serialize {
-                        guard self.validForAccount else { return }
-                        await self.updateTokenStatus()
-                    }
-                }
-                return
-            }
-            tokenTopUpInFlight = true
-            Task {
-                await self.serialize {
-                    defer { self.tokenTopUpInFlight = false }
-                    guard self.validForAccount, self.participationOn, self.engineRunning else { return }
-                    do {
-                        let time = await self.clock.now()
-                        guard self.validForAccount else { return }
-                        try await tokenIssuer.replenish(at: time.wall)
-                        await self.engine?.refresh()
-                    } catch { /* Retry is explicit after a failed top-up; never loop. */ }
-                    await self.updateTokenStatus()
-                }
-            }
+            requestTokenTopUp()
         case .receiptStorageFailed:
             status.storageUnavailable = true
             Task {
                 await self.serialize {
-                    guard self.status.storageUnavailable else { return }
+                    guard self.validForAccount, self.status.storageUnavailable else { return }
                     await self.engine?.stop()
                     self.engineRunning = false
                 }
@@ -317,7 +379,7 @@ final class EncounterRuntime: ObservableObject {
             Task {
                 await self.serialize {
                     guard self.validForAccount else { return }
-                    await self.uploadReceipts()
+                    self.triggerUpload()
                     await self.updateLocalSummary()
                 }
             }
@@ -325,28 +387,50 @@ final class EncounterRuntime: ObservableObject {
         }
     }
 
-    private func uploadReceipts() async {
-        // The factory exists only for a signed-in runtime. Participation may be off.
-        guard validForAccount, let uploadFactory, await prepareQueue(), let queue else { return }
+    private func triggerUpload() {
+        guard validForAccount, uploadFactory != nil else { return }
         scheduledUpload?.cancel()
         scheduledUpload = nil
+        if uploadTask != nil {
+            uploadRequested = true
+            return
+        }
         let generation = UUID()
         uploadGeneration = generation
-        if uploader == nil { uploader = uploadFactory(queue) }
+        uploadTask = Task { [weak self] in
+            guard let self else { return }
+            await self.uploadReceipts(generation: generation)
+            guard self.validForAccount, generation == self.uploadGeneration else { return }
+            await self.serialize {
+                guard self.validForAccount, generation == self.uploadGeneration else { return }
+                await self.updateLocalSummary()
+            }
+            self.uploadTask = nil
+            if self.uploadRequested {
+                self.uploadRequested = false
+                self.triggerUpload()
+            }
+        }
+    }
+
+    private func uploadReceipts(generation: UUID) async {
+        guard validForAccount, let uploadFactory, await prepareQueue(), let queue,
+              generation == uploadGeneration else { return }
+        if uploader == nil {
+            let guardedQueue = AccountReceiptQueue(queue)
+            uploadQueue = guardedQueue
+            uploader = uploadFactory(guardedQueue)
+        }
         do {
             let time = await clock.now()
-            guard validForAccount, let uploader else { return }
+            guard validForAccount, generation == uploadGeneration, let uploader else { return }
             let outcome = try await uploader.upload(at: time.wall)
             guard validForAccount, generation == uploadGeneration, let next = outcome.nextAttemptAt else { return }
             scheduledUpload = uploadScheduler.schedule(at: next) { [weak self] in
                 guard let self, self.validForAccount, generation == self.uploadGeneration else { return }
-                await self.serialize {
-                    guard self.validForAccount, generation == self.uploadGeneration else { return }
-                    await self.uploadReceipts()
-                    await self.updateLocalSummary()
-                }
+                self.triggerUpload()
             }
-        } catch { /* Nonretryable failures wait for the next explicit trigger. Never log receipt material. */ }
+        } catch { /* Never log receipt material. Explicit triggers retry nonretryable failures. */ }
     }
 
     private func updateLocalSummary() async {
