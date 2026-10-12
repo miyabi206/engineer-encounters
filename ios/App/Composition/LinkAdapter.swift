@@ -1,0 +1,238 @@
+import Combine
+import EncounterBackend
+import EncounterUI
+import Foundation
+
+@MainActor
+final class LinkAdapter: ObservableObject {
+    @Published private(set) var connection: GitHubConnectionState = .notConnected
+    @Published private(set) var connectionError: LinkActionError?
+    @Published private(set) var links: [OwnLinkState]?
+    private let account: AccountModel
+    private let runner: any GitHubWebAuthenticationRunning
+    private var own: OwnLinkService?
+    private var github: GitHubLinksService?
+    private var pending: UUID?
+
+    init(account: AccountModel, runner: any GitHubWebAuthenticationRunning) {
+        self.account = account
+        self.runner = runner
+    }
+
+    func configure(own: OwnLinkService?, github: GitHubLinksService?) {
+        self.own = own; self.github = github
+    }
+
+    func invalidate() async {
+        pending = nil
+        runner.cancel()
+        await account.sessions?.cancelGitHubLink()
+        links = nil; connection = .notConnected; connectionError = nil
+        own = nil; github = nil
+    }
+
+    func actions() -> LinkActions {
+        let epoch = account.sessionGeneration
+        return LinkActions(loadLinks: { try await self.loadLinks(epoch: epoch) },
+            loadConnection: {
+                let value = try await self.operation(epoch: epoch) { own, _ in Self.present(try await own.getGitHubConnection()) }
+                self.connection = value
+                return value
+            },
+            connectGitHub: { try await self.connect(epoch: epoch) },
+            listRepositories: { page in try await self.operation(epoch: epoch) { _, github in
+                let result = try await github.listRepositories(page: page)
+                return try GitHubRepositoryPage(repositories: result.repositories.map(Self.present), nextPage: result.nextPage)
+            } },
+            previewRepository: { repository in try await self.operation(epoch: epoch) { _, github in
+                try Self.present(await github.previewRepository(repositoryID: repository.repositoryID, repositoryName: repository.repositoryName))
+            } },
+            saveRepository: { draft, visibility, replace in
+                let saved = try await self.operation(epoch: epoch) { _, github in
+                    try Self.present(await github.saveRepository(repositoryID: draft.repositoryID, repositoryName: draft.repositoryName,
+                        title: draft.title, description: draft.description, mainLanguage: draft.mainLanguage, tags: draft.tags,
+                        openingText: draft.openingText, visibility: Self.wire(visibility), replaceExisting: replace))
+                }
+                if let links = self.links { self.links = links.filter { $0.id != saved.id } + [saved] }
+                await self.refreshProfile(epoch: epoch, fallbackCount: self.links?.count ?? (replace ? nil : self.account.profile.map { $0.linkCount + 1 }))
+                return saved
+            },
+            updateLink: { id, draft, visibility in
+                let saved = try await self.operation(epoch: epoch) { own, _ in
+                    try Self.present(await own.updateOwnLink(linkID: Self.identifier(id), title: draft.title,
+                        description: draft.description, mainLanguage: draft.mainLanguage, tags: draft.tags,
+                        openingText: draft.openingText, visibility: Self.wire(visibility)))
+                }
+                if let links = self.links { self.links = links.filter { $0.id != saved.id } + [saved] }
+                await self.refreshProfile(epoch: epoch, fallbackCount: self.links?.count)
+                return saved
+            },
+            deleteLink: { id in
+                try await self.operation(epoch: epoch) { own, _ in try await own.deleteOwnLink(linkID: Self.identifier(id)) }
+                let remaining = self.links?.filter { $0.id != id }
+                self.links = remaining
+                let count = remaining.map { $0.count } ?? self.account.profile.map { max(0, $0.linkCount - 1) }
+                await self.refreshProfile(epoch: epoch, fallbackCount: count)
+                do { return try await self.loadLinks(epoch: epoch) }
+                catch {
+                    guard self.account.sessionGeneration == epoch, self.account.state.isSignedIn, let remaining else { throw error }
+                    return remaining
+                }
+            },
+            reorderLinks: { ids in
+                let links = try await self.operation(epoch: epoch) { own, _ in
+                    try await own.reorderOwnLinks(linkIDs: ids.map(Self.identifier)).map(Self.present)
+                }
+                self.links = links
+                return links
+            },
+            refreshPreview: { draft in try await self.operation(epoch: epoch) { _, github in
+                guard let id = draft.existingLinkID else { throw BackendError.invalidInput(fields: ["link_id"]) }
+                let result = try await github.refreshPreview(linkID: Self.identifier(id))
+                guard result.linkID == (try Self.identifier(id)) else { throw BackendError.invalidResponse }
+                return try Self.present(result.preview)
+            } })
+    }
+
+    func disconnectGitHub() async throws {
+        let epoch = account.sessionGeneration
+        connectionError = nil
+        do {
+            let value = try await operation(epoch: epoch) { own, _ in Self.present(try await own.disconnectGitHub()) }
+            connection = value
+            await refreshProfile(epoch: epoch, fallbackCount: 0)
+            _ = try await loadLinks(epoch: epoch)
+        } catch {
+            if account.sessionGeneration == epoch, account.hasCurrentSessionContext, case .signedIn = account.state {
+                connectionError = Self.presentationError(error)
+            }
+            throw error
+        }
+    }
+
+    private func loadLinks(epoch: UUID) async throws -> [OwnLinkState] {
+        let result = try await operation(epoch: epoch) { own, _ in try await own.listOwnLinks().map(Self.present) }
+        links = result
+        return result
+    }
+
+    private func requireSession(epoch: UUID) throws {
+        guard account.hasCurrentSessionContext, !account.sessionCleanupPending, !account.sessionChangeInProgress,
+              account.sessionGeneration == epoch, case .signedIn = account.state else { throw BackendError.notAuthenticated }
+        guard account.canRefreshSession() else { throw BackendError.storageFailure }
+    }
+
+    private func operation<Value>(epoch: UUID, rejectDeadSession: Bool = true,
+        _ action: @MainActor (OwnLinkService, GitHubLinksService) async throws -> Value) async throws -> Value {
+        do {
+            try requireSession(epoch: epoch)
+            guard let own, let github else { throw BackendError.notAuthenticated }
+            let fence = account.backendCallFence()
+            let value = try await fence.call { try await action(own, github) }
+            try requireSession(epoch: epoch)
+            return value
+        } catch is CancellationError { throw CancellationError() }
+        catch {
+            let failure = Self.presentationError(error)
+            if rejectDeadSession, error as? BackendError == .notAuthenticated { await account.rejectDeadSession(generation: epoch) }
+            throw failure
+        }
+    }
+
+    private func connect(epoch: UUID) async throws -> GitHubConnectionState {
+        do { try requireSession(epoch: epoch) }
+        catch { throw Self.presentationError(error) }
+        guard pending == nil else { throw LinkActionError(code: .unavailable, details: ["pending"]) }
+        let id = UUID()
+        pending = id; connection = .connecting; connectionError = nil
+        // Capture the manager: cancelling an obsolete attempt must never touch its replacement.
+        let sessions = account.sessions
+        let fence = account.backendCallFence()
+        defer { if pending == id { pending = nil } }
+        do {
+            try requireSession(epoch: epoch)
+            guard let sessions else { throw BackendError.notAuthenticated }
+            let address = try await fence.call { try await sessions.beginGitHubLink() }
+            try requireSession(epoch: epoch)
+            let callback = try await fence.call { try await runner.authenticate(at: address, callbackScheme: "engineer-encounters") }
+            try requireSession(epoch: epoch)
+            _ = try await fence.call { try await sessions.completeGitHubLink(from: callback) }
+            try requireSession(epoch: epoch)
+            _ = try await operation(epoch: epoch, rejectDeadSession: false) { _, github in try await github.syncIdentity() }
+            let value = try await operation(epoch: epoch, rejectDeadSession: false) { own, _ in Self.present(try await own.getGitHubConnection()) }
+            connection = value
+            return value
+        } catch {
+            await sessions?.cancelGitHubLink()
+            let current = fence.isCurrent() && pending == id
+            if error is CancellationError, current {
+                connection = .notConnected
+                return .notConnected
+            }
+            let failure = Self.presentationError(current ? error : BackendError.notAuthenticated)
+            if current { connection = .failed; connectionError = failure }
+            // Connection failures, including foreign-account exchanges, retain the initiating session.
+            throw failure
+        }
+    }
+
+    private func refreshProfile(epoch: UUID, fallbackCount: Int?) async {
+        guard account.sessionGeneration == epoch else { return }
+        var accepted = account.profile
+        if let fallbackCount { accepted?.linkCount = fallbackCount; accepted?.prerequisites.link = fallbackCount > 0 }
+        do { _ = try await account.loadOwnProfile() }
+        catch {
+            if account.sessionGeneration == epoch, account.state.isSignedIn, let accepted {
+                account.publishProfile(accepted, stale: true)
+            }
+        }
+    }
+
+    static func presentationError(_ error: any Error) -> LinkActionError {
+        if let error = error as? LinkActionError { return error }
+        switch error as? BackendError {
+        case .invalidInput(let details):
+            let names = ["main_language": LinkField.mainLanguage, "opening_text": .openingText, "source_label": .sourceLabel]
+            return .init(code: .invalidInput, fields: details.compactMap { names[$0] ?? LinkField(rawValue: $0) }, details: details)
+        case .prerequisiteMissing(let details): return .init(code: .prerequisiteMissing, details: details)
+        case .rateLimited: return .init(code: .unavailable, details: ["rate_limited"])
+        case .notFound: return .init(code: .unavailable, details: ["not_found"])
+        case .notAuthenticated: return .init(code: .unavailable, details: ["not_authenticated"])
+        case .storageFailure: return .init(code: .unavailable, details: ["storage_failure"])
+        default: return .init(code: .unavailable, details: ["transport_failure"])
+        }
+    }
+
+    private static func identifier(_ id: String) throws -> UUID {
+        guard let id = UUID(uuidString: id) else { throw BackendError.invalidInput(fields: ["link_id"]) }
+        return id
+    }
+    private static func wire(_ level: EncounterUI.VisibilityLevel) -> EncounterBackend.VisibilityLevel {
+        EncounterBackend.VisibilityLevel(rawValue: level.rawValue)!
+    }
+    private static func address(_ value: String) throws -> URL {
+        guard let url = URL(string: value), url.scheme == "https", url.host == "github.com",
+              url.user == nil, url.password == nil else { throw BackendError.invalidResponse }
+        return url
+    }
+    static func present(_ value: GitHubConnectionTransfer) -> GitHubConnectionState {
+        value.connected ? .connected(handle: value.handle) : .notConnected
+    }
+    static func present(_ value: LinkTransfer) throws -> OwnLinkState {
+        let url = try address(value.url)
+        return OwnLinkState(id: value.linkID.uuidString.lowercased(), source: .github, sourceLabel: "GitHub",
+            title: value.title, description: value.description, mainLanguage: value.mainLanguage, tags: value.tags,
+            openingText: value.openingText, url: url, visibility: EncounterUI.VisibilityLevel(rawValue: value.visibility.rawValue),
+            verified: value.verificationState == .verified, displayOrder: value.displayOrder, sourceItemID: value.sourceItemID,
+            repositoryName: url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")))
+    }
+    static func present(_ value: RepositoryTransfer) throws -> GitHubRepositoryChoice {
+        GitHubRepositoryChoice(repositoryID: value.repositoryID, repositoryName: value.repositoryName, title: value.title,
+            description: value.description, mainLanguage: value.mainLanguage, tags: value.tags, url: try address(value.url))
+    }
+    static func present(_ value: RepositoryPreviewTransfer) throws -> LinkPreviewDraft {
+        LinkPreviewDraft(repositoryID: value.repositoryID, repositoryName: value.repositoryName, source: .github,
+            url: try address(value.url), verified: value.verificationState == .verified, sourceLabel: "GitHub", title: value.title,
+            description: value.description, mainLanguage: value.mainLanguage, tags: value.tags, openingText: value.openingText)
+    }
+}

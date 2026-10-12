@@ -4,3 +4,10 @@
 "continueSetup" = "Continue setup";
 "restoring" = "Restoring your account…";
 "savedStale" = "Saved. The displayed profile may be out of date. Refresh to read it again.";
+
+"links" = "My links";
+"disconnectGitHub" = "Disconnect GitHub";
+"disconnectLastLink" = "Turn discovery off before removing your last link.";
+"disconnectError" = "Could not disconnect GitHub. Try again.";
+"discoverySettings" = "Discovery settings";
+"disconnectConfirmation" = "Your GitHub links will be removed from the app. The originals and copied URLs are not removed.";

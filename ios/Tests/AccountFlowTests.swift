@@ -28,7 +28,7 @@ final class AccountFlowTests: XCTestCase {
         basics.displayName = ""
         var selections = appPresentationProfile()
         selections.interestIDs = []
-        let cases: [(OwnProfileState, OnboardingStep)] = [(basics, .basics), (selections, .interests), (appPresentationProfile(), .permissions)]
+        let cases: [(OwnProfileState, OnboardingStep)] = [(basics, .basics), (selections, .interests), (appPresentationProfile(), .firstLink), (appLinkedPresentationProfile(), .permissions)]
         for (profile, step) in cases {
             var builds = 0
             let composition = appFlowComposition(transport: AppBackendTransport([appAccountOK(), appOwnProfileResponse(profile)]),
@@ -63,7 +63,7 @@ final class AccountFlowTests: XCTestCase {
 
     func testFinishedOnboardingSurvivesRelaunchForOnlyThatAccount() async throws {
         let defaults = appBackendDefaults()
-        let composition = appFlowComposition(transport: AppBackendTransport([appAccountOK(), appOwnProfileResponse()]),
+        let composition = appFlowComposition(transport: AppBackendTransport([appAccountOK(), appOwnProfileResponse(appLinkedPresentationProfile())]),
             session: try appBackendTestSession())
         let flow = AccountFlowModel(composition: composition, defaults: defaults)
         await flow.start()
@@ -75,7 +75,7 @@ final class AccountFlowTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(flow.settings).showsDiscoveryExplanation)
         XCTAssertFalse(try XCTUnwrap(flow.settings).allowsDiscoveryActivation)
         XCTAssertNil(flow.onboarding)
-        let sameAccount = appFlowComposition(transport: AppBackendTransport([appAccountOK(), appOwnProfileResponse()]),
+        let sameAccount = appFlowComposition(transport: AppBackendTransport([appAccountOK(), appOwnProfileResponse(appLinkedPresentationProfile())]),
             session: try appBackendTestSession())
         let relaunched = AccountFlowModel(composition: sameAccount, defaults: defaults)
         await relaunched.start()
@@ -85,14 +85,14 @@ final class AccountFlowTests: XCTestCase {
         XCTAssertEqual(flow.root, .welcome)
         XCTAssertNil(flow.settings)
         XCTAssertFalse(flow.completion.contains(appBackendTestUser))
-        let afterSignOut = appFlowComposition(transport: AppBackendTransport([appAccountOK(), appOwnProfileResponse()]),
+        let afterSignOut = appFlowComposition(transport: AppBackendTransport([appAccountOK(), appOwnProfileResponse(appLinkedPresentationProfile())]),
             session: try appBackendTestSession())
         let restarted = AccountFlowModel(composition: afterSignOut, defaults: defaults)
         await restarted.start()
         XCTAssertEqual(restarted.root, .onboarding)
 
         let otherID = UUID(uuidString: "00000000-0000-0000-0000-000000000222")!
-        let otherAccount = appFlowComposition(transport: AppBackendTransport([appAccountOK(), appOwnProfileResponse()]),
+        let otherAccount = appFlowComposition(transport: AppBackendTransport([appAccountOK(), appOwnProfileResponse(appLinkedPresentationProfile())]),
             session: try appBackendTestSession(userID: otherID))
         let other = AccountFlowModel(composition: otherAccount, defaults: defaults)
         await other.start()
@@ -358,7 +358,7 @@ final class AccountFlowTests: XCTestCase {
         let defaults = appBackendDefaults()
         let transport = ControlledAppBackendTransport([
             "register_time_zone": [.response(appAccountOK()), .response(appAccountOK())],
-            "get_own_profile": [.response(appOwnProfileResponse()), .response(appOwnProfileResponse(otherProfile))],
+            "get_own_profile": [.response(appOwnProfileResponse(appLinkedPresentationProfile())), .response(appOwnProfileResponse(otherProfile))],
             "signin": [.response(appBackendAuthResponse(userID: otherID))],
             "accept_declarations": [.response(appAccountOK())]
         ])

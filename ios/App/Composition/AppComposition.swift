@@ -11,6 +11,8 @@ final class AppComposition: ObservableObject {
     static let shared = AppComposition()
     private let participation: ParticipationFlag
     let account: AccountModel
+    let linkAdapter: LinkAdapter
+    private let linkServicesFactory: (@MainActor (SessionManager) -> (OwnLinkService, GitHubLinksService))?
     private var client: RemoteProcedureClient?
     private let clientFactory: (@MainActor (SessionManager) -> RemoteProcedureClient)?
     private var serverTokenStore: any TokenBatchStore
@@ -69,6 +71,7 @@ final class AppComposition: ObservableObject {
          clock: any EncounterClock = SystemEncounterClock(),
          uploadScheduler: (any ReceiptUploadScheduler)? = nil,
          now: @escaping @Sendable () -> Date = { Date() },
+         webAuthenticationRunner: (any GitHubWebAuthenticationRunning)? = nil,
          timeZone: @escaping @MainActor () -> String = { TimeZone.current.identifier }) {
         participation = ParticipationFlag(defaults: defaults)
         self.keychain = keychain
@@ -107,6 +110,10 @@ final class AppComposition: ObservableObject {
             let makeClient: @MainActor (SessionManager) -> RemoteProcedureClient = {
                 RemoteProcedureClient(configuration: configuration, transport: transport, sessions: $0)
             }
+            linkServicesFactory = { sessions in
+                (OwnLinkService(client: makeClient(sessions)),
+                 GitHubLinksService(client: EdgeFunctionClient(configuration: configuration, transport: transport, sessions: sessions)))
+            }
             let sessions = factory(store)
             clientFactory = makeClient
             client = makeClient(sessions)
@@ -116,11 +123,13 @@ final class AppComposition: ObservableObject {
                 sessionIsCurrent: { binding.isCurrent },
                 defaults: defaults, timeZone: timeZone)
         } else {
+            linkServicesFactory = nil
             boundSessionStore = nil
             clientFactory = nil
             client = nil
             account = AccountModel(sessions: nil, service: nil, defaults: defaults, timeZone: timeZone)
         }
+        linkAdapter = LinkAdapter(account: account, runner: webAuthenticationRunner ?? SystemGitHubWebAuthenticationRunner())
         #if DEVELOPMENT_BUILD || INTERNAL_BUILD
         trialLog = TrialLog()
         trialRecorder = TrialRecorder(log: trialLog)
@@ -140,9 +149,11 @@ final class AppComposition: ObservableObject {
             let issuer = self?.serverIssuer
             let store = self?.boundSessionStore
             let account = self?.account
+            let linkAdapter = self?.linkAdapter
             let storagePreparation = self?.storagePreparationTask
             runtime?.suspendForAccountChange()
             return Task {
+                await linkAdapter?.invalidate()
                 await issuer?.invalidate()
                 await runtime?.invalidateForAccountChange()
                 await account?.drainSessionChange()
@@ -249,6 +260,7 @@ final class AppComposition: ObservableObject {
     private func prepareForSessionChange() async throws {
         sessionChangeInProgress = true
         storageReady = false
+        await linkAdapter.invalidate()
         binding?.invalidatePreparation()
         try await serializeStoragePreparation { try await self.clearStorageForSessionChange() }
     }
@@ -294,7 +306,11 @@ final class AppComposition: ObservableObject {
         guard binding?.isCurrent != false else { return }
         let force = force || keychainUnavailable || (runtime != nil && (!storageReady || runtimeOwner != binding?.preparedOwner))
         sessionChangeInProgress = true
-        if let sessions = account.sessions { client = clientFactory?(sessions) }
+        if let sessions = account.sessions {
+            client = clientFactory?(sessions)
+            let services = linkServicesFactory?(sessions)
+            linkAdapter.configure(own: services?.0, github: services?.1)
+        }
         if force, let runtime {
             runtime.suspendForAccountChange()
             await serverIssuer?.invalidate()

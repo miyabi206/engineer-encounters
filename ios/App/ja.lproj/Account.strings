@@ -4,3 +4,10 @@
 "continueSetup" = "初期設定を続ける";
 "restoring" = "アカウントを復元しています…";
 "savedStale" = "保存しました。表示内容が古い場合があります。更新して再読み込みできます。";
+
+"links" = "自分のリンク";
+"disconnectGitHub" = "GitHubの連携を解除";
+"disconnectLastLink" = "最後のリンクを削除する前に発見をオフにしてください。";
+"disconnectError" = "GitHubの連携を解除できませんでした。もう一度お試しください。";
+"discoverySettings" = "発見の設定";
+"disconnectConfirmation" = "アプリ内のGitHubリンクを削除します。元のページやコピー済みのURLは削除されません。";

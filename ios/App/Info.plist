@@ -11,6 +11,13 @@
         <string>bluetooth-central</string>
         <string>bluetooth-peripheral</string>
     </array>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLSchemes</key>
+            <array><string>engineer-encounters</string></array>
+        </dict>
+    </array>
     <key>CFBundleDisplayName</key>
     <string>Engineer Encounters</string>
     <key>CFBundleExecutable</key>
