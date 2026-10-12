@@ -15,6 +15,7 @@ enum SettingsString: String, CaseIterable {
     case bluetoothOff, bluetoothUnavailable, bluetoothRecovery, allowBluetooth
     case promise, background, dailyReport, alternatives, forceQuit, firstUnlock, oneSided
     case partialSave, appliedChange, listItem, notSet
+    case dailyReportTitle, blockedUsers, account, legal, diagnostics
 }
 
 enum SettingsStrings {

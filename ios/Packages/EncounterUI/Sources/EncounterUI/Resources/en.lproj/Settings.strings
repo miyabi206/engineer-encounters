@@ -85,3 +85,8 @@
 "fieldMessage" = "%@: %@";
 "listItem" = "%@, %@";
 "notSet" = "Not set";
+"dailyReportTitle" = "Daily report";
+"blockedUsers" = "Blocked users";
+"account" = "Account";
+"legal" = "Legal and support";
+"diagnostics" = "Diagnostics";

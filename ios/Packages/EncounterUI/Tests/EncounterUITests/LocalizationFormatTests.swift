@@ -7,7 +7,17 @@ final class LocalizationFormatTests: XCTestCase {
         for tables in [
             (try OnboardingStrings.table(language: "ja"), try OnboardingStrings.table(language: "en")),
             (try SettingsStrings.table(language: "ja"), try SettingsStrings.table(language: "en")),
-            (try LinkStrings.table(language: "ja"), try LinkStrings.table(language: "en"))
+            (try LinkStrings.table(language: "ja"), try LinkStrings.table(language: "en")),
+            (try DiscoverStrings.table(language: "ja"), try DiscoverStrings.table(language: "en")),
+            (try SessionStrings.table(language: "ja"), try SessionStrings.table(language: "en")),
+            (try MyCardStrings.table(language: "ja"), try MyCardStrings.table(language: "en")),
+            (try ReportSettingsStrings.table(language: "ja"), try ReportSettingsStrings.table(language: "en")),
+            (try SafetyStrings.table(language: "ja"), try SafetyStrings.table(language: "en")),
+            (try AccountSettingsStrings.table(language: "ja"), try AccountSettingsStrings.table(language: "en")),
+            (try LegalStrings.table(language: "ja"), try LegalStrings.table(language: "en")),
+            (try MyCardStrings.table(language: "ja", name: "Localizable"),
+             try MyCardStrings.table(language: "en", name: "Localizable")),
+            (try interestTable(language: "ja"), try interestTable(language: "en"))
         ] {
             XCTAssertEqual(Set(tables.0.keys), Set(tables.1.keys))
             for key in tables.0.keys {
@@ -19,6 +29,13 @@ final class LocalizationFormatTests: XCTestCase {
             XCTAssertEqual(try specifiers(XCTUnwrap(WelcomeStrings.localized(key, language: "ja"))),
                            try specifiers(XCTUnwrap(WelcomeStrings.localized(key, language: "en"))), key)
         }
+    }
+
+    private func interestTable(language: String) throws -> [String: String] {
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "Interests", withExtension: "strings",
+                                                  subdirectory: nil, localization: language))
+        return try XCTUnwrap(PropertyListSerialization.propertyList(from: Data(contentsOf: url), format: nil)
+            as? [String: String])
     }
 
     func testLocalizedSeparatorsLimitsAndDeniedBluetoothWording() throws {

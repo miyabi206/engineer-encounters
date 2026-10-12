@@ -85,3 +85,8 @@
 "fieldMessage" = "%@：%@";
 "listItem" = "%@、%@";
 "notSet" = "未設定";
+"dailyReportTitle" = "毎日のレポート";
+"blockedUsers" = "ブロックした相手";
+"account" = "アカウント";
+"legal" = "法務・サポート";
+"diagnostics" = "診断";

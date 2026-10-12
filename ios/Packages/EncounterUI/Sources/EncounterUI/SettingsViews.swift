@@ -8,18 +8,30 @@ typealias SettingsViewState<Value> = State<Value>
 @MainActor
 public struct SettingsListView<AdditionalRows: View>: View {
     private let navigation: SettingsNavigationActions
+    private let destinations: AccountSettingsListNavigationActions
     private let additionalRows: AdditionalRows
 
-    public init(navigation: SettingsNavigationActions, @ViewBuilder additionalRows: () -> AdditionalRows) {
+    public init(navigation: SettingsNavigationActions, destinations: AccountSettingsListNavigationActions = .init(),
+                @ViewBuilder additionalRows: () -> AdditionalRows) {
         self.navigation = navigation
+        self.destinations = destinations
         self.additionalRows = additionalRows()
     }
 
     public var body: some View {
         List {
-            row(.editProfile, action: navigation.editProfile)
-            row(.discoveryMatching, action: navigation.discovery)
-            row(.visibility, action: navigation.visibility)
+            ForEach(AccountSettingsListComposition.entries(hasDiagnostics: destinations.diagnostics != nil), id: \.self) { entry in
+                switch entry {
+                case .discovery: row(.discoveryMatching, action: navigation.discovery)
+                case .visibility: row(.visibility, action: navigation.visibility)
+                case .dailyReport: row(.dailyReportTitle, action: destinations.dailyReport)
+                case .blockedUsers: row(.blockedUsers, action: destinations.blockedUsers)
+                case .account: row(.account, action: destinations.account)
+                case .legal: row(.legal, action: destinations.legal)
+                case .diagnostics:
+                    if let diagnostics = destinations.diagnostics { row(.diagnostics, action: diagnostics) }
+                }
+            }
             additionalRows
         }
         .listStyle(.plain)
@@ -42,8 +54,8 @@ public struct SettingsListView<AdditionalRows: View>: View {
 }
 
 extension SettingsListView where AdditionalRows == EmptyView {
-    public init(navigation: SettingsNavigationActions) {
-        self.init(navigation: navigation) { EmptyView() }
+    public init(navigation: SettingsNavigationActions, destinations: AccountSettingsListNavigationActions = .init()) {
+        self.init(navigation: navigation, destinations: destinations) { EmptyView() }
     }
 }
 
