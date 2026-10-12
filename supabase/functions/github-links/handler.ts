@@ -8,6 +8,9 @@ type Dependencies = {
   now: () => number;
 };
 const MIB = 1024 * 1024;
+const TEXT_SCAN_LIMIT = 16 * 1024;
+// PostgreSQL UTF-8 text cannot contain NUL or unpaired UTF-16 surrogates.
+const INVALID_TEXT = /[\u0000\ud800-\udfff]/u;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const HANDLE = /^[A-Za-z0-9-]{1,39}$/;
 const NAME = /^[A-Za-z0-9._-]{1,100}$/;
@@ -50,10 +53,12 @@ function repositoryName(value: unknown): value is string {
 }
 // Match private.trim_input, including its visually-empty-only normalization.
 function trim(value: string): string {
-  const result = value.replace(
-    /^[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g,
-    "",
-  );
+  const whitespace = /[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/;
+  let start = 0;
+  let end = value.length;
+  while (start < end && whitespace.test(value[start])) start++;
+  while (end > start && whitespace.test(value[end - 1])) end--;
+  const result = value.slice(start, end);
   return /^[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200d\u2028\u2029\u202f\u205f\u3000\u2060\ufeff\u3164\u115f\u1160\uffa0]*$/.test(result)
     ? "" : result;
 }
@@ -81,7 +86,7 @@ function validate(value: unknown): ObjectValue {
       case "title":
       case "description":
       case "opening_text": {
-        valid = typeof v === "string";
+        valid = typeof v === "string" && !INVALID_TEXT.test(v);
         if (valid) {
           const text = trim(v as string);
           valid = length(text) <= (field === "title" ? 100 : 200) &&
@@ -91,8 +96,8 @@ function validate(value: unknown): ObjectValue {
         break;
       }
       case "main_language": {
-        valid = v === null || typeof v === "string";
-        if (typeof v === "string") {
+        valid = v === null || typeof v === "string" && !INVALID_TEXT.test(v);
+        if (valid && typeof v === "string") {
           const text = trim(v);
           valid = length(text) <= 30;
           body[field] = text || null;
@@ -101,7 +106,7 @@ function validate(value: unknown): ObjectValue {
       }
       case "tags": {
         valid = Array.isArray(v) && v.length <= 10 &&
-          v.every((tag) => typeof tag === "string" && trim(tag) !== "" && length(trim(tag)) <= 30);
+          v.every((tag) => typeof tag === "string" && !INVALID_TEXT.test(tag) && trim(tag) !== "" && length(trim(tag)) <= 30);
         if (valid) body[field] = [...new Set((v as string[]).map(trim))];
         break;
       }
@@ -214,7 +219,8 @@ function htmlText(value: string): string {
       else if (value[i] === '"' || value[i] === "'") quote = value[i];
       else if (value[i] === ">") return i;
     }
-    return value.length;
+    // Fail closed if an attribute quote swallowed the remaining markup.
+    return quote ? -1 : value.length;
   }
   for (let i = 0; i < value.length;) {
     const start = value.indexOf("<", i);
@@ -227,6 +233,7 @@ function htmlText(value: string): string {
       continue;
     }
     const end = tagEnd(start);
+    if (end < 0) break;
     if (end === value.length) { result.push(value.slice(start)); break; }
     const contents = value.slice(start + 1, end);
     const name = contents.match(/^([a-z][a-z0-9:-]*)\b/i)?.[1].toLowerCase();
@@ -236,7 +243,8 @@ function htmlText(value: string): string {
       while (position >= 0 && !/[\s/>]/.test(value[position + close.length] ?? "")) {
         position = lower.indexOf(close, position + close.length);
       }
-      i = position < 0 ? value.length : Math.min(tagEnd(position) + 1, value.length);
+      const closingEnd = position < 0 ? -1 : tagEnd(position);
+      i = closingEnd < 0 ? value.length : Math.min(closingEnd + 1, value.length);
       result.push(" ");
     } else {
       if (/^https?:\/\/[^\s<>]+$/i.test(contents)) result.push(contents);
@@ -303,11 +311,35 @@ function markdownFormatting(value: string): string {
   return result.join("");
 }
 
+// Remove optional closing ATX hashes with disjoint forward/backward scans.
+// Overlapping whitespace groups in a regex can backtrack cubically.
+function closedHeadings(value: string): string {
+  return value.split("\n").map((line) => {
+    let start = 0;
+    while (start < 3 && /[ \t]/.test(line[start] ?? "")) start++;
+    const hashes = start;
+    while (line[start] === "#") start++;
+    if (start === hashes || start - hashes > 6 || !/[ \t]/.test(line[start] ?? "")) return line;
+    while (/[ \t]/.test(line[start] ?? "")) start++;
+    let end = line.length;
+    while (end > start && /[ \t\r]/.test(line[end - 1])) end--;
+    const closing = end;
+    while (end > start && line[end - 1] === "#") end--;
+    if (end === closing || end <= start || !/[ \t]/.test(line[end - 1])) return line;
+    while (end > start && /[ \t]/.test(line[end - 1])) end--;
+    return line.slice(start, end);
+  }).join("\n");
+}
+
 function plain(value: string, cap: number): string {
-  let text = markdownFormatting(markdownLinks(htmlText(value))
+  // Bound work before scanning markup, including giant whitespace-only inputs.
+  value = value.slice(0, TEXT_SCAN_LIMIT).replace(/[\u0000\ud800-\udfff]/gu, "")
+    // Keep multiline anchors and negated newline classes on the same boundaries.
+    .replace(/\r\n?|[\u2028\u2029]/g, "\n");
+  let text = closedHeadings(markdownLinks(htmlText(value))
     .replace(/^[ \t]*\[[^\]\n]+\]:[^\n]*$/gm, "")
-    .replace(/^[ \t]*(`{3,}|~{3,})[^\n]*$/gm, "")
-    .replace(/^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t]+#+[ \t]*$/gm, "$1")
+    .replace(/^[ \t]*(`{3,}|~{3,})[^\n]*$/gm, ""));
+  text = markdownFormatting(text
     .replace(/^[ \t]{0,3}(?:#{1,6}[ \t]+|>[ \t]*|[-+*][ \t]+|\d+[.)][ \t]+)/gm, "")
     .replace(/^[ \t]{0,3}=+[ \t]*$/gm, "")
     .replace(/^[ \t]*(?:[-*_][ \t]*){3,}$/gm, ""));
@@ -315,6 +347,7 @@ function plain(value: string, cap: number): string {
     if (!entity.startsWith("#")) return Object.hasOwn(HTML_ENTITIES, entity) ? HTML_ENTITIES[entity] : whole;
     const cp = entity[1].toLowerCase() === "x"
       ? parseInt(entity.slice(2), 16) : parseInt(entity.slice(1), 10);
+    if (cp === 0) return "";
     return cp > 0 && cp <= 0x10ffff && !(cp >= 0xd800 && cp <= 0xdfff)
       ? String.fromCodePoint(cp) : "�";
   });
@@ -585,7 +618,8 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
             const match = part.match(/^\s*<([^>]+)>\s*;\s*rel="([^"]+)"/);
             if (!match || !match[2].split(/\s+/).includes("next")) continue;
             const linked = apiURL(match[1]);
-            if (linked.pathname !== path || !/^[1-9][0-9]*$/.test(linked.searchParams.get("page") ?? "") ||
+            if ((linked.pathname !== path && linked.pathname !== `/user/${providerID}/repos`) ||
+              !/^[1-9][0-9]*$/.test(linked.searchParams.get("page") ?? "") ||
               Number(linked.searchParams.get("page")) !== page + 1) throw readerFailure();
             next = page + 1;
           }
