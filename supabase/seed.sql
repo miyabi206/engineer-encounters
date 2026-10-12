@@ -9,3 +9,7 @@ values
     -- Placeholder: replace with the owner's curated value.
     ('placeholder-data', 'データ（仮・オーナー差し替え）', 'Data (placeholder; owner to replace)', 30)
 on conflict (interest_id) do nothing;
+
+-- This seed is for local development. Migrations leave hosted deployments
+-- production with demo reveal off until the owner explicitly configures them.
+update private.server_settings set environment = 'local', demo_reveal_enabled = true where singleton;
