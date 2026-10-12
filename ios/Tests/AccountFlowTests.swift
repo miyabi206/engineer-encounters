@@ -418,15 +418,15 @@ final class AccountFlowTests: XCTestCase {
     }
     #endif
 
-    func testCompletionUsesAnInstallationSaltAndNeverPersistsAnAccountIdentifier() {
+    func testCompletionUsesAnInstallationSaltAndNeverPersistsAnAccountIdentifier() throws {
         let defaults = appBackendDefaults()
         defaults.set(true, forKey: "encounter.onboarding.completed.\(appBackendTestUser.uuidString.lowercased())")
         let store = OnboardingCompletionStore(defaults: defaults)
         store.finish(appBackendTestUser)
-        let key = store.key(for: appBackendTestUser)
+        let key = try store.key(for: appBackendTestUser)
         XCTAssertFalse(key.contains(appBackendTestUser.uuidString.lowercased()))
         XCTAssertTrue(OnboardingCompletionStore(defaults: defaults).contains(appBackendTestUser))
-        XCTAssertNotEqual(OnboardingCompletionStore(defaults: appBackendDefaults()).key(for: appBackendTestUser), key)
+        XCTAssertNotEqual(try OnboardingCompletionStore(defaults: appBackendDefaults()).key(for: appBackendTestUser), key)
         for (name, value) in defaults.dictionaryRepresentation() {
             XCTAssertFalse(name.lowercased().contains(appBackendTestUser.uuidString.lowercased()))
             XCTAssertFalse(String(describing: value).lowercased().contains(appBackendTestUser.uuidString.lowercased()))

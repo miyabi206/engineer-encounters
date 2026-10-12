@@ -61,6 +61,7 @@ final class RuntimeRecoveryTests: XCTestCase {
         let response = try JSONEncoder().encode([ReceiptStatusTransfer(id: receipt.id, status: .resolved)])
         await transport.release("submit_receipts", with: HTTPResponse(data: response, statusCode: 200))
         await uploading.value
+        XCTAssertEqual(oldRuntime.backendFailure, .notAuthenticated)
         try await signingOut.value
         let pending = try await queue.pending()
         XCTAssertEqual(pending, [receipt])
@@ -140,11 +141,56 @@ final class RuntimeRecoveryTests: XCTestCase {
         let batch = try JSONEncoder().encode(TokenBatchTransfer(batchID: appBackendTestUser, batch: appBackendLongBatch()))
         await transport.release("issue_token_batch", with: HTTPResponse(data: batch, statusCode: 200))
         await replenishing.value
+        XCTAssertEqual(runtime.backendFailure, .notAuthenticated)
         await stopping.value
         try await signingOut.value
         let retained = try await tokens.load()
         XCTAssertNil(retained)
         XCTAssertEqual(composition.account.state, .signedOut)
+    }
+
+    func testBackendPreflightDefersUploadsAndTokensUntilTheScheduledRetryIsReady() async throws {
+        let receipt = appBackendFinalReceipt()
+        let queue = InMemoryReceiptQueue()
+        try await queue.enqueue(receipt)
+        let batchResponse = try JSONEncoder().encode(TokenBatchTransfer(batchID: appBackendTestUser, batch: appBackendLongBatch()))
+        let acknowledgement = try JSONEncoder().encode([ReceiptStatusTransfer(id: receipt.id, status: .resolved)])
+        let transport = ControlledAppBackendTransport([
+            "issue_token_batch": [.response(HTTPResponse(data: batchResponse, statusCode: 200))],
+            "submit_receipts": [.response(HTTPResponse(data: acknowledgement, statusCode: 200))]
+        ])
+        let configuration = appBackendTestConfiguration()
+        let sessions = SessionManager(configuration: configuration, transport: transport,
+            store: InMemorySessionStore(session: try appBackendTestSession()), now: { appBackendTestNow })
+        let client = RemoteProcedureClient(configuration: configuration, transport: transport, sessions: sessions)
+        let tokens = InMemoryTokenBatchStore()
+        let clock = ManualEncounterClock()
+        let scheduler = ManualReceiptUploadScheduler()
+        var ready = false
+        let runtime = EncounterRuntime(tokenIssuer: ServerTokenIssuer(client: client, store: tokens), sessionFlag: { false },
+            transportFactory: { await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock) },
+            queueOpener: { queue }, tokenStore: tokens, clock: clock,
+            uploadFactory: { ReceiptUploader(client: client, queue: $0) }, uploadScheduler: scheduler,
+            canCallBackend: { ready })
+        await runtime.start()
+        try await appBackendEventually { scheduler.jobs.filter { !$0.cancelled }.count >= 2 }
+        let before = await transport.recorded()
+        XCTAssertTrue(before.isEmpty)
+        let retained = try await queue.pending()
+        XCTAssertEqual(retained, [receipt])
+        let retries = scheduler.jobs.filter { !$0.cancelled }
+        ready = true
+        await clock.advance(by: 5)
+        for retry in retries { await retry.operation() }
+        try await appBackendEventually {
+            let pending = try await queue.pending()
+            return runtime.status.validTokenAvailable && pending.isEmpty
+        }
+        let uploads = await transport.count("submit_receipts")
+        let tokenCalls = await transport.count("issue_token_batch")
+        XCTAssertEqual(uploads, 1)
+        XCTAssertEqual(tokenCalls, 1)
+        await runtime.invalidateForAccountChange()
     }
 
     func testTokenRetriesGrowToBoundThenStopWhenSchedulerDeliversAToken() async throws {

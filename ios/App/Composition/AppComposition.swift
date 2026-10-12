@@ -31,12 +31,14 @@ final class AppComposition: ObservableObject {
     private let uploadScheduler: any ReceiptUploadScheduler
     private var restorationTask: Task<Void, Never>?
     private var sessionChangeInProgress = false
+    private var storagePreparationTask: Task<Void, any Error>?
     static let serverTokenService = "EngineerEncounters.Backend.ServerTokens"
     static func serverTokenService(owner: BackendStorageOwner) -> String {
         serverTokenService + "." + owner.namespace
     }
     @Published private(set) var runtime: EncounterRuntime?
     @Published private(set) var isParticipating = false
+    private var runtimeOwner: BackendStorageOwner?
     private var runtimeStatusSubscription: AnyCancellable?
     #if DEVELOPMENT_BUILD || INTERNAL_BUILD
     let trialLog: TrialLog
@@ -127,18 +129,25 @@ final class AppComposition: ObservableObject {
         isParticipating = participation.isEnabled
         account.prepareForSessionChange = { [weak self] in try await self?.prepareForSessionChange() }
         account.sessionDidChange = { [weak self] force in await self?.recreateRuntime(force: force) }
-        account.canRefreshSession = { [weak self] in self?.keychainUnavailable == false }
+        account.canRefreshSession = { [weak self] in
+            guard let self, self.storageReady, !self.keychainUnavailable else { return false }
+            guard let binding = self.binding else { return true }
+            return self.account.state.isSignedIn ? binding.allowsAuthenticatedNetwork : binding.allowsNetwork
+        }
+        account.bindingGeneration = { binding?.generation }
         binding?.onReplacement = { [weak self] in
             let runtime = self?.runtime
             let issuer = self?.serverIssuer
             let store = self?.boundSessionStore
             let account = self?.account
+            let storagePreparation = self?.storagePreparationTask
             runtime?.suspendForAccountChange()
             return Task {
                 await issuer?.invalidate()
                 await runtime?.invalidateForAccountChange()
                 await account?.drainSessionChange()
                 await store?.drain()
+                _ = await storagePreparation?.result
             }
         }
         // App.init constructs this even for a Bluetooth background relaunch.
@@ -152,7 +161,7 @@ final class AppComposition: ObservableObject {
 
     var status: EncounterRuntimeStatus {
         var status = runtime?.status ?? EncounterRuntimeStatus()
-        status.storageUnavailable = status.storageUnavailable || keychainUnavailable
+        status.storageUnavailable = status.storageUnavailable || keychainUnavailable || (binding != nil && (!storageReady || binding?.preparedOwner == nil))
         return status
     }
 
@@ -183,13 +192,18 @@ final class AppComposition: ObservableObject {
 
     func refresh() async {
         await waitForRestoration()
-        if keychainUnavailable {
-            if account.state == .signedInPending(nil) { await account.restore() }
-            else { await recreateRuntime(force: true) }
+        guard !sessionChangeInProgress, !account.sessionChangeInProgress else { return }
+        if account.state == .signedOut, account.sessionCleanupPending {
+            await account.refresh()
+            return
         }
+        if account.state == .signedInPending(nil) || (binding != nil && binding?.preparedOwner == nil && account.state.isSignedIn) {
+            storageReady = false
+            await account.restore()
+        } else if !storageReady || keychainUnavailable { await recreateRuntime(force: true) }
+        guard !sessionChangeInProgress, !account.sessionChangeInProgress else { return }
         await account.refresh()
-        guard !sessionChangeInProgress else { return }
-        if !storageReady { await recreateRuntime(force: true) }
+        guard !sessionChangeInProgress, !account.sessionChangeInProgress else { return }
         await runtime?.refresh()
         #if DEVELOPMENT_BUILD || INTERNAL_BUILD
         trialLog.prune()
@@ -217,7 +231,7 @@ final class AppComposition: ObservableObject {
     func retryDiagnostics() async {
         await waitForRestoration()
         guard !sessionChangeInProgress else { return }
-        if keychainUnavailable { await refresh(); return }
+        if keychainUnavailable || !storageReady { await refresh(); return }
         if trialLog.state == .failed { trialLog.retry() }
         if isParticipating {
             trialRecorder.beginIfNeeded(metadata: trialMetadata, reason: .launch)
@@ -233,6 +247,13 @@ final class AppComposition: ObservableObject {
     }
 
     private func prepareForSessionChange() async throws {
+        sessionChangeInProgress = true
+        storageReady = false
+        binding?.invalidatePreparation()
+        try await serializeStoragePreparation { try await self.clearStorageForSessionChange() }
+    }
+
+    private func clearStorageForSessionChange() async throws {
         guard binding?.isCurrent != false else { throw BackendError.notAuthenticated }
         sessionChangeInProgress = true
         runtime?.suspendForAccountChange()
@@ -256,9 +277,23 @@ final class AppComposition: ObservableObject {
     }
 
     private func recreateRuntime(force: Bool) async {
+        try? await serializeStoragePreparation { await self.recreatePreparedRuntime(force: force) }
+    }
+
+    private func serializeStoragePreparation(_ operation: @escaping @MainActor () async throws -> Void) async throws {
+        let previous = storagePreparationTask
+        let task = Task {
+            _ = await previous?.result
+            try await operation()
+        }
+        storagePreparationTask = task
+        try await task.value
+    }
+
+    private func recreatePreparedRuntime(force: Bool) async {
         guard binding?.isCurrent != false else { return }
-        let force = force || keychainUnavailable
-        sessionChangeInProgress = false
+        let force = force || keychainUnavailable || (runtime != nil && (!storageReady || runtimeOwner != binding?.preparedOwner))
+        sessionChangeInProgress = true
         if let sessions = account.sessions { client = clientFactory?(sessions) }
         if force, let runtime {
             runtime.suspendForAccountChange()
@@ -269,6 +304,8 @@ final class AppComposition: ObservableObject {
             serverIssuer = nil
         }
         storageReady = await prepareStorageBinding()
+        sessionChangeInProgress = false
+        guard binding?.isCurrent != false else { return }
         guard force || participation.isEnabled || account.state.isSignedIn else { return }
         let runtime = makeRuntime()
         if participation.isEnabled {
@@ -286,40 +323,53 @@ final class AppComposition: ObservableObject {
     private func prepareStorageBinding() async -> Bool {
         guard let binding else { return true }
         guard binding.isCurrent else { return false }
+        let epoch = account.sessionGeneration
+        let bindingEpoch = binding.generation
         do {
-            if !legacyStorageCleared {
-                // Earlier builds have no binding, even when their backend happens to match.
-                try await KeychainTokenBatchStore(service: Self.serverTokenService, client: keychain).clear()
-                try await KeychainTokenBatchStore(client: keychain).clear()
-            }
+            // A missing legacy item can be deleted successfully while the credential is still locked.
+            // Availability must come from reading the current session item, before any quarantine.
+            _ = try await keychain.read(service: KeychainSessionStore.service, account: "current")
             keychainUnavailable = false
         } catch {
             keychainUnavailable = true
             return false
         }
+        guard binding.isCurrent, epoch == account.sessionGeneration, bindingEpoch == binding.generation else { return false }
         let user: UUID?
         switch account.state {
         case .signedIn(let id), .signedInPending(.some(let id)): user = id
         case .signedInPending(nil): return false // Locked storage is retained, but cannot supply radio tokens.
         default: user = nil
         }
-        let owner = BackendStorageOwner(backend: binding.backend, account: user)
         do {
+            try binding.observeAccount(user)
+            let preparedGeneration = binding.generation
+            let owner = try binding.storageOwner(account: user)
             if !legacyStorageCleared {
+                try await KeychainTokenBatchStore(service: Self.serverTokenService, client: keychain).clear()
+                try await KeychainTokenBatchStore(client: keychain).clear()
                 if suppliedQueueOpener == nil {
                     let legacy = try await EncounterRuntime.openDefaultQueue()
                     try await legacy.removeAll()
                 }
                 legacyStorageCleared = true
             }
-            if binding.owner != owner {
-                if !storageWasCleared {
-                    try await serverTokenStore.clear()
-                    let queue = try await queueOpener()
-                    try await queue.removeAll()
-                }
-                try binding.bind(owner)
+            let previousOwner = binding.owner
+            if previousOwner != owner, !storageWasCleared {
+                // Preferences may have become readable since launch. Purge the recovered old owner,
+                // rather than the legacy opener selected while that owner was unknown.
+                let previousTokens: any TokenBatchStore = suppliedServerTokenStore ?? previousOwner.map {
+                    KeychainTokenBatchStore(service: Self.serverTokenService(owner: $0), client: keychain)
+                } ?? serverTokenStore
+                try await previousTokens.clear()
+                let queue: any ReceiptQueue
+                if suppliedQueueOpener == nil, let previousOwner {
+                    queue = try await EncounterRuntime.openBoundQueue(namespace: previousOwner.namespace)
+                } else { queue = try await queueOpener() }
+                try await queue.removeAll()
             }
+            guard binding.isCurrent, epoch == account.sessionGeneration, preparedGeneration == binding.generation else { return false }
+            try binding.bind(owner)
             serverTokenStore = suppliedServerTokenStore ?? KeychainTokenBatchStore(
                 service: Self.serverTokenService(owner: owner), client: keychain)
             queueOpener = suppliedQueueOpener ?? { try await EncounterRuntime.openBoundQueue(namespace: owner.namespace) }
@@ -339,7 +389,7 @@ final class AppComposition: ObservableObject {
             store = InMemoryTokenBatchStore()
             issuer = nil
         } else if account.state.isSignedIn, let client {
-            if storageReady, let binding, let owner = binding.owner {
+            if storageReady, let binding, let owner = binding.preparedOwner {
                 store = BoundTokenBatchStore(store: serverTokenStore, binding: binding, owner: owner)
             } else { store = InMemoryTokenBatchStore() }
             let server = ServerTokenIssuer(client: client, store: store)
@@ -358,15 +408,12 @@ final class AppComposition: ObservableObject {
             uploadFactory = { ReceiptUploader(client: client, queue: $0) }
         } else { uploadFactory = nil }
         let openQueue: @MainActor () async throws -> any ReceiptQueue
-        if keychainUnavailable {
-            // Failed quarantine cannot prepare a radio or expose a persisted receipt queue.
+        if keychainUnavailable || (binding != nil && !storageReady) {
+            // Unprepared storage cannot prepare a radio or accept nondurable evidence.
             openQueue = { throw BackendError.storageFailure }
-        } else if storageReady, let binding, let owner = binding.owner {
+        } else if storageReady, let binding, let owner = binding.preparedOwner {
             let opener = queueOpener
             openQueue = { BoundReceiptQueue(queue: try await opener(), binding: binding, owner: owner) }
-        } else if binding != nil {
-            let isolated = InMemoryReceiptQueue()
-            openQueue = { isolated }
         } else { openQueue = queueOpener }
         #if DEVELOPMENT_BUILD || INTERNAL_BUILD
         let approach = presenceApproach
@@ -375,12 +422,22 @@ final class AppComposition: ObservableObject {
         #endif
         let runtime = EncounterRuntime(tokenIssuer: issuer, sessionFlag: { false }, approach: approach,
             transportFactory: transportFactory, queueOpener: openQueue, tokenStore: store, clock: clock,
-            uploadFactory: uploadFactory, uploadScheduler: uploadScheduler)
+            uploadFactory: uploadFactory, uploadScheduler: uploadScheduler,
+            storageIsReady: { [weak self] in
+                guard let self, self.storageReady else { return false }
+                return self.binding == nil || (self.binding?.isCurrent == true && self.binding?.preparedOwner != nil)
+            },
+            canCallBackend: { [weak self] in
+                guard let self else { return false }
+                return self.account.state.isSignedIn ? self.account.canRefreshSession() : self.storageReady
+            },
+            backendFence: { [weak self] in self?.account.backendCallFence() ?? BackendCallFence { false } })
         #if DEVELOPMENT_BUILD || INTERNAL_BUILD
         let recorder = trialRecorder
         runtime.observeEvents { event in recorder.record(event) }
         #endif
         self.runtime = runtime
+        runtimeOwner = binding?.preparedOwner
         runtimeStatusSubscription = runtime.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }

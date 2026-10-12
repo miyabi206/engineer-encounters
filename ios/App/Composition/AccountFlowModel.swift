@@ -74,7 +74,7 @@ final class AccountFlowModel: ObservableObject {
 
     func refresh() async {
         guard started, composition.account.state.isSignedIn else { return }
-        await composition.account.refresh()
+        await composition.refresh()
         guard composition.account.state.isSignedIn else { return }
         receive(state: composition.account.state)
         if case .signedIn = composition.account.state {

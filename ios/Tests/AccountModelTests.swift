@@ -96,12 +96,13 @@ final class AccountModelTests: XCTestCase {
 
     func testSignedOutIssuerSelectionForThisBuildAndSignOutClearsOnlyServerStore() async throws {
         let keychain = AppMemoryKeychain()
-        let owner = BackendStorageOwner(backend: BackendStorageBinding.identity(appBackendTestConfiguration()), account: appBackendTestUser)
+        let defaults = appBackendDefaults()
+        let owner = BackendStorageOwner(backend: BackendStorageBinding.identity(appBackendTestConfiguration()), account: appBackendTestUser, salt: try InstallationStorageSalt.load(defaults: defaults))
         let service = AppComposition.serverTokenService(owner: owner)
         let server = KeychainTokenBatchStore(service: service, client: keychain)
         let queue = InMemoryReceiptQueue()
         let store = InMemorySessionStore(session: try appBackendTestSession())
-        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(),
+        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults,
             transport: AppBackendTransport([HTTPResponse(data: Data(), statusCode: 204)]), keychain: keychain,
             sessionStore: store, queueOpener: { queue }, now: { appBackendTestNow })
         await composition.waitForRestoration()

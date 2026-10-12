@@ -51,6 +51,13 @@ actor AppMemoryKeychain: KeychainClient {
     private(set) var reads = 0
     private var failSessionDeletion = false
     private var unavailable = false
+    private var deleteMissingWhileUnavailable = false
+    private let beforeSessionDeletion: (@Sendable () async -> Bool)?
+    private(set) var sessionDeletionMarkerChecks: [Bool] = []
+
+    init(beforeSessionDeletion: (@Sendable () async -> Bool)? = nil) {
+        self.beforeSessionDeletion = beforeSessionDeletion
+    }
     private(set) var deletionAttempts = 0
     private(set) var sessionDeletionAttempts = 0
     private(set) var sessionWrites = 0
@@ -67,15 +74,24 @@ actor AppMemoryKeychain: KeychainClient {
     }
     func delete(service: String, account: String) async throws {
         deletionAttempts += 1
-        if unavailable { throw TokenBatchStorageError.keychainStatus(errSecInteractionNotAllowed) }
         if service == KeychainSessionStore.service {
             sessionDeletionAttempts += 1
+            if let beforeSessionDeletion { sessionDeletionMarkerChecks.append(await beforeSessionDeletion()) }
+        }
+        if unavailable {
+            if deleteMissingWhileUnavailable, values[service + ":" + account] == nil { return }
+            throw TokenBatchStorageError.keychainStatus(errSecInteractionNotAllowed)
+        }
+        if service == KeychainSessionStore.service {
             if failSessionDeletion { throw BackendError.storageFailure }
         }
         values[service + ":" + account] = nil
     }
     func setSessionDeletionFailure(_ value: Bool) { failSessionDeletion = value }
-    func setUnavailable(_ value: Bool) { unavailable = value }
+    func setUnavailable(_ value: Bool, deleteMissingAsSuccess: Bool = false) {
+        unavailable = value
+        deleteMissingWhileUnavailable = deleteMissingAsSuccess
+    }
     func corruptSession() { values[KeychainSessionStore.service + ":current"] = Data("invalid".utf8) }
 }
 
@@ -117,7 +133,7 @@ func appBackendDefaults(userID: UUID? = appBackendTestUser, bound: Bool = true) 
     if bound {
         let backend = BackendStorageBinding.identity(appBackendTestConfiguration())
         defaults.set(backend, forKey: BackendStorageBinding.sessionBackendKey)
-        defaults.set(try! JSONEncoder().encode(BackendStorageOwner(backend: backend, account: userID)),
+        defaults.set(try! JSONEncoder().encode(BackendStorageOwner(backend: backend, account: userID, salt: try! InstallationStorageSalt.load(defaults: defaults))),
                      forKey: BackendStorageBinding.ownerKey)
     }
     return defaults
@@ -238,6 +254,7 @@ actor FailingAppTokenStore: TokenBatchStore {
 }
 
 actor FailingAppReceiptQueue: ReceiptQueue {
+    private(set) var clears = 0
     private let queue = InMemoryReceiptQueue()
     private var failClear = false
     private(set) var reads = 0
@@ -247,6 +264,7 @@ actor FailingAppReceiptQueue: ReceiptQueue {
     func acknowledge(_ id: UUID) async throws { try await queue.acknowledge(id) }
     func removeExpired(asOf time: Date) async throws { try await queue.removeExpired(asOf: time) }
     func removeAll() async throws {
+        clears += 1
         if failClear { throw BackendError.storageFailure }
         try await queue.removeAll()
     }

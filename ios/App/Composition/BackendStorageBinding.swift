@@ -6,18 +6,22 @@ import Foundation
 /// A durable, non-secret tombstone. Never put an account identifier in this marker.
 @MainActor
 final class SessionCleanupMarker {
-    static let key = "encounter.backend.sessionCleanupPending"
+    nonisolated static let key = "encounter.backend.sessionCleanupPending"
     private let defaults: UserDefaults
+    private var pending = false
 
     init(defaults: UserDefaults) { self.defaults = defaults }
-    var isPending: Bool { defaults.bool(forKey: Self.key) }
+    var isPending: Bool { pending || (defaults.synchronize() && defaults.bool(forKey: Self.key)) }
 
     func begin() throws {
+        guard defaults.synchronize() else { throw BackendError.storageFailure }
         defaults.set(true, forKey: Self.key)
         guard defaults.synchronize() else { throw BackendError.storageFailure }
+        pending = true
     }
 
     func complete() {
+        pending = false
         defaults.removeObject(forKey: Self.key)
         // A surviving marker is safe: launch simply retries the idempotent deletion.
         _ = defaults.synchronize()
@@ -28,9 +32,12 @@ struct BackendStorageOwner: Codable, Equatable, Sendable {
     let backend: String
     let accountDigest: String?
 
-    init(backend: String, account: UUID?) {
+    init(backend: String, account: UUID?, salt: Data) {
         self.backend = backend
-        accountDigest = account.map { Self.digest($0.uuidString.lowercased()) }
+        accountDigest = account.map { id in
+            HMAC<SHA256>.authenticationCode(for: Data(id.uuidString.lowercased().utf8),
+                using: SymmetricKey(data: salt)).map { String(format: "%02x", $0) }.joined()
+        }
     }
 
     var namespace: String { Self.digest(backend + "|" + (accountDigest ?? "signed-out")) }
@@ -47,15 +54,17 @@ final class BackendStorageBinding {
         weak var value: BackendStorageBinding?
         init(_ value: BackendStorageBinding) { self.value = value }
     }
-    private static var liveBindings: [String: WeakBinding] = [:]
+    private static var liveBindings: [ObjectIdentifier: WeakBinding] = [:]
     static let sessionBackendKey = "encounter.backend.sessionBackend"
     static let ownerKey = "encounter.backend.storageOwner"
-    private static let leaseKey = "encounter.backend.storageLease"
     let backend: String
     let cleanup: SessionCleanupMarker
     private let defaults: UserDefaults
-    private let lease = UUID().uuidString
-    private var accountDigest: String?
+    private let scope: ObjectIdentifier
+    private var account: UUID?
+    private var preparedAccount: UUID?
+    private(set) var generation = UUID()
+    private(set) var preparedOwner: BackendStorageOwner?
     let predecessorDrain: Task<Void, Never>?
     var onReplacement: (@MainActor () -> Task<Void, Never>)?
 
@@ -70,49 +79,61 @@ final class BackendStorageBinding {
         backend = Self.identity(configuration)
         self.defaults = defaults
         self.cleanup = cleanup
-        predecessorDrain = defaults.string(forKey: Self.leaseKey)
-            .flatMap { Self.liveBindings[$0]?.value?.onReplacement?() }
-        defaults.set(lease, forKey: Self.leaseKey)
+        scope = ObjectIdentifier(defaults)
+        predecessorDrain = Self.liveBindings[scope]?.value?.onReplacement?()
         Self.liveBindings = Self.liveBindings.filter { $0.value.value != nil }
-        Self.liveBindings[lease] = WeakBinding(self)
+        Self.liveBindings[scope] = WeakBinding(self)
     }
 
-    var isCurrent: Bool { defaults.string(forKey: Self.leaseKey) == lease }
-    var allowsNetwork: Bool { isCurrent && !cleanup.isPending }
+    // The process lease and prepared owner never depend on protected preferences.
+    var isCurrent: Bool { Self.liveBindings[scope]?.value === self }
+    var allowsNetwork: Bool { isCurrent && preparedOwner != nil && !cleanup.isPending }
     var allowsAuthenticatedNetwork: Bool {
-        allowsNetwork && accountDigest != nil && owner?.backend == backend && owner?.accountDigest == accountDigest
+        allowsNetwork && account != nil && preparedAccount == account
     }
-    var currentAccountDigest: String? { accountDigest }
-    var sessionMatches: Bool { defaults.string(forKey: Self.sessionBackendKey) == backend }
+    var currentAccountDigest: String? { preparedOwner?.accountDigest }
     var owner: BackendStorageOwner? {
-        defaults.data(forKey: Self.ownerKey).flatMap { try? JSONDecoder().decode(BackendStorageOwner.self, from: $0) }
+        guard defaults.synchronize() else { return nil }
+        return defaults.data(forKey: Self.ownerKey).flatMap {
+            try? JSONDecoder().decode(BackendStorageOwner.self, from: $0)
+        }
     }
 
-    func saveSessionBinding() throws {
-        guard allowsNetwork else { throw BackendError.notAuthenticated }
-        defaults.set(backend, forKey: Self.sessionBackendKey)
-        guard defaults.synchronize() else { throw BackendError.storageFailure }
+    func storageOwner(account: UUID?) throws -> BackendStorageOwner {
+        BackendStorageOwner(backend: backend, account: account, salt: try InstallationStorageSalt.load(defaults: defaults))
+    }
+
+    func invalidatePreparation() {
+        preparedOwner = nil
+        preparedAccount = nil
+        generation = UUID()
     }
 
     func clearedSession() {
-        accountDigest = nil
+        if account != nil { invalidatePreparation() }
+        account = nil
         defaults.removeObject(forKey: Self.sessionBackendKey)
         cleanup.complete()
     }
 
-    func observeAccount(_ id: UUID) throws {
-        guard allowsNetwork else { throw BackendError.notAuthenticated }
-        accountDigest = BackendStorageOwner(backend: backend, account: id).accountDigest
+    func observeAccount(_ id: UUID?) throws {
+        guard isCurrent else { throw BackendError.notAuthenticated }
+        if account != id { invalidatePreparation() }
+        account = id
     }
 
     func bind(_ owner: BackendStorageOwner) throws {
         guard isCurrent else { throw BackendError.notAuthenticated }
+        guard defaults.synchronize() else { throw BackendError.storageFailure }
+        guard owner == (try storageOwner(account: account)) else { throw BackendError.notAuthenticated }
         defaults.set(try JSONEncoder().encode(owner), forKey: Self.ownerKey)
         guard defaults.synchronize() else { throw BackendError.storageFailure }
+        preparedOwner = owner
+        preparedAccount = account
     }
 
     func allowsStorage(_ owner: BackendStorageOwner) -> Bool {
-        isCurrent && self.owner == owner
+        isCurrent && preparedOwner == owner
     }
 }
 
@@ -130,27 +151,18 @@ actor BoundSessionStore: SessionStore {
     func load() async throws -> BackendSession? {
         guard await binding.isCurrent else { throw BackendError.notAuthenticated }
         guard await !binding.cleanup.isPending else { throw BackendError.notAuthenticated }
-        guard await binding.sessionMatches else {
-            try await clear()
-            return nil
-        }
-        do {
-            let session = try await store.load()
-            if let session { try await binding.observeAccount(session.userID) }
-            return session
-        }
-        catch BackendError.notAuthenticated {
-            try await clear()
-            return nil
-        }
+        // Only the envelope beside the Keychain credential can establish a mismatch.
+        let session = try await store.load()
+        guard await binding.isCurrent else { throw BackendError.notAuthenticated }
+        if let session { try await binding.observeAccount(session.userID) }
+        return session
     }
 
     func save(_ session: BackendSession) async throws {
         try await write {
-            guard await self.binding.allowsNetwork else { throw BackendError.storageFailure }
+            guard await self.binding.isCurrent, await !self.binding.cleanup.isPending else { throw BackendError.storageFailure }
             try await self.binding.observeAccount(session.userID)
             try await self.store.save(session)
-            try await self.binding.saveSessionBinding()
         }
     }
 
@@ -180,12 +192,12 @@ struct BackendBoundTransport: HTTPTransport {
 
     func send(_ request: URLRequest) async throws -> HTTPResponse {
         guard await binding.allowsNetwork else { throw CancellationError() }
-        let account = await binding.currentAccountDigest
+        let generation = await binding.generation
         if request.url?.path.contains("/rest/v1/rpc/") == true {
             guard await binding.allowsAuthenticatedNetwork else { throw CancellationError() }
         }
         let response = try await transport.send(request)
-        guard await binding.isCurrent, await binding.currentAccountDigest == account else { throw CancellationError() }
+        guard await binding.isCurrent, await binding.generation == generation else { throw CancellationError() }
         return response
     }
 }

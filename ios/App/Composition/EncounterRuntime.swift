@@ -19,6 +19,7 @@ struct EncounterRuntimeStatus: Sendable, Equatable {
 @MainActor
 final class EncounterRuntime: ObservableObject {
     @Published private(set) var status = EncounterRuntimeStatus()
+    @Published private(set) var backendFailure: BackendError?
     private static var receiptQueueTask: Task<SwiftDataReceiptQueue, any Error>?
     private static var boundReceiptQueueTasks: [String: Task<SwiftDataReceiptQueue, any Error>] = [:]
     private var queue: (any ReceiptQueue)?
@@ -33,6 +34,9 @@ final class EncounterRuntime: ObservableObject {
     private let sessionFlag: @Sendable () async -> Bool
     private let uploadFactory: (@MainActor (any ReceiptQueue) -> ReceiptUploader)?
     private let uploadScheduler: any ReceiptUploadScheduler
+    private let storageIsReady: @MainActor () -> Bool
+    private let canCallBackend: @MainActor () -> Bool
+    private let backendFence: @MainActor () -> BackendCallFence
     private var uploader: ReceiptUploader?
     private var uploadQueue: AccountReceiptQueue?
     private(set) var uploadTask: Task<Void, Never>?
@@ -59,7 +63,10 @@ final class EncounterRuntime: ObservableObject {
          tokenStore: any TokenBatchStore,
          clock: any EncounterClock = SystemEncounterClock(),
          uploadFactory: (@MainActor (any ReceiptQueue) -> ReceiptUploader)? = nil,
-         uploadScheduler: (any ReceiptUploadScheduler)? = nil) {
+         uploadScheduler: (any ReceiptUploadScheduler)? = nil,
+         storageIsReady: @escaping @MainActor () -> Bool = { true },
+         canCallBackend: @escaping @MainActor () -> Bool = { true },
+         backendFence: @escaping @MainActor () -> BackendCallFence = { BackendCallFence { true } }) {
         presenceApproach = approach
         self.transportFactory = transportFactory
         self.queueOpener = queueOpener
@@ -69,6 +76,10 @@ final class EncounterRuntime: ObservableObject {
         self.sessionFlag = sessionFlag
         self.uploadFactory = uploadFactory
         self.uploadScheduler = uploadScheduler ?? ClockReceiptUploadScheduler(clock: clock)
+        self.storageIsReady = storageIsReady
+        self.canCallBackend = canCallBackend
+        self.backendFence = backendFence
+        status.storageUnavailable = !storageIsReady()
     }
 
     static func openDefaultQueue() async throws -> any ReceiptQueue {
@@ -294,6 +305,7 @@ final class EncounterRuntime: ObservableObject {
     }
 
     private func prepareQueue() async -> Bool {
+        guard storageIsReady() else { status.storageUnavailable = true; return false }
         if queue != nil { return true }
         do {
             queue = try await queueOpener()
@@ -337,7 +349,13 @@ final class EncounterRuntime: ObservableObject {
             let time = await self.clock.now()
             guard self.validForAccount, self.participationOn, generation == self.tokenGeneration else { return }
             // Only local lifecycle work is serialized. A held request cannot hold up stop/sign-out.
-            if !alreadyFailed { try? await tokenIssuer.replenish(at: time.wall) }
+            if !alreadyFailed, self.canCallBackend() {
+                let fence = self.callFence()
+                do { try await fence.call { try await tokenIssuer.replenish(at: time.wall) } }
+                catch { self.backendFailure = error as? BackendError }
+            } else if !self.canCallBackend() {
+                self.status.storageUnavailable = true
+            }
             guard self.validForAccount, self.participationOn, generation == self.tokenGeneration else { return }
             await self.serialize {
                 guard self.validForAccount, self.participationOn, generation == self.tokenGeneration else { return }
@@ -379,6 +397,11 @@ final class EncounterRuntime: ObservableObject {
 
     func receive(_ event: EncounterEngineEvent) {
         guard validForAccount else { return }
+        switch event {
+        case .exchangeCompleted, .evidenceReached:
+            guard storageIsReady() else { status.storageUnavailable = true; return }
+        default: break
+        }
         for observer in eventObservers.values { observer(event) }
         switch event {
         case .radioAvailability(let availability): status.radioAvailability = availability
@@ -438,8 +461,18 @@ final class EncounterRuntime: ObservableObject {
     }
 
     private func uploadReceipts(generation: UUID) async {
-        guard validForAccount, let uploadFactory, await prepareQueue(), let queue,
-              generation == uploadGeneration else { return }
+        guard validForAccount, let uploadFactory, generation == uploadGeneration else { return }
+        guard canCallBackend() else {
+            status.storageUnavailable = true
+            let time = await clock.now()
+            guard validForAccount, generation == uploadGeneration else { return }
+            scheduledUpload = uploadScheduler.schedule(at: time.wall.addingTimeInterval(5)) { [weak self] in
+                guard let self, self.validForAccount, generation == self.uploadGeneration else { return }
+                self.triggerUpload()
+            }
+            return
+        }
+        guard await prepareQueue(), let queue else { return }
         if uploader == nil {
             let guardedQueue = AccountReceiptQueue(queue)
             uploadQueue = guardedQueue
@@ -448,13 +481,20 @@ final class EncounterRuntime: ObservableObject {
         do {
             let time = await clock.now()
             guard validForAccount, generation == uploadGeneration, let uploader else { return }
-            let outcome = try await uploader.upload(at: time.wall)
+            guard canCallBackend() else { return }
+            let fence = callFence()
+            let outcome = try await fence.call { try await uploader.upload(at: time.wall) }
             guard validForAccount, generation == uploadGeneration, let next = outcome.nextAttemptAt else { return }
             scheduledUpload = uploadScheduler.schedule(at: next) { [weak self] in
                 guard let self, self.validForAccount, generation == self.uploadGeneration else { return }
                 self.triggerUpload()
             }
-        } catch { /* Never log receipt material. Explicit triggers retry nonretryable failures. */ }
+        } catch { backendFailure = error as? BackendError }
+    }
+
+    private func callFence() -> BackendCallFence {
+        let context = backendFence()
+        return BackendCallFence { [weak self] in self?.validForAccount == true && context.isCurrent() }
     }
 
     private func updateLocalSummary() async {

@@ -256,6 +256,17 @@ final class SessionRecoveryTests: XCTestCase {
             XCTAssertEqual(composition.account.state, .signedOut)
             XCTAssertFalse(composition.runtime === oldRuntime)
             await composition.refreshLocalSummary()
+            if failingStore != "session" {
+                // A failed purge cannot fall back to accepting evidence in an ephemeral queue.
+                XCTAssertTrue(composition.status.storageUnavailable)
+                XCTAssertNil(composition.status.pendingReceiptCount)
+                do { try await composition.requestBluetooth(); XCTFail("Unprepared storage must refuse the radio") }
+                catch { XCTAssertEqual(error as? BackendError, .storageFailure) }
+                await tokens.setClearFailure(false)
+                await queue.setClearFailure(false)
+                await composition.refresh()
+                await composition.refreshLocalSummary()
+            }
             XCTAssertNotNil(composition.status.pendingReceiptCount)
             try await composition.requestBluetooth()
             do { _ = try await composition.account.sessions?.session(); XCTFail("The actual manager must be signed out") }
@@ -276,7 +287,11 @@ final class SessionRecoveryTests: XCTestCase {
                 failSave: failingStore == "saveSession", failClear: failingStore == "clearSession")
             let tokens = FailingAppTokenStore(batch: try appBackendLongBatch())
             let queue = FailingAppReceiptQueue()
-            let composition = makeRecoveryComposition(transport: transport, sessions: sessions, tokens: tokens, queue: queue)
+            let defaults = appBackendDefaults()
+            // This fixture represents an earlier failed deletion, before any new provider request.
+            if failingStore == "clearSession" { try SessionCleanupMarker(defaults: defaults).begin() }
+            let composition = makeRecoveryComposition(transport: transport, sessions: sessions, tokens: tokens, queue: queue,
+                defaults: defaults)
             await composition.waitForRestoration()
             let oldRuntime = composition.runtime
             await tokens.setClearFailure(failingStore == "tokens")

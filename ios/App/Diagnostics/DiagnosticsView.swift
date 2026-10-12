@@ -20,7 +20,6 @@ struct DiagnosticsView: View {
     @ObservedObject private var demo: DemoSwitchSetting
     @DiagnosticsViewState private var isLoading = false
     @DiagnosticsViewState private var resetResult: Bool?
-    @DiagnosticsViewState private var signOutFailed = false
 
     init(composition: AppComposition) {
         self.composition = composition
@@ -46,13 +45,11 @@ struct DiagnosticsView: View {
                 if account.state.isSignedIn {
                     Button(text("signOut")) {
                         perform {
-                            signOutFailed = false
-                            do { try await account.signOut() }
-                            catch { signOutFailed = true }
+                            try? await account.signOut()
                         }
                     }.disabled(isLoading)
                 }
-                if signOutFailed || account.sessionCleanupFailed { Text(text("signOutFailed")) }
+                if account.sessionCleanupFailed { Text(text("signOutFailed")) }
             }
             Section {
                 Picker(text("approach"), selection: Binding(

@@ -44,6 +44,8 @@ final class AccountModel: ObservableObject {
     var sessionGeneration: UUID { generation }
     private let timeZone: @MainActor () -> String
     private var registeredTimeZone: String?
+    private(set) var sessionChangeInProgress = false
+    var bindingGeneration: @MainActor () -> UUID? = { nil }
     private var operationTask: Task<Void, any Error>?
     var prepareForSessionChange: @MainActor () async throws -> Void = {}
     var sessionDidChange: @MainActor (_ recreate: Bool) async -> Void = { _ in }
@@ -71,7 +73,7 @@ final class AccountModel: ObservableObject {
     }
 
     func restore() async {
-        guard hasCurrentSessionContext else { return }
+        guard hasCurrentSessionContext, !sessionChangeInProgress else { return }
         guard let sessions else {
             await sessionDidChange(false)
             return
@@ -88,7 +90,17 @@ final class AccountModel: ObservableObject {
             if let sessionStore { stored = try await sessionStore.load() }
             else { stored = try await sessions.session() }
             guard epoch == generation, hasCurrentSessionContext else { return }
-            guard let stored else { throw BackendError.notAuthenticated }
+            guard let stored else {
+                if state.isSignedIn {
+                    invalidateRefresh()
+                    registeredTimeZone = nil
+                    pendingDeclarations = nil
+                    onboardingCompletion.clear()
+                }
+                state = .signedOut
+                await sessionDidChange(false)
+                return
+            }
             state = .signedInPending(stored.userID)
         } catch BackendError.notAuthenticated {
             await discardDeadSession(epoch: epoch, recreate: false)
@@ -124,9 +136,11 @@ final class AccountModel: ObservableObject {
         let stagedStore = StagedSessionStore()
         let newSessions = sessionFactory(stagedStore)
         let session: BackendSession
-        do { session = try await newSessions.establish(using: request) }
+        let authFence = backendCallFence()
+        do { session = try await authFence.call { try await newSessions.establish(using: request) } }
         catch {
             guard authGeneration == generation, hasCurrentSessionContext else { throw BackendError.notAuthenticated }
+            if error is CancellationError { throw CancellationError() }
             throw Self.safeError(error)
         }
         var establishedGeneration: UUID?
@@ -136,6 +150,8 @@ final class AccountModel: ObservableObject {
             guard self.hasCurrentSessionContext else { throw BackendError.notAuthenticated }
             guard self.state == .signedOut else { throw BackendError.invalidRequest }
             guard !self.cleanup.isPending else { throw BackendError.storageFailure }
+            self.sessionChangeInProgress = true
+            defer { self.sessionChangeInProgress = false }
             try self.cleanup.begin()
             self.invalidateRefresh()
             do { try await self.prepareForSessionChange() }
@@ -161,6 +177,7 @@ final class AccountModel: ObservableObject {
             }
             self.sessionCleanupFailed = false
             do { try await stagedStore.activate(sessionStore) } catch { storageFailed = true }
+            guard self.hasCurrentSessionContext else { throw BackendError.notAuthenticated }
             self.sessions = newSessions
             self.service = serviceFactory(newSessions)
             self.registeredTimeZone = nil
@@ -181,12 +198,17 @@ final class AccountModel: ObservableObject {
             throw BackendError.notAuthenticated
         } catch {
             guard epoch == generation, hasCurrentSessionContext else { throw BackendError.notAuthenticated }
+            if error is CancellationError { throw CancellationError() }
             throw Self.safeError(error)
         }
     }
 
     func signOut() async throws {
+        let epoch = generation
         try await serialize {
+            guard epoch == self.generation else { return }
+            self.sessionChangeInProgress = true
+            defer { self.sessionChangeInProgress = false }
             guard self.hasCurrentSessionContext else { throw BackendError.notAuthenticated }
             guard let sessions = self.sessions else { return }
             do { try self.cleanup.begin() }
@@ -212,8 +234,12 @@ final class AccountModel: ObservableObject {
     }
 
     func refresh() async {
-        guard hasCurrentSessionContext else { return }
+        guard hasCurrentSessionContext, !sessionChangeInProgress else { return }
         if cleanup.isPending {
+            if state == .signedOut {
+                await retryCredentialDeletion(epoch: generation)
+                return
+            }
             await discardDeadSession(epoch: generation, recreate: true)
             return
         }
@@ -222,10 +248,12 @@ final class AccountModel: ObservableObject {
         if let refreshTask { await refreshTask.task.value; return }
         let epoch = generation
         let id = UUID()
+        let fence = backendCallFence()
         let task = Task { [weak self] in
             guard let self else { return }
             do {
-                let session = try await sessions.session()
+                guard self.canRefreshSession() else { throw BackendError.storageFailure }
+                let session = try await fence.call { try await sessions.session() }
                 guard epoch == self.generation, self.hasCurrentSessionContext else { return }
                 switch self.state {
                 case .signedIn(let user) where user != session.userID,
@@ -263,17 +291,22 @@ final class AccountModel: ObservableObject {
         guard canRefreshSession() else { throw BackendError.storageFailure }
         if let setupTask { return try await setupTask.task.value }
         let id = UUID()
+        let fence = backendCallFence()
         let task = Task {
             guard epoch == self.generation else { throw BackendError.notAuthenticated }
             if let declarations = self.pendingDeclarations, let service = self.service {
-                try await service.acceptDeclarations(age18: declarations.age18, termsVersion: declarations.terms,
-                                                     privacyVersion: declarations.privacy)
+                guard self.canRefreshSession() else { throw BackendError.storageFailure }
+                try await fence.call {
+                    try await service.acceptDeclarations(age18: declarations.age18, termsVersion: declarations.terms,
+                                                         privacyVersion: declarations.privacy)
+                }
                 guard epoch == self.generation else { throw BackendError.notAuthenticated }
                 self.pendingDeclarations = nil
             }
             let zone = self.timeZone()
             if zone != self.registeredTimeZone, let service = self.service {
-                try await service.registerTimeZone(zone)
+                guard self.canRefreshSession() else { throw BackendError.storageFailure }
+                try await fence.call { try await service.registerTimeZone(zone) }
                 guard epoch == self.generation else { throw BackendError.notAuthenticated }
                 self.registeredTimeZone = zone
             }
@@ -293,7 +326,12 @@ final class AccountModel: ObservableObject {
 
     private func discardDeadSession(epoch: UUID, recreate: Bool) async {
         try? await serialize {
-            guard self.hasCurrentSessionContext, epoch == self.generation, let sessions = self.sessions else { return }
+            guard self.hasCurrentSessionContext, epoch == self.generation, !self.sessionChangeInProgress,
+                  let sessions = self.sessions else { return }
+            // Recheck after queued work: a completed sign-out needs only the credential retry.
+            if self.state == .signedOut { return }
+            self.sessionChangeInProgress = true
+            defer { self.sessionChangeInProgress = false }
             do { try self.cleanup.begin() }
             catch { self.sessionCleanupFailed = true; self.profile = nil; return }
             self.invalidateRefresh()
@@ -311,6 +349,30 @@ final class AccountModel: ObservableObject {
             self.onboardingCompletion.clear()
             self.state = .signedOut
             await self.sessionDidChange(recreate)
+        }
+    }
+
+    private func retryCredentialDeletion(epoch: UUID) async {
+        try? await serialize {
+            guard self.hasCurrentSessionContext, epoch == self.generation, !self.sessionChangeInProgress,
+                  self.state == .signedOut, self.cleanup.isPending, let sessions = self.sessions else { return }
+            self.sessionChangeInProgress = true
+            defer { self.sessionChangeInProgress = false }
+            // The runtime already belongs to the signed-out owner. Do not clear tokens or receipts again.
+            do {
+                try await sessions.clear()
+                if self.hasCurrentSessionContext { self.cleanup.complete() }
+            } catch { /* Retain the durable marker for the next retry. */ }
+            self.sessionCleanupFailed = self.cleanup.isPending
+        }
+    }
+
+    func backendCallFence() -> BackendCallFence {
+        let epoch = generation
+        let bindingEpoch = bindingGeneration()
+        return BackendCallFence { [weak self] in
+            guard let self else { return false }
+            return self.hasCurrentSessionContext && self.generation == epoch && self.bindingGeneration() == bindingEpoch
         }
     }
 

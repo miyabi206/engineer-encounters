@@ -30,9 +30,11 @@ extension AccountModel {
         let epoch = sessionGeneration
         let requireSession: @MainActor () throws -> Void = {
             guard self.hasCurrentSessionContext, !self.sessionCleanupPending, self.sessionGeneration == epoch,
-                  case .signedIn = self.state else {
+                  self.state.isSignedIn else {
                 throw ProfileActionError(code: .notAuthenticated)
             }
+            guard self.canRefreshSession() else { throw Self.presentationError(BackendError.storageFailure) }
+            guard case .signedIn = self.state else { throw ProfileActionError(code: .notAuthenticated) }
         }
         return ProfileActions(
             loadInterests: {
@@ -72,7 +74,8 @@ extension AccountModel {
             requestBluetooth: {
                 try requireSession()
                 do {
-                    let bluetooth = try await requestBluetooth()
+                    let fence = self.backendCallFence()
+                    let bluetooth = try await fence.call { try await requestBluetooth() }
                     guard self.sessionGeneration == epoch else { return bluetooth }
                     _ = try? await self.loadOwnProfile()
                     guard self.sessionGeneration == epoch else { return bluetooth }
@@ -117,12 +120,15 @@ extension AccountModel {
     }
 
     private func ownAccountOperation<Value>(_ operation: @MainActor (OwnAccountService) async throws -> Value) async throws -> Value {
-        guard hasCurrentSessionContext, !sessionCleanupPending, case .signedIn(let user) = state, let service else {
+        guard hasCurrentSessionContext, !sessionCleanupPending, state.isSignedIn, let service else {
             throw ProfileActionError(code: .notAuthenticated)
         }
+        guard canRefreshSession() else { throw Self.presentationError(BackendError.storageFailure) }
+        guard case .signedIn(let user) = state else { throw ProfileActionError(code: .notAuthenticated) }
         let epoch = sessionGeneration
+        let fence = backendCallFence()
         do {
-            let result = try await operation(service)
+            let result = try await fence.call { try await operation(service) }
             guard hasCurrentSessionContext, !sessionCleanupPending, sessionGeneration == epoch, state == .signedIn(user) else {
                 throw ProfileActionError(code: .notAuthenticated)
             }

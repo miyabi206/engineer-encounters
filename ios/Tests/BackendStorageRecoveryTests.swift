@@ -17,10 +17,11 @@ final class BackendStorageRecoveryTests: XCTestCase {
         XCTAssertEqual(identity, "https://backend.example:443")
         XCTAssertEqual(identity, BackendStorageBinding.identity(equivalent))
         XCTAssertNotEqual(identity, BackendStorageBinding.identity(different))
-        let owner = BackendStorageOwner(backend: identity, account: appBackendTestUser)
-        XCTAssertEqual(owner.namespace, BackendStorageOwner(backend: BackendStorageBinding.identity(equivalent), account: appBackendTestUser).namespace)
-        XCTAssertNotEqual(owner.namespace, BackendStorageOwner(backend: identity, account: UUID()).namespace)
-        XCTAssertNotEqual(owner.namespace, BackendStorageOwner(backend: BackendStorageBinding.identity(different), account: appBackendTestUser).namespace)
+        let salt = try InstallationStorageSalt.load(defaults: appBackendDefaults())
+        let owner = BackendStorageOwner(backend: identity, account: appBackendTestUser, salt: salt)
+        XCTAssertEqual(owner.namespace, BackendStorageOwner(backend: BackendStorageBinding.identity(equivalent), account: appBackendTestUser, salt: salt).namespace)
+        XCTAssertNotEqual(owner.namespace, BackendStorageOwner(backend: identity, account: UUID(), salt: salt).namespace)
+        XCTAssertNotEqual(owner.namespace, BackendStorageOwner(backend: BackendStorageBinding.identity(different), account: appBackendTestUser, salt: salt).namespace)
         XCTAssertFalse(owner.namespace.contains(appBackendTestUser.uuidString))
     }
 
@@ -33,7 +34,7 @@ final class BackendStorageRecoveryTests: XCTestCase {
             let session = try appBackendTestSession()
             let persisted = KeychainSessionStore(backendIdentity: BackendStorageBinding.identity(configuration), client: keychain)
             try await persisted.save(session)
-            let owner = BackendStorageOwner(backend: BackendStorageBinding.identity(configuration), account: session.userID)
+            let owner = BackendStorageOwner(backend: BackendStorageBinding.identity(configuration), account: session.userID, salt: try InstallationStorageSalt.load(defaults: defaults))
             let tokens = KeychainTokenBatchStore(service: AppComposition.serverTokenService(owner: owner), client: keychain)
             try await tokens.save(appBackendLongBatch())
             let legacy = KeychainTokenBatchStore(service: AppComposition.serverTokenService, client: keychain)
@@ -66,10 +67,14 @@ final class BackendStorageRecoveryTests: XCTestCase {
             XCTAssertFalse(composition.status.discoveryOn)
             XCTAssertEqual(queueOpens, 0)
             XCTAssertEqual(radioBuilds, 0)
-            let failedAttempts = await keychain.deletionAttempts
+            let failedAttempts = await keychain.reads
+            let deletesWhileLocked = await keychain.deletionAttempts
             XCTAssertGreaterThan(failedAttempts, 0)
+            XCTAssertEqual(deletesWhileLocked, 0)
             await composition.refresh()
-            let retryAttempts = await keychain.deletionAttempts
+            let retryAttempts = await keychain.reads
+            let retryDeletes = await keychain.deletionAttempts
+            XCTAssertEqual(retryDeletes, 0)
             let requestsWhileUnavailable = await transport.recorded()
             XCTAssertGreaterThan(retryAttempts, failedAttempts)
             XCTAssertTrue(requestsWhileUnavailable.isEmpty)
@@ -220,7 +225,7 @@ final class BackendStorageRecoveryTests: XCTestCase {
             } else {
                 try await KeychainSessionStore(backendIdentity: BackendStorageBinding.identity(original), client: keychain).save(appBackendTestSession())
             }
-            let owner = BackendStorageOwner(backend: BackendStorageBinding.identity(original), account: appBackendTestUser)
+            let owner = BackendStorageOwner(backend: BackendStorageBinding.identity(original), account: appBackendTestUser, salt: try InstallationStorageSalt.load(defaults: defaults))
             let tokenService = legacy ? AppComposition.serverTokenService : AppComposition.serverTokenService(owner: owner)
             let tokens = KeychainTokenBatchStore(service: tokenService, client: keychain)
             try await tokens.save(appBackendLongBatch())
@@ -347,7 +352,7 @@ final class BackendStorageRecoveryTests: XCTestCase {
         XCTAssertEqual(restarted.account.state, .signedOut)
         try await storageSignIn(restarted)
         try await queue.enqueue(receipt) // Reuse the ID to detect an obsolete acknowledgement.
-        let newOwner = BackendStorageOwner(backend: BackendStorageBinding.identity(other), account: newUser)
+        let newOwner = BackendStorageOwner(backend: BackendStorageBinding.identity(other), account: newUser, salt: try InstallationStorageSalt.load(defaults: defaults))
         let newTokens = KeychainTokenBatchStore(service: AppComposition.serverTokenService(owner: newOwner), client: keychain)
         let newBatch = try appBackendLongBatch()
         try await newTokens.save(newBatch)
@@ -360,7 +365,7 @@ final class BackendStorageRecoveryTests: XCTestCase {
         _ = await refreshing.result
         await uploading.value
         let stored = try await KeychainSessionStore(backendIdentity: BackendStorageBinding.identity(other), client: keychain).load()
-        let oldOwner = BackendStorageOwner(backend: BackendStorageBinding.identity(original), account: appBackendTestUser)
+        let oldOwner = BackendStorageOwner(backend: BackendStorageBinding.identity(original), account: appBackendTestUser, salt: try InstallationStorageSalt.load(defaults: defaults))
         let oldTokens = try await KeychainTokenBatchStore(service: AppComposition.serverTokenService(owner: oldOwner), client: keychain).load()
         let retained = try await newTokens.load()
         let pending = try await queue.pending()
