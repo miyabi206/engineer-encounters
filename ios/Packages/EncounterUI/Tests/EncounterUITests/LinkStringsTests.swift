@@ -14,6 +14,20 @@ final class LinkStringsTests: XCTestCase {
             }
         }
     }
+    func testRetryLabelsNameEveryNonDestructiveOperation() throws {
+        let repository = GitHubRepositoryChoice(repositoryID: "123", repositoryName: "repo", title: "Repo",
+                                                url: URL(string: "https://github.com/owner/repo")!)
+        let operations: [LinkOperation] = [.loadLinks, .loadConnection, .connect, .repositories(2),
+                                           .preview(repository), .save, .reorder(["one"]), .refresh]
+        let labels = operations.map(LinkStrings.retryLabel)
+        XCTAssertEqual(Set(labels).count, operations.count)
+        for label in labels { XCTAssertFalse(label.isEmpty); XCTAssertNotEqual(label, LinkStrings.text(.retry)) }
+        for language in ["en", "ja"] {
+            let table = try LinkStrings.table(language: language)
+            XCTAssertNotEqual(table["readerFailure"], table["notAvailable"])
+            XCTAssertNotNil(table["connectedWithoutHandle"])
+        }
+    }
     func testVerbatimWordingAndEveryLimitCounter() throws {
         XCTAssertEqual(LinkStrings.localized("identityWarning", language: "ja"), "ニックネームでも、外部リンクから個人が特定されることがあります")
         XCTAssertEqual(LinkStrings.localized("identityWarning", language: "en"), "External links may reveal your identity, even with a nickname.")

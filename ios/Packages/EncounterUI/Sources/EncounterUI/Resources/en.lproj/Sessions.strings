@@ -23,8 +23,6 @@
 "refreshCode" = "Refresh code";
 "allowCamera" = "Allow camera";
 "confirming" = "Confirming…";
-"expired" = "This code has expired";
-"alreadyUsed" = "This code has already been used";
 "validity" = "This code is valid for 2 minutes";
 "invalidatesPrevious" = "Refreshing invalidates the previous code";
 "selfScan" = "You cannot scan your own code";
@@ -39,3 +37,6 @@
 "cameraPreview" = "QR scanning camera";
 "codeMode" = "QR code action";
 "remainingFormat" = "%@: %@";
+"codeUnavailable" = "This code is unavailable. Refresh the code.";
+"rateLimited" = "Too many requests. Automatic code replacement has stopped. Try again later.";
+"discoveryOff" = "Turn discovery on to continue.";

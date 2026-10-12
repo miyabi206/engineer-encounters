@@ -23,7 +23,6 @@ final class LinksModelTests: XCTestCase {
         XCTAssertEqual(driver.saveCalls, 0)
         model.draft?.visibility = .private
         model.draft?.title = "Owner title"
-        model.draft?.sourceLabel = "Owner label"
         model.draft?.tags = ["Swift"]
         driver.failure = LinkActionError(code: .unavailable)
         driver.failingOperation = .save
@@ -42,7 +41,7 @@ final class LinksModelTests: XCTestCase {
         XCTAssertEqual(model.links.count, 1)
         let link = try XCTUnwrap(model.links.first)
         XCTAssertEqual(link.title, "Owner title")
-        XCTAssertEqual(link.sourceLabel, "Owner label")
+        XCTAssertEqual(link.sourceLabel, "GitHub")
         XCTAssertTrue(link.verified)
         XCTAssertEqual(link.visibility, .private)
         XCTAssertEqual(driver.saveCalls, 2)
@@ -101,7 +100,7 @@ final class LinksModelTests: XCTestCase {
     @MainActor
     func testRestoredConnectionLoadsPagesAndFailureHidesStaleRepositories() async {
         let driver = LinkTestDriver(); driver.connection = .connected(handle: "owner")
-        let second = GitHubRepositoryChoice(id: "second", ownerHandle: "owner", name: "Second", url: driver.repository.url)
+        let second = GitHubRepositoryChoice(repositoryID: "456", repositoryName: "Second", title: "Second title", url: driver.repository.url)
         driver.pages[1] = GitHubRepositoryPage(repositories: [driver.repository], nextPage: 2)
         driver.pages[2] = GitHubRepositoryPage(repositories: [second])
         let model = driver.model(); model.beginAdd(); await model.loadConnection()
@@ -126,7 +125,7 @@ final class LinksModelTests: XCTestCase {
         let model = driver.model(); model.beginEdit(driver.links[0])
         model.draft?.title = "Owner title"; model.draft?.description = "Owner description"
         model.draft?.openingText = "Owner opening"; model.draft?.mainLanguage = "Owner language"
-        model.draft?.tags = ["Owner tag"]; model.draft?.sourceLabel = "Owner source"
+        model.draft?.tags = ["Owner tag"]
         model.draft?.visibility = .compatibleOnly
         let edited = model.draft
         driver.failure = LinkActionError(code: .unavailable); driver.failingOperation = .refresh
@@ -150,10 +149,138 @@ final class LinksModelTests: XCTestCase {
         XCTAssertEqual(model.draft?.sourceLabel, "GitHub")
         XCTAssertEqual(model.draft?.visibility, .compatibleOnly)
         XCTAssertEqual(model.draft?.existingLinkID, "first")
-        XCTAssertEqual(model.draft?.previewID, "fresh-preview")
+        XCTAssertEqual(model.draft?.repositoryID, "123")
         XCTAssertNil(model.replacement)
         XCTAssertTrue(model.hasEdits)
         XCTAssertEqual(driver.updateCalls, 0)
+    }
+
+    @MainActor
+    func testAcceptedRenamedRepositoryRefreshSavesReplacementAndOwnerEdits() async throws {
+        let driver = LinkTestDriver(); driver.links = [driver.link()]
+        let model = driver.model(); model.beginEdit(driver.links[0])
+        await model.refresh()
+        XCTAssertEqual(model.replacement?.url, driver.refreshedURL)
+        model.acceptReplacement()
+        model.draft?.title = "Edited after refresh"; model.draft?.visibility = .everyoneEligible
+        let saved = await model.save()
+        XCTAssertTrue(saved)
+        XCTAssertEqual(driver.updateCalls, 0)
+        XCTAssertEqual(driver.replacements, [true])
+        let request = try XCTUnwrap(driver.savedDrafts.first)
+        XCTAssertEqual(request.repositoryID, "123")
+        XCTAssertEqual(request.sourceItemID, "123")
+        XCTAssertEqual(request.repositoryName, "renamed")
+        XCTAssertEqual(request.title, "Edited after refresh")
+        XCTAssertEqual(request.description, "Fresh description")
+        XCTAssertEqual(request.mainLanguage, "Rust")
+        XCTAssertEqual(request.tags, ["Fresh tag"])
+        XCTAssertEqual(request.openingText, "Fresh opening")
+        XCTAssertTrue(request.replaceExisting)
+        XCTAssertEqual(request.visibility, .everyoneEligible)
+        XCTAssertEqual(model.links.first?.id, "first")
+        XCTAssertEqual(model.links.first?.url, driver.refreshedURL)
+    }
+
+    @MainActor
+    func testExistingRepositoryRequiresExplicitReplacementConfirmation() async {
+        let driver = LinkTestDriver(); let model = driver.model()
+        model.beginAdd(); await model.connectGitHub(); await model.preview(driver.repository)
+        model.draft?.title = "Edited title"; model.draft?.visibility = .private
+        driver.failure = LinkActionError(code: .prerequisiteMissing, details: ["refresh_confirmation"])
+        driver.failingOperation = .save
+        _ = await model.save()
+        XCTAssertEqual(driver.replacements, [false])
+        XCTAssertEqual(model.replacement, model.draft)
+        XCTAssertFalse(model.canRetry)
+        model.cancelReplacement()
+        XCTAssertEqual(model.draft?.title, "Edited title")
+        _ = await model.save()
+        model.acceptReplacement(); driver.failure = nil
+        let saved = await model.save()
+        XCTAssertTrue(saved)
+        XCTAssertEqual(driver.replacements, [false, false, true])
+        XCTAssertEqual(driver.savedDrafts.last?.title, "Edited title")
+        XCTAssertEqual(driver.savedDrafts.last?.visibility, .private)
+    }
+
+    @MainActor
+    func testLostConnectionReturnsToConnectAndRetainsEditor() async {
+        let driver = LinkTestDriver(); driver.links = [driver.link()]
+        let model = driver.model(); model.beginEdit(driver.links[0]); model.draft?.title = "Keep me"
+        driver.failure = LinkActionError(code: .prerequisiteMissing, details: ["github"])
+        driver.failingOperation = .refresh
+        await model.refresh()
+        XCTAssertEqual(model.route, .add)
+        XCTAssertEqual(model.connection, .notConnected)
+        XCTAssertFalse(model.hasLoadedRepositories)
+        XCTAssertEqual(model.draft?.title, "Keep me")
+        XCTAssertFalse(model.canRetry)
+        driver.failure = nil
+        await model.connectGitHub(); model.returnToEditor()
+        XCTAssertEqual(model.route, .edit)
+        XCTAssertEqual(model.draft?.title, "Keep me")
+    }
+
+    @MainActor
+    func testStartingAddAfterFailedPageResetsAndReloadsConnectionAndRepositories() async {
+        let driver = LinkTestDriver(); driver.connection = .connected(handle: nil)
+        let model = driver.model(); model.beginAdd(); await model.loadConnection()
+        XCTAssertTrue(model.connection.isConnected)
+        XCTAssertNil(model.connection.handle)
+        XCTAssertEqual(model.paging.repositories, [driver.repository])
+        driver.failure = LinkActionError(code: .prerequisiteMissing, details: ["github_reader"])
+        driver.failingOperation = .repositories(2)
+        await model.loadRepositories(page: 2)
+        XCTAssertTrue(model.error?.requires("github_reader") == true)
+        XCTAssertTrue(model.canRetry)
+        model.cancelAdd(); model.beginAdd()
+        XCTAssertFalse(model.hasLoadedConnection)
+        XCTAssertFalse(model.hasLoadedRepositories)
+        XCTAssertEqual(model.connection, .notConnected)
+        driver.failure = nil; await model.loadConnection()
+        XCTAssertEqual(driver.loadedConnections, 2)
+        XCTAssertEqual(driver.requestedPages, [1, 2, 1])
+        await model.preview(driver.repository)
+        XCTAssertEqual(model.draft?.repositoryName, driver.repository.repositoryName)
+    }
+
+    @MainActor
+    func testFailedDeleteCannotBeRetriedGenericallyAndEditingClearsOperation() async {
+        let driver = LinkTestDriver(); driver.links = [driver.link()]
+        let model = driver.model(); model.beginEdit(driver.links[0])
+        driver.failure = LinkActionError(code: .unavailable); driver.failingOperation = .delete
+        _ = await model.deleteConfirmed()
+        XCTAssertFalse(model.canRetry)
+        driver.failure = nil; model.draft?.title = "New edit"
+        XCTAssertNil(model.failedOperation)
+        await model.retry(); await model.retry(.delete)
+        XCTAssertEqual(driver.deleteCalls, 1)
+        XCTAssertEqual(model.links, driver.links)
+        driver.failure = LinkActionError(code: .unavailable); driver.failingOperation = .save
+        _ = await model.save()
+        XCTAssertEqual(model.failedOperation, .save)
+        driver.failure = nil
+        await model.retry(.refresh)
+        XCTAssertEqual(driver.updateCalls, 1)
+        await model.retry(.save)
+        XCTAssertEqual(driver.updateCalls, 2)
+        XCTAssertEqual(driver.deleteCalls, 1)
+    }
+
+    @MainActor
+    func testRemovingTagChecksIndexAndClearsPendingRetry() async {
+        let driver = LinkTestDriver(); driver.links = [driver.link()]
+        let model = driver.model(); model.beginEdit(driver.links[0]); model.draft?.tags = ["A", "B"]
+        model.removeTag(at: -1); model.removeTag(at: 2)
+        XCTAssertEqual(model.draft?.tags, ["A", "B"])
+        driver.failure = LinkActionError(code: .unavailable); driver.failingOperation = .save
+        _ = await model.save()
+        model.removeTag(at: 0)
+        XCTAssertNil(model.failedOperation)
+        XCTAssertEqual(model.draft?.tags, ["B"])
+        model.removeTag(at: 1)
+        XCTAssertEqual(model.draft?.tags, ["B"])
     }
 
     @MainActor
@@ -173,7 +300,10 @@ final class LinksModelTests: XCTestCase {
         XCTAssertEqual(model.draft?.title, "Owner edit")
         XCTAssertEqual(model.links, driver.links)
         driver.failure = nil
+        XCTAssertFalse(model.canRetry)
         await model.retry()
+        XCTAssertEqual(driver.deleteCalls, 1)
+        _ = await model.deleteConfirmed()
         XCTAssertTrue(model.links.isEmpty)
         XCTAssertEqual(model.route, .list)
         XCTAssertNil(model.draft)
@@ -184,9 +314,9 @@ final class LinksModelTests: XCTestCase {
     func testServerLastLinkRejectionOffersGuidanceAndDoesNotRetryDeletion() async {
         let driver = LinkTestDriver(); driver.links = [driver.link()]
         let model = driver.model(); model.beginEdit(driver.links[0])
-        driver.failure = LinkActionError(code: .lastLink); driver.failingOperation = .delete
+        driver.failure = LinkActionError(code: .prerequisiteMissing, details: ["link"]); driver.failingOperation = .delete
         _ = await model.deleteConfirmed()
-        XCTAssertEqual(model.error?.code, .lastLink)
+        XCTAssertTrue(model.error?.isLastLink == true)
         XCTAssertFalse(model.canDelete)
         XCTAssertFalse(model.canRetry)
         await model.retry()
@@ -316,7 +446,7 @@ final class LinksModelTests: XCTestCase {
 @MainActor
 final class LinkTestDriver {
     let url = URL(string: "https://github.com/owner/repository")!
-    var repository: GitHubRepositoryChoice { GitHubRepositoryChoice(id: "repository", ownerHandle: "owner", name: "Repository", url: url) }
+    var repository: GitHubRepositoryChoice { GitHubRepositoryChoice(repositoryID: "123", repositoryName: "repository", title: "Repository", description: "Description", mainLanguage: "Swift", tags: ["swift"], url: url) }
     var links: [OwnLinkState] = []
     var connection: GitHubConnectionState = .notConnected
     var pages: [Int: GitHubRepositoryPage] = [:]
@@ -332,14 +462,18 @@ final class LinkTestDriver {
     var changedLinks: [[OwnLinkState]] = []
     var cancelSuccessfulWrites = false
 
+    var refreshedURL: URL { URL(string: "https://github.com/owner/renamed")! }
+    var replacements: [Bool] = []
+    var savedDrafts: [LinkPreviewDraft] = []
+    var loadedConnections = 0
     var refreshed: LinkPreviewDraft {
-        LinkPreviewDraft(previewID: "fresh-preview", source: .github, url: url, verified: true,
+        LinkPreviewDraft(repositoryID: "123", repositoryName: "renamed", source: .github, url: refreshedURL, verified: true,
                          sourceLabel: "GitHub", title: "Fresh title", description: "Fresh description",
                          mainLanguage: "Rust", tags: ["Fresh tag"], openingText: "Fresh opening")
     }
     func link(id: String = "first", order: Int = 0) -> OwnLinkState {
         OwnLinkState(id: id, source: .github, sourceLabel: "GitHub", title: "Saved title",
-                     url: url, visibility: .private, verified: true, displayOrder: order)
+                     url: url, visibility: .private, verified: true, displayOrder: order, sourceItemID: "123")
     }
     func model(discoveryOn: Bool = false) -> LinksModel {
         LinksModel(actions: actions, links: links, discoveryOn: discoveryOn) { self.changedLinks.append($0) }
@@ -353,7 +487,8 @@ final class LinkTestDriver {
         let link = OwnLinkState(id: id, source: draft.source, sourceLabel: draft.sourceLabel, title: draft.title,
                                 description: draft.description, mainLanguage: draft.mainLanguage, tags: draft.tags,
                                 openingText: draft.openingText, url: draft.url, visibility: visibility,
-                                verified: draft.verified, displayOrder: order)
+                                verified: draft.verified, displayOrder: order, sourceItemID: draft.repositoryID,
+                                repositoryName: draft.repositoryName)
         links.removeAll { $0.id == id }; links.append(link)
         if cancelSuccessfulWrites { withUnsafeCurrentTask { $0?.cancel() } }
         return link
@@ -362,7 +497,7 @@ final class LinkTestDriver {
         LinkActions(loadLinks: {
             try await self.check(.loadLinks); return self.links
         }, loadConnection: {
-            try await self.check(.loadConnection); return self.connection
+            self.loadedConnections += 1; try await self.check(.loadConnection); return self.connection
         }, connectGitHub: {
             self.connectCalls += 1; try await self.check(.connect)
             self.connection = .connected(handle: "owner"); return self.connection
@@ -371,9 +506,10 @@ final class LinkTestDriver {
             return self.pages[page] ?? GitHubRepositoryPage(repositories: [self.repository])
         }, previewRepository: { repository in
             try await self.check(.preview(repository))
-            return LinkPreviewDraft(previewID: "server-preview", source: .github, url: self.url,
+            return LinkPreviewDraft(repositoryID: repository.repositoryID, repositoryName: repository.repositoryName, source: .github, url: self.url,
                                     verified: true, sourceLabel: "GitHub", title: "Repository")
-        }, saveRepository: { draft, visibility in
+        }, saveRepository: { draft, visibility, replaceExisting in
+            self.replacements.append(replaceExisting); self.savedDrafts.append(draft)
             self.saveCalls += 1; try await self.check(.save)
             return self.saved(id: "first", draft: draft, visibility: visibility)
         }, updateLink: { id, draft, visibility in

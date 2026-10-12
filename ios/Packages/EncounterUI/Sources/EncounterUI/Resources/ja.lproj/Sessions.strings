@@ -23,8 +23,6 @@
 "refreshCode" = "コードを更新";
 "allowCamera" = "カメラを許可";
 "confirming" = "確認中…";
-"expired" = "コードの有効期限が切れました";
-"alreadyUsed" = "このコードは使用済みです";
 "validity" = "コードは2分間有効です";
 "invalidatesPrevious" = "更新すると前のコードは使えなくなります";
 "selfScan" = "自分のコードは読み取れません";
@@ -39,3 +37,6 @@
 "cameraPreview" = "QRコード読み取り用カメラ";
 "codeMode" = "QRコードの操作";
 "remainingFormat" = "%@: %@";
+"codeUnavailable" = "このコードは利用できません。コードを更新してください。";
+"rateLimited" = "リクエストが多すぎます。コードの自動更新を停止しました。しばらくしてからお試しください。";
+"discoveryOff" = "続けるには発見をオンにしてください。";

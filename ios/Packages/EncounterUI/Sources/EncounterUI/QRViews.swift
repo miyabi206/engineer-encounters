@@ -70,7 +70,7 @@ public struct QRView: View {
 
     @ViewBuilder private var showCode: some View {
         if model.isIssuing { ProgressView(SessionStrings.text(.loading)) }
-        if let code = model.code, !QRCodeRules.isExpired(code, now: model.currentInstant) {
+        if let code = model.code, model.isCodeValid {
             QRImageView(payload: code.payload)
             Text(SessionStrings.remaining(model.remainingSeconds)).monospacedDigit()
         }

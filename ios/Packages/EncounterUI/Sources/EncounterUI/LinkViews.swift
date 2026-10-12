@@ -125,7 +125,10 @@ public struct LinkAddView: View {
                 Text(LinkStrings.text(.chooseSource)).foregroundStyle(.secondary)
             }
         }.task(id: model.selectedSource) {
-            if model.selectedSource == .github && !model.hasLoadedConnection { await model.loadConnection() }
+            if model.selectedSource == .github {
+                if !model.hasLoadedConnection { await model.loadConnection() }
+                else if model.connection.isConnected && !model.hasLoadedRepositories { await model.loadRepositories(page: 1) }
+            }
         }
     }
 
@@ -133,18 +136,23 @@ public struct LinkAddView: View {
         OnboardingCard {
             if model.connection == .connecting {
                 ProgressView(LinkStrings.text(.connecting)).accessibilityLabel(LinkStrings.text(.connecting))
-            } else if let handle = model.connection.handle {
-                Text(String(format: LinkStrings.text(.connected), locale: Locale.current, handle))
+            } else if model.connection.isConnected {
+                if let handle = model.connection.handle {
+                    Text(String(format: LinkStrings.text(.connected), locale: Locale.current, handle))
+                } else { Text(LinkStrings.text(.connectedWithoutHandle)) }
+                if model.draft != nil {
+                    Button(LinkStrings.text(.continueAction), action: model.returnToEditor).disabled(model.isBusy)
+                }
                 Text(LinkStrings.text(.repositories)).font(.headline).accessibilityAddTraits(.isHeader)
                 if model.hasLoadedRepositories {
                     if model.paging.repositories.isEmpty { Text(LinkStrings.text(.noItems)) }
                     ForEach(model.paging.repositories) { repository in
                         VStack(alignment: .leading, spacing: 8) {
-                            Text(repository.name).font(.headline)
+                            Text(repository.repositoryName).font(.headline)
                             Text(repository.url.absoluteString).font(.caption).foregroundStyle(.secondary)
                             Button(LinkStrings.text(.select)) { Task { await model.preview(repository) } }
                                 .disabled(!model.canAdd)
-                                .accessibilityLabel(LinkStrings.label(LinkStrings.text(.select), value: repository.name))
+                                .accessibilityLabel(LinkStrings.label(LinkStrings.text(.select), value: repository.repositoryName))
                         }
                     }
                     Text(String(format: LinkStrings.text(.page), locale: Locale.current, model.paging.page))
@@ -189,11 +197,11 @@ public struct LinkEditView: View {
                     SwiftUI.Link(draft.url.absoluteString, destination: draft.url)
                         .accessibilityLabel(LinkStrings.label(LinkStrings.text(.originalURL), value: draft.url.absoluteString))
                     Text(LinkStrings.source(draft.source)).font(.caption).foregroundStyle(.secondary)
-                    textField(.source, field: .sourceLabel, value: binding(\.sourceLabel))
+                    Text(LinkStrings.label(LinkStrings.text(.source), value: draft.sourceLabel))
                     textField(.title, field: .title, value: binding(\.title), limit: LinkValidation.titleLimit, required: true)
                     textField(.description, field: .description, value: binding(\.description), limit: LinkValidation.descriptionLimit)
                     tagsEditor(draft)
-                    textField(.mainLanguage, field: .mainLanguage, value: binding(\.mainLanguage), limit: LinkValidation.languageLimit)
+                    textField(.mainLanguage, field: .mainLanguage, value: languageBinding, limit: LinkValidation.languageLimit)
                     textField(.openingText, field: .openingText, value: binding(\.openingText), limit: LinkValidation.openingTextLimit)
                     Text(LinkStrings.text(draft.verified ? .verified : .unverified))
                     Button(LinkStrings.text(.refresh)) { Task { await model.refresh() } }.disabled(model.isBusy)
@@ -223,7 +231,7 @@ public struct LinkEditView: View {
                 if draft.existingLinkID != nil {
                     Button(LinkStrings.text(.delete), role: .destructive) { confirmsDelete = true }
                         .disabled(!model.canDelete)
-                    if !LinkValidation.canDelete(count: model.links.count, discoveryOn: model.discoveryOn) || model.error?.code == .lastLink {
+                    if !LinkValidation.canDelete(count: model.links.count, discoveryOn: model.discoveryOn) || model.error?.isLastLink == true {
                         Text(LinkStrings.text(.lastLink)).foregroundStyle(.secondary)
                         if let discoverySettings {
                             Button(LinkStrings.text(.discoverySettings), action: discoverySettings).disabled(model.isBusy)
@@ -246,6 +254,9 @@ public struct LinkEditView: View {
     }
     private func cancel() {
         if model.hasEdits { confirmsDiscard = true } else { model.cancelEditor() }
+    }
+    private var languageBinding: Binding<String> {
+        Binding(get: { model.draft?.mainLanguage ?? "" }, set: { model.draft?.mainLanguage = $0.isEmpty ? nil : $0 })
     }
     private func binding(_ keyPath: WritableKeyPath<LinkPreviewDraft, String>) -> Binding<String> {
         Binding(get: { model.draft?[keyPath: keyPath] ?? "" }, set: { model.draft?[keyPath: keyPath] = $0 })
@@ -289,7 +300,7 @@ public struct LinkEditView: View {
                 if !ProfileValidation.validRequiredText(draft.tags[index], limit: LinkValidation.tagLengthLimit) {
                     Text(LinkStrings.text(.invalidField)).foregroundStyle(.red)
                 }
-                Button(LinkStrings.text(.removeTag)) { model.draft?.tags.remove(at: index) }
+                Button(LinkStrings.text(.removeTag)) { model.removeTag(at: index) }
                     .accessibilityLabel(LinkStrings.label(LinkStrings.text(.removeTag), value: draft.tags[index]))
             }
             Text(LinkStrings.counter(draft.tags.count, limit: LinkValidation.tagLimit)).font(.caption).foregroundStyle(.secondary)
@@ -311,7 +322,7 @@ private struct LinkReplacementView: View {
                 OnboardingCard {
                     LinkPreviewCard(draft: model.draft?.replacingMetadata(with: fresh) ?? fresh)
                     Text(LinkStrings.label(LinkStrings.text(.source), value: fresh.sourceLabel))
-                    Text(LinkStrings.label(LinkStrings.text(.mainLanguage), value: fresh.mainLanguage))
+                    Text(LinkStrings.label(LinkStrings.text(.mainLanguage), value: fresh.mainLanguage ?? ""))
                     Text(LinkStrings.label(LinkStrings.text(.tags), value: SettingsStrings.joined(fresh.tags)))
                     Text(LinkStrings.label(LinkStrings.text(.description), value: fresh.description))
                     Text(LinkStrings.label(LinkStrings.text(.openingText), value: fresh.openingText))
@@ -330,7 +341,7 @@ struct LinkPreviewCard: View {
             Text(draft.sourceLabel).font(.caption).foregroundStyle(.secondary)
             Text(draft.title).font(.headline)
             if !draft.description.isEmpty { Text(draft.description) }
-            if !draft.mainLanguage.isEmpty { Text(draft.mainLanguage).font(.caption) }
+            if let language = draft.mainLanguage, !language.isEmpty { Text(language).font(.caption) }
             ForEach(Array(draft.tags.enumerated()), id: \.offset) { _, tag in Text(tag).font(.caption) }
             if !draft.openingText.isEmpty { Text(draft.openingText) }
             Text(LinkStrings.text(draft.verified ? .verified : .unverified)).font(.caption)
@@ -379,19 +390,28 @@ private struct LinkFailure: View {
         if let error = model.error {
             VStack(alignment: .leading, spacing: 8) {
                 Text(LinkStrings.text(message(error))).foregroundStyle(.red)
-                Button(LinkStrings.text(.retry)) { Task { await model.retry() } }.disabled(!model.canRetry)
+                retryButton
             }.accessibilityElement(children: .contain)
         } else if model.canRetry {
-            Button(LinkStrings.text(.retry)) { Task { await model.retry() } }
+            retryButton
+        }
+    }
+    @ViewBuilder private var retryButton: some View {
+        if let operation = model.failedOperation, operation != .delete, model.canRetry {
+            Button(LinkStrings.retryLabel(operation)) { Task { await model.retry(operation) } }
         }
     }
     private func message(_ error: LinkActionError) -> LinkString {
+        if error.isLastLink { return .lastLink }
+        if error.requires("refresh_confirmation") { return .replaceEdits }
+        if error.requires("github") { return .connectGitHub }
+        if error.requires("github_reader") { return .readerFailure }
         switch error.code {
         case .lastLink: return .lastLink
         case .limitReached: return .linkLimit
         case .sourceUnavailable: return .notAvailable
         case .invalidInput: return .invalidField
-        case .unavailable:
+        case .unavailable, .prerequisiteMissing:
             switch model.failedOperation {
             case .connect: return .connectionFailed
             case .save: return .saveError

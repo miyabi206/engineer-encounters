@@ -9,11 +9,11 @@ final class QRModelTests: XCTestCase {
         await model.appear()
         let first = try XCTUnwrap(model.code)
         XCTAssertEqual(model.remainingSeconds, 120)
-        driver.now = driver.now.addingTimeInterval(119)
+        driver.elapsed += 119
         await model.tick()
         XCTAssertEqual(model.remainingSeconds, 1)
         XCTAssertEqual(driver.issues, 1)
-        driver.now = driver.now.addingTimeInterval(1)
+        driver.elapsed += 1
         await model.tick()
         let second = try XCTUnwrap(model.code)
         XCTAssertNotEqual(first.payload, second.payload)
@@ -101,8 +101,8 @@ final class QRModelTests: XCTestCase {
     func testServerScanErrorsMapToExactWordingAndRequireANewScan() async throws {
         let peer = try XCTUnwrap(QRPayload(token: String(repeating: "a", count: 32)))
         let cases: [(QRActionError, SessionString)] = [
-            (.selfScan, .selfScan), (.expired, .expired), (.alreadyUsed, .alreadyUsed),
-            (.unknownCode, .unreadable), (.replaced, .unreadable), (.network, .qrNetwork)
+            (.selfScan, .selfScan), (.notFound, .codeUnavailable),
+            (.unknownCode, .unreadable), (.network, .qrNetwork), (.rateLimited, .rateLimited)
         ]
         for (failure, key) in cases {
             let driver = QRTestDriver()
@@ -145,7 +145,7 @@ final class QRModelTests: XCTestCase {
         let model = driver.model()
         await model.appear()
         model.select(.scan)
-        driver.now = driver.now.addingTimeInterval(120)
+        driver.elapsed += 120
         await model.tick()
         XCTAssertNil(model.code)
         XCTAssertEqual(driver.issues, 1)
@@ -194,13 +194,100 @@ final class QRModelTests: XCTestCase {
     }
 
     @MainActor
-    func testAlreadyExpiredIssuanceIsNeverDisplayed() async {
-        let driver = QRTestDriver()
-        let model = driver.model()
-        driver.validity = 0
+    func testCodeLives120SecondsFromArrivalWithDeviceTenMinutesFast() async throws {
+        let driver = QRTestDriver(); let model = driver.model()
+        driver.deviceTime = driver.now.addingTimeInterval(600)
+        driver.duringIssue = { driver.elapsed += 20 }
         await model.appear()
+        let first = try XCTUnwrap(model.code)
+        XCTAssertLessThan(first.expiresAt, driver.deviceTime)
+        XCTAssertEqual(model.remainingSeconds, 120)
+        driver.deviceTime = driver.deviceTime.addingTimeInterval(86_400)
+        driver.elapsed += 119.5; await model.tick()
+        XCTAssertEqual(model.remainingSeconds, 1)
+        XCTAssertEqual(driver.issues, 1)
+        driver.elapsed += 0.5; await model.tick()
+        XCTAssertEqual(driver.issues, 2)
+        XCTAssertEqual(model.remainingSeconds, 120)
+        await model.tick(); await model.tick()
+        XCTAssertEqual(driver.issues, 2)
+    }
+
+    @MainActor
+    func testAutomaticExpiryFailureIsAttemptedOnceAndRateLimitSurvivesSegmentChanges() async {
+        let driver = QRTestDriver(); let model = driver.model()
+        await model.appear()
+        driver.issueFailure = .rateLimited
+        driver.elapsed += 120; await model.tick()
         XCTAssertNil(model.code)
-        XCTAssertEqual(model.error, .expired)
+        XCTAssertEqual(model.error, .rateLimited)
+        XCTAssertEqual(SessionStrings.error(.rateLimited), .rateLimited)
+        XCTAssertTrue(model.automaticReplacementStopped)
+        XCTAssertEqual(driver.issues, 2)
+        await model.tick(); await model.tick()
+        model.select(.scan); model.select(.show); await model.tick()
+        XCTAssertEqual(model.error, .rateLimited)
+        XCTAssertEqual(driver.issues, 2)
+        driver.issueFailure = nil
+        await model.refreshCode()
+        XCTAssertEqual(driver.issues, 3)
+        XCTAssertFalse(model.automaticReplacementStopped)
+        driver.elapsed += 120; await model.tick()
+        XCTAssertEqual(driver.issues, 4)
+        await model.tick()
+        XCTAssertEqual(driver.issues, 4)
+    }
+
+    @MainActor
+    func testExpiryWhileRedemptionIsPendingDefersRatherThanLosesAutomaticReplacement() async throws {
+        let driver = QRTestDriver(); let model = driver.model()
+        await model.appear(); model.select(.scan)
+        driver.duringRedeem = {
+            driver.elapsed += 120
+            model.select(.show)
+            await model.tick()
+            XCTAssertEqual(driver.issues, 1)
+        }
+        driver.redeemFailure = .network
+        let peer = try XCTUnwrap(QRPayload(token: String(repeating: "a", count: 32)))
+        await model.scan(peer.text)
+        XCTAssertNil(model.code)
+        model.select(.show); await model.tick()
+        XCTAssertEqual(driver.issues, 2)
+        XCTAssertEqual(model.remainingSeconds, 120)
+    }
+
+    @MainActor
+    func testNotFoundUsesOnlyNeutralUnavailableWording() async throws {
+        let driver = QRTestDriver(); let model = driver.model()
+        await model.appear(); model.select(.scan)
+        driver.redeemFailure = .notFound
+        let peer = try XCTUnwrap(QRPayload(token: String(repeating: "a", count: 32)))
+        await model.scan(peer.text)
+        XCTAssertEqual(model.error, .notFound)
+        let key = SessionStrings.error(.notFound)
+        XCTAssertEqual(SessionStrings.localized(key, language: "en"), "This code is unavailable. Refresh the code.")
+        XCTAssertEqual(SessionStrings.localized(key, language: "ja"), "このコードは利用できません。コードを更新してください。")
+        await model.retry()
+        XCTAssertEqual(driver.redeemed.count, 1)
+        XCTAssertTrue(driver.opened.isEmpty)
+    }
+
+    @MainActor
+    func testDiscoveryPrerequisiteNavigatesForIssueAndRedeem() async throws {
+        let driver = QRTestDriver(); let model = driver.model()
+        driver.issueFailure = .prerequisiteMissing(details: ["discovery"])
+        await model.appear()
+        XCTAssertEqual(driver.discoveryRoutes, 1)
+        XCTAssertNil(model.code)
+        await model.tick()
+        XCTAssertEqual(driver.issues, 1)
+        model.select(.scan)
+        driver.redeemFailure = .prerequisiteMissing(details: ["discovery"])
+        let peer = try XCTUnwrap(QRPayload(token: String(repeating: "a", count: 32)))
+        await model.scan(peer.text)
+        XCTAssertEqual(driver.discoveryRoutes, 2)
+        XCTAssertTrue(driver.opened.isEmpty)
     }
 
     @MainActor
@@ -226,6 +313,9 @@ final class QRModelTests: XCTestCase {
 private final class QRTestDriver {
     var now = Date(timeIntervalSince1970: 1000)
     var validity: TimeInterval = 120
+    var elapsed: TimeInterval = 0
+    var deviceTime = Date(timeIntervalSince1970: 1600)
+    var discoveryRoutes = 0
     var issues = 0
     var cancelled: [QRCode] = []
     var redeemed: [QRPayload] = []
@@ -255,6 +345,8 @@ private final class QRTestDriver {
             if let failure = self.redeemFailure { throw failure }
             return "confirmed-encounter"
         }), navigation: QRNavigationActions(openEncounter: { self.opened.append($0) },
-                                            openIOSSettings: {}, close: {}), now: { self.now })
+                                            openIOSSettings: {}, close: {},
+                                            openDiscoveryOff: { self.discoveryRoutes += 1 }),
+                monotonicNow: { self.elapsed })
     }
 }

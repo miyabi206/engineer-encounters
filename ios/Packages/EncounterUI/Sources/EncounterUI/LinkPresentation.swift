@@ -8,10 +8,13 @@ public enum LinkSource: String, CaseIterable, Sendable {
 public struct OwnLinkState: Identifiable, Equatable, Sendable {
     public let id: String
     public let source: LinkSource
-    public var sourceLabel: String
+    public let sourceItemID: String?
+    public var repositoryID: String? { sourceItemID }
+    public let repositoryName: String
+    public let sourceLabel: String
     public var title: String
     public var description: String
-    public var mainLanguage: String
+    public var mainLanguage: String?
     public var tags: [String]
     public var openingText: String
     public let url: URL
@@ -20,9 +23,12 @@ public struct OwnLinkState: Identifiable, Equatable, Sendable {
     public var displayOrder: Int
 
     public init(id: String, source: LinkSource, sourceLabel: String, title: String,
-                description: String = "", mainLanguage: String = "", tags: [String] = [],
+                description: String = "", mainLanguage: String? = nil, tags: [String] = [],
                 openingText: String = "", url: URL, visibility: VisibilityLevel? = nil,
-                verified: Bool = false, displayOrder: Int = 0) {
+                verified: Bool = false, displayOrder: Int = 0, sourceItemID: String? = nil,
+                repositoryName: String? = nil) {
+        self.sourceItemID = sourceItemID
+        self.repositoryName = repositoryName ?? url.lastPathComponent
         self.id = id; self.source = source; self.sourceLabel = sourceLabel; self.title = title
         self.description = description; self.mainLanguage = mainLanguage; self.tags = tags
         self.openingText = openingText; self.url = url; self.visibility = visibility
@@ -31,15 +37,19 @@ public struct OwnLinkState: Identifiable, Equatable, Sendable {
 }
 
 public struct GitHubRepositoryChoice: Identifiable, Equatable, Sendable {
-    public let id: String
-    public let ownerHandle: String
-    public let name: String
+    public let repositoryID: String
+    public var id: String { repositoryID }
+    public let repositoryName: String
+    public let title: String
+    public let description: String
+    public let mainLanguage: String?
+    public let tags: [String]
     public let url: URL
-    public let isPublic: Bool
 
-    public init(id: String, ownerHandle: String, name: String, url: URL, isPublic: Bool = true) {
-        self.id = id; self.ownerHandle = ownerHandle; self.name = name; self.url = url
-        self.isPublic = isPublic
+    public init(repositoryID: String, repositoryName: String, title: String,
+                description: String = "", mainLanguage: String? = nil, tags: [String] = [], url: URL) {
+        self.repositoryID = repositoryID; self.repositoryName = repositoryName; self.title = title
+        self.description = description; self.mainLanguage = mainLanguage; self.tags = tags; self.url = url
     }
 }
 
@@ -52,61 +62,59 @@ public struct GitHubRepositoryPage: Equatable, Sendable {
 }
 
 public enum GitHubConnectionState: Equatable, Sendable {
-    case notConnected, connecting, connected(handle: String), failed
+    case notConnected, connecting, connected(handle: String?), failed
+    public var isConnected: Bool {
+        if case .connected = self { return true }
+        return false
+    }
     public var handle: String? {
         if case .connected(let handle) = self { return handle }
         return nil
     }
 }
 
-/// Created only from a successful reader response or an existing owned link.
-/// The preview token, original URL, source identity and verification cannot be edited.
+/// Identity and source metadata are server supplied; only approved fields are editable.
 public struct LinkPreviewDraft: Equatable, Sendable {
-    public let previewID: String
-    public let existingLinkID: String?
+    public let repositoryID: String
+    public var sourceItemID: String { repositoryID }
+    public let repositoryName: String
+    public private(set) var existingLinkID: String?
     public let source: LinkSource
     public let url: URL
     public let verified: Bool
-    public var sourceLabel: String
+    public let sourceLabel: String
+    public private(set) var replaceExisting = false
     public var title: String
     public var description: String
-    public var mainLanguage: String
+    public var mainLanguage: String?
     public var tags: [String]
     public var openingText: String
     public var visibility: VisibilityLevel?
 
-    public init(previewID: String, source: LinkSource, url: URL, verified: Bool,
+    public init(repositoryID: String, repositoryName: String, source: LinkSource, url: URL, verified: Bool,
                 sourceLabel: String, title: String, description: String = "",
-                mainLanguage: String = "", tags: [String] = [], openingText: String = "") {
-        self.previewID = previewID; existingLinkID = nil; self.source = source
-        self.url = url; self.verified = verified; self.sourceLabel = sourceLabel; self.title = title
-        self.description = description; self.mainLanguage = mainLanguage; self.tags = tags
-        self.openingText = openingText; visibility = nil
+                mainLanguage: String? = nil, tags: [String] = [], openingText: String = "") {
+        self.repositoryID = repositoryID; self.repositoryName = repositoryName
+        existingLinkID = nil; self.source = source; self.url = url; self.verified = verified
+        self.sourceLabel = sourceLabel; self.title = title; self.description = description
+        self.mainLanguage = mainLanguage; self.tags = tags; self.openingText = openingText; visibility = nil
     }
 
     public init(link: OwnLinkState) {
-        previewID = link.id; existingLinkID = link.id; source = link.source; url = link.url
-        verified = link.verified; sourceLabel = link.sourceLabel; title = link.title
-        description = link.description; mainLanguage = link.mainLanguage; tags = link.tags
-        openingText = link.openingText; visibility = link.visibility
+        repositoryID = link.sourceItemID ?? ""; repositoryName = link.repositoryName
+        existingLinkID = link.id; source = link.source; url = link.url; verified = link.verified
+        sourceLabel = link.sourceLabel; title = link.title; description = link.description
+        mainLanguage = link.mainLanguage; tags = link.tags; openingText = link.openingText
+        visibility = link.visibility
     }
 
-    /// Accept new reader values only after explicit confirmation. Keep owner-only visibility
-    /// and the existing link identity; verification comes from the fresh reader response.
+    /// Acceptance preserves the owned row and visibility while adopting the canonical URL/name.
     public func replacingMetadata(with fresh: Self) -> Self {
-        var result = self
-        result.sourceLabel = fresh.sourceLabel; result.title = fresh.title
-        result.description = fresh.description; result.mainLanguage = fresh.mainLanguage
-        result.tags = fresh.tags; result.openingText = fresh.openingText
-        return Self(identity: result, fresh: fresh)
-    }
-
-    private init(identity: Self, fresh: Self) {
-        previewID = fresh.previewID; existingLinkID = identity.existingLinkID
-        source = identity.source; url = identity.url; verified = fresh.verified
-        sourceLabel = identity.sourceLabel; title = identity.title; description = identity.description
-        mainLanguage = identity.mainLanguage; tags = identity.tags; openingText = identity.openingText
-        visibility = identity.visibility
+        var result = fresh
+        result.existingLinkID = existingLinkID
+        result.visibility = visibility
+        result.replaceExisting = true
+        return result
     }
 }
 
@@ -129,7 +137,7 @@ public enum LinkValidation {
         if !ProfileValidation.validRequiredText(draft.title, limit: titleLimit) { result.append(.title) }
         if count(draft.description) > descriptionLimit { result.append(.description) }
         if count(draft.openingText) > openingTextLimit { result.append(.openingText) }
-        if count(draft.mainLanguage) > languageLimit { result.append(.mainLanguage) }
+        if count(draft.mainLanguage ?? "") > languageLimit { result.append(.mainLanguage) }
         if draft.tags.count > tagLimit || draft.tags.contains(where: {
             !ProfileValidation.validRequiredText($0, limit: tagLengthLimit)
         }) { result.append(.tags) }
@@ -151,14 +159,11 @@ public struct GitHubRepositoryPaging: Equatable, Sendable {
     public private(set) var repositories: [GitHubRepositoryChoice] = []
     public init() {}
     public var previousPage: Int? { page > 1 ? page - 1 : nil }
-    public mutating func receive(_ result: GitHubRepositoryPage, page: Int, handle: String) {
+    public mutating func receive(_ result: GitHubRepositoryPage, page: Int) {
         guard page > 0 else { return }
         self.page = page
         nextPage = result.nextPage.flatMap { $0 > page ? $0 : nil }
-        var seen: Set<String> = []
-        repositories = result.repositories.filter {
-            $0.isPublic && $0.ownerHandle.caseInsensitiveCompare(handle) == .orderedSame && seen.insert($0.id).inserted
-        }
+        repositories = result.repositories
     }
 }
 
@@ -170,10 +175,15 @@ public enum FirstLinkStepGate {
 }
 
 public struct LinkActionError: Error, Equatable, Sendable {
-    public enum Code: Sendable { case unavailable, invalidInput, lastLink, limitReached, sourceUnavailable }
+    public enum Code: Sendable { case unavailable, invalidInput, lastLink, limitReached, sourceUnavailable, prerequisiteMissing }
     public let code: Code
     public let fields: [LinkField]
-    public init(code: Code, fields: [LinkField] = []) { self.code = code; self.fields = fields }
+    public let details: [String]
+    public var isLastLink: Bool { code == .lastLink || (code == .prerequisiteMissing && details.contains("link")) }
+    public func requires(_ detail: String) -> Bool { code == .prerequisiteMissing && details.contains(detail) }
+    public init(code: Code, fields: [LinkField] = [], details: [String] = []) {
+        self.code = code; self.fields = fields; self.details = details
+    }
 }
 
 /// Composition supplies all I/O. No credentials, networking or persistence enter this package.
@@ -184,7 +194,7 @@ public struct LinkActions {
     public var connectGitHub: @MainActor () async throws -> GitHubConnectionState
     public var listRepositories: @MainActor (Int) async throws -> GitHubRepositoryPage
     public var previewRepository: @MainActor (GitHubRepositoryChoice) async throws -> LinkPreviewDraft
-    public var saveRepository: @MainActor (LinkPreviewDraft, VisibilityLevel) async throws -> OwnLinkState
+    public var saveRepository: @MainActor (LinkPreviewDraft, VisibilityLevel, Bool) async throws -> OwnLinkState
     public var updateLink: @MainActor (String, LinkPreviewDraft, VisibilityLevel) async throws -> OwnLinkState
     public var deleteLink: @MainActor (String) async throws -> [OwnLinkState]
     public var reorderLinks: @MainActor ([String]) async throws -> [OwnLinkState]
@@ -195,7 +205,7 @@ public struct LinkActions {
                 connectGitHub: @escaping @MainActor () async throws -> GitHubConnectionState,
                 listRepositories: @escaping @MainActor (Int) async throws -> GitHubRepositoryPage,
                 previewRepository: @escaping @MainActor (GitHubRepositoryChoice) async throws -> LinkPreviewDraft,
-                saveRepository: @escaping @MainActor (LinkPreviewDraft, VisibilityLevel) async throws -> OwnLinkState,
+                saveRepository: @escaping @MainActor (LinkPreviewDraft, VisibilityLevel, Bool) async throws -> OwnLinkState,
                 updateLink: @escaping @MainActor (String, LinkPreviewDraft, VisibilityLevel) async throws -> OwnLinkState,
                 deleteLink: @escaping @MainActor (String) async throws -> [OwnLinkState],
                 reorderLinks: @escaping @MainActor ([String]) async throws -> [OwnLinkState],

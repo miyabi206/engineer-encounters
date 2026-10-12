@@ -70,3 +70,13 @@
 "page" = "Page %ld";
 "moveUp" = "Move up";
 "moveDown" = "Move down";
+"connectedWithoutHandle" = "GitHub connected";
+"readerFailure" = "Could not read GitHub. Try again.";
+"retryLinks" = "Retry loading links";
+"retryConnection" = "Retry checking connection";
+"retryConnect" = "Retry connecting GitHub";
+"retryRepositories" = "Retry loading repositories";
+"retryPreview" = "Retry preview";
+"retrySave" = "Retry saving link";
+"retryReorder" = "Retry reordering links";
+"retryRefresh" = "Retry refreshing preview";

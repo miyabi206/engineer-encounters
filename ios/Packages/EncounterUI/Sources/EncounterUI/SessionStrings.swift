@@ -4,7 +4,7 @@ enum SessionString: String, CaseIterable {
     case session, active, timeRemaining, twoHours, bothInSession, oneInSession, stop, noEncounters
     case ended, startOffline, stopPending, done, start, retry, back, loading, startFailed, refreshFailed
     case revealedEncounters, qrExchange, showCode, scanCode, refreshCode, allowCamera, confirming
-    case expired, alreadyUsed, validity, invalidatesPrevious, selfScan, qrNetwork, unreadable, confirmed
+    case codeUnavailable, rateLimited, discoveryOff, validity, invalidatesPrevious, selfScan, qrNetwork, unreadable, confirmed
     case openSettings, cameraDenied, cameraRestricted, cameraUnavailable, qrImage, cameraPreview, codeMode
     case remainingFormat
 }
@@ -27,9 +27,10 @@ enum SessionStrings {
     static func error(_ error: QRActionError) -> SessionString {
         switch error {
         case .selfScan: .selfScan
-        case .expired: .expired
-        case .alreadyUsed: .alreadyUsed
-        case .unknownCode, .replaced: .unreadable
+        case .notFound: .codeUnavailable
+        case .unknownCode: .unreadable
+        case .rateLimited: .rateLimited
+        case .prerequisiteMissing: .discoveryOff
         case .network: .qrNetwork
         case .cameraUnavailable: .cameraUnavailable
         }

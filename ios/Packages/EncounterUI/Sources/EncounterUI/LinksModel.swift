@@ -12,7 +12,9 @@ public final class LinksModel: ObservableObject {
     @Published public private(set) var links: [OwnLinkState]
     @Published public private(set) var hasLoadedLinks: Bool
     @Published public private(set) var route: LinkRoute = .list
-    @Published public var selectedSource: LinkSource?
+    @Published public var selectedSource: LinkSource? {
+        didSet { if selectedSource != oldValue { clearRetry() } }
+    }
     @Published public private(set) var connection: GitHubConnectionState = .notConnected
     @Published public private(set) var hasLoadedConnection = false
     @Published public private(set) var connectionCancelled = false
@@ -23,13 +25,11 @@ public final class LinksModel: ObservableObject {
     @Published public private(set) var failedOperation: LinkOperation?
     @Published public private(set) var replacement: LinkPreviewDraft?
     @Published public var draft: LinkPreviewDraft? {
-        didSet { if draft != oldValue { error = nil; replacement = nil } }
+        didSet { if draft != oldValue { error = nil; replacement = nil; failedOperation = nil } }
     }
     @Published public var discoveryOn: Bool {
         didSet {
-            if oldValue && !discoveryOn && error?.code == .lastLink {
-                error = nil; failedOperation = nil
-            }
+            if discoveryOn != oldValue { clearRetry() }
         }
     }
 
@@ -50,7 +50,7 @@ public final class LinksModel: ObservableObject {
         return LinkValidation.canSave(draft, linkCount: links.count)
     }
     public var canDelete: Bool {
-        !isBusy && draft?.existingLinkID != nil && error?.code != .lastLink &&
+        !isBusy && draft?.existingLinkID != nil && error?.isLastLink != true &&
             LinkValidation.canDelete(count: links.count, discoveryOn: discoveryOn)
     }
     public var hasEdits: Bool { draft != originalDraft }
@@ -58,7 +58,7 @@ public final class LinksModel: ObservableObject {
         guard !isBusy else { return false }
         switch failedOperation {
         case .save: return canSave
-        case .delete: return canDelete
+        case .delete: return false
         case nil: return false
         default: return true
         }
@@ -68,6 +68,7 @@ public final class LinksModel: ObservableObject {
         guard canAdd else { return }
         draft = nil; originalDraft = nil; error = nil; failedOperation = nil
         selectedSource = nil; route = .add
+        resetConnection()
     }
     public func beginEdit(_ link: OwnLinkState) {
         guard !isBusy, links.contains(where: { $0.id == link.id }) else { return }
@@ -106,7 +107,7 @@ public final class LinksModel: ObservableObject {
             self.connection = loaded; self.hasLoadedConnection = true
             if loaded == .failed { throw LinkActionError(code: .unavailable) }
         }
-        if error == nil && connection.handle != nil { await loadRepositories(page: 1) }
+        if error == nil && connection.isConnected { await loadRepositories(page: 1) }
     }
     public func connectGitHub() async {
         guard !isBusy else { return }
@@ -122,27 +123,26 @@ public final class LinksModel: ObservableObject {
         }
         if error != nil { connection = .failed }
         else if connection == .connecting { connection = .notConnected; connectionCancelled = true }
-        if connection.handle != nil { await loadRepositories(page: 1) }
+        if connection.isConnected { await loadRepositories(page: 1) }
     }
     public func loadRepositories(page: Int) async {
-        guard !isBusy, page > 0, let handle = connection.handle else { return }
+        guard !isBusy, (1...1000).contains(page), connection.isConnected else { return }
         paging = GitHubRepositoryPaging(); hasLoadedRepositories = false
         await perform(.repositories(page)) {
             let result = try await self.actions.listRepositories(page)
             try Task.checkCancellation()
-            self.paging.receive(result, page: page, handle: handle)
+            self.paging.receive(result, page: page)
             self.hasLoadedRepositories = true
         }
     }
     public func preview(_ repository: GitHubRepositoryChoice) async {
-        guard canAdd, let handle = connection.handle, repository.isPublic,
-              repository.ownerHandle.caseInsensitiveCompare(handle) == .orderedSame,
+        guard canAdd, connection.isConnected,
               paging.repositories.contains(repository) else { return }
         await perform(.preview(repository)) {
             var preview = try await self.actions.previewRepository(repository)
             try Task.checkCancellation()
             guard preview.existingLinkID == nil, preview.source == .github,
-                  !preview.previewID.isEmpty else { throw LinkActionError(code: .invalidInput) }
+                  preview.repositoryID == repository.repositoryID else { throw LinkActionError(code: .invalidInput) }
             preview.visibility = nil
             self.draft = preview; self.originalDraft = preview; self.route = .edit
         }
@@ -151,10 +151,10 @@ public final class LinksModel: ObservableObject {
         guard canSave, let draft, let visibility = draft.visibility else { return false }
         return await perform(.save) {
             let saved: OwnLinkState
-            if let id = draft.existingLinkID {
+            if let id = draft.existingLinkID, !draft.replaceExisting {
                 saved = try await self.actions.updateLink(id, draft, visibility)
             } else {
-                saved = try await self.actions.saveRepository(draft, visibility)
+                saved = try await self.actions.saveRepository(draft, visibility, draft.replaceExisting)
             }
             // Confirmed writes remain acknowledged even if the task was cancelled meanwhile.
             self.receive(self.links.filter { $0.id != saved.id } + [saved])
@@ -187,7 +187,7 @@ public final class LinksModel: ObservableObject {
         await perform(.refresh) {
             let fresh = try await self.actions.refreshPreview(draft)
             try Task.checkCancellation()
-            guard fresh.source == draft.source, fresh.url == draft.url else {
+            guard fresh.source == draft.source, fresh.repositoryID == draft.sourceItemID else {
                 throw LinkActionError(code: .invalidInput)
             }
             self.replacement = fresh
@@ -198,21 +198,42 @@ public final class LinksModel: ObservableObject {
         self.draft = draft.replacingMetadata(with: fresh)
         replacement = nil
     }
-    public func cancelReplacement() { replacement = nil }
+    public func cancelReplacement() { replacement = nil; clearRetry() }
+
+    public func removeTag(at index: Int) {
+        guard !isBusy, let tags = draft?.tags, tags.indices.contains(index) else { return }
+        draft?.tags.remove(at: index)
+    }
+
+    public func returnToEditor() {
+        guard !isBusy, draft != nil, connection.isConnected else { return }
+        clearRetry(); route = .edit
+    }
+
+    private func clearRetry() { error = nil; failedOperation = nil; replacement = nil }
+    private func resetConnection() {
+        connection = .notConnected; hasLoadedConnection = false; connectionCancelled = false
+        paging = GitHubRepositoryPaging(); hasLoadedRepositories = false
+    }
 
     public func retry() async {
-        guard canRetry else { return }
-        switch failedOperation {
+        guard let operation = failedOperation else { return }
+        await retry(operation)
+    }
+
+    /// Bind the button to its rendered failure; an obsolete button cannot run another action.
+    public func retry(_ operation: LinkOperation) async {
+        guard canRetry, failedOperation == operation else { return }
+        switch operation {
         case .loadLinks: await loadLinks()
         case .loadConnection: await loadConnection()
         case .connect: await connectGitHub()
         case .repositories(let page): await loadRepositories(page: page)
         case .preview(let repository): await preview(repository)
         case .save: _ = await save()
-        case .delete: _ = await deleteConfirmed()
+        case .delete: break
         case .reorder(let ids): await reorder(ids: ids)
         case .refresh: await refresh()
-        case nil: break
         }
     }
 
@@ -225,15 +246,23 @@ public final class LinksModel: ObservableObject {
     @discardableResult
     private func perform(_ operation: LinkOperation, action: @MainActor () async throws -> Void) async -> Bool {
         guard !isBusy else { return false }
-        isBusy = true; error = nil; failedOperation = operation
+        isBusy = true; error = nil; replacement = nil; failedOperation = operation
         defer { isBusy = false }
         do {
             try await action(); failedOperation = nil; return true
         } catch is CancellationError {
             return false
         } catch {
-            self.error = error as? LinkActionError ?? LinkActionError(code: .unavailable)
-            if self.error?.code == .lastLink { discoveryOn = true }
+            let failure = error as? LinkActionError ?? LinkActionError(code: .unavailable)
+            if failure.isLastLink { discoveryOn = true; failedOperation = nil }
+            self.error = failure
+            if self.error?.requires("refresh_confirmation") == true {
+                replacement = draft; failedOperation = nil
+            } else if self.error?.requires("github") == true {
+                resetConnection(); selectedSource = .github; route = .add
+                self.error = error as? LinkActionError
+                failedOperation = nil
+            }
             return false
         }
     }

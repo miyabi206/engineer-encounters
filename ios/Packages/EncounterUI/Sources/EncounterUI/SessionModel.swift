@@ -7,33 +7,60 @@ public final class SessionModel: ObservableObject {
     @Published public private(set) var remainingSeconds = 0
     @Published public private(set) var refreshFailed = false
     private let actions: SessionActions
-    private let now: @MainActor () -> Date
+    private let monotonicNow: @MainActor () -> TimeInterval
+    private let openDiscoveryOff: @MainActor () -> Void
+    private var acknowledgedAt: TimeInterval
+    private var serverTime: Date
     private var revision = 0
     private var refreshing = false
     private var syncingStop = false
 
-    public init(state: SessionState = .none, actions: SessionActions,
-                now: @escaping @MainActor () -> Date = { Date() }) {
-        self.actions = actions; self.now = now
-        lifecycle = SessionLifecycle(state: state, now: now())
+    public init(state: SessionState = .none, actions: SessionActions, navigation: SessionNavigationActions,
+                monotonicNow: @escaping @MainActor () -> TimeInterval = { SessionMonotonicClock.now() }) {
+        self.actions = actions; self.monotonicNow = monotonicNow; self.openDiscoveryOff = navigation.openDiscoveryOff
+        acknowledgedAt = monotonicNow()
+        if case let .active(session) = state { serverTime = session.serverTime }
+        else { serverTime = Date(timeIntervalSince1970: 0) }
+        lifecycle = SessionLifecycle(state: state, now: serverTime)
         tick()
     }
 
     public var state: SessionState { lifecycle.state }
     public var isActive: Bool { lifecycle.isActive }
 
+    private var estimatedServerTime: Date {
+        serverTime.addingTimeInterval(max(0, monotonicNow() - acknowledgedAt))
+    }
+    private func anchor(_ response: SessionState) {
+        if case let .active(session) = response {
+            serverTime = session.serverTime; acknowledgedAt = monotonicNow()
+        }
+    }
+    private func routePrerequisite(_ error: Error) {
+        if case let .prerequisiteMissing(details) = error as? SessionActionError, details.contains("discovery") {
+            openDiscoveryOff()
+        }
+    }
+
     public func tick() {
-        lifecycle.expire(now: now())
-        if case let .active(end) = state {
-            remainingSeconds = SessionCountdown.seconds(until: end, now: now())
+        let now = estimatedServerTime
+        lifecycle.expire(now: now)
+        if case let .active(session) = state {
+            remainingSeconds = SessionCountdown.seconds(until: session.expiresAt, now: now)
         } else { remainingSeconds = 0 }
     }
 
     public func start() async {
         guard lifecycle.beginStart() else { return }
         revision += 1; refreshFailed = false
-        do { lifecycle.acknowledgeStart(endsAt: try await actions.startSession(), now: now()) }
-        catch { lifecycle.failStart(offline: (error as? SessionActionError) == .offline) }
+        do {
+            let session = try await actions.startSession()
+            anchor(.active(session))
+            lifecycle.acknowledgeStart(session, now: estimatedServerTime)
+        } catch {
+            lifecycle.failStart(offline: (error as? SessionActionError) == .offline)
+            routePrerequisite(error)
+        }
         tick()
     }
 
@@ -56,16 +83,16 @@ public final class SessionModel: ObservableObject {
     public func refresh() async {
         tick()
         if lifecycle.stopPending { await synchronizeStop(); return }
-        guard !refreshing, !lifecycle.hasEnded, state != .starting else { return }
+        guard !refreshing, state != .starting else { return }
         refreshing = true
         let requestRevision = revision
         defer { refreshing = false }
         do {
             let response = try await actions.refreshSession()
             guard revision == requestRevision else { return }
-            refreshFailed = false; lifecycle.receive(response, now: now()); tick()
+            refreshFailed = false; anchor(response); lifecycle.receive(response, now: estimatedServerTime); tick()
         } catch {
-            if revision == requestRevision { refreshFailed = true }
+            if revision == requestRevision { refreshFailed = true; routePrerequisite(error) }
         }
     }
 

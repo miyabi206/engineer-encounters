@@ -17,7 +17,7 @@ final class SessionModelTests: XCTestCase {
         XCTAssertEqual(model.remainingSeconds, 7200)
         await model.start()
         XCTAssertEqual(driver.starts, 1)
-        driver.now = driver.now.addingTimeInterval(7200)
+        driver.elapsed += 7200
         model.tick()
         XCTAssertEqual(model.remainingSeconds, 0)
         XCTAssertTrue(model.lifecycle.hasEnded)
@@ -60,7 +60,8 @@ final class SessionModelTests: XCTestCase {
         XCTAssertFalse(model.lifecycle.stopPending)
         XCTAssertFalse(model.isActive)
         await model.refresh()
-        XCTAssertEqual(driver.refreshes, 0)
+        XCTAssertEqual(driver.refreshes, 1)
+        XCTAssertTrue(model.isActive)
         await model.start()
         XCTAssertTrue(model.isActive)
     }
@@ -88,11 +89,64 @@ final class SessionModelTests: XCTestCase {
         await model.retry()
         XCTAssertFalse(model.refreshFailed)
         XCTAssertEqual(driver.refreshes, 2)
-        driver.now = driver.end
+        driver.elapsed = 7200
         await model.refresh()
         XCTAssertTrue(model.lifecycle.hasEnded)
         XCTAssertFalse(model.isActive)
+        XCTAssertEqual(driver.refreshes, 3)
+    }
+
+    @MainActor
+    func testCountdownUsesServerTimeAndMonotonicElapsedWithDeviceTenMinutesFast() async {
+        let driver = SessionTestDriver(); let model = driver.model()
+        XCTAssertEqual(driver.deviceTime.timeIntervalSince(driver.serverTime), 600)
+        await model.start()
+        XCTAssertEqual(model.remainingSeconds, 7200)
+        driver.deviceTime = driver.deviceTime.addingTimeInterval(86_400)
+        driver.elapsed = 119.25; model.tick()
+        XCTAssertEqual(model.remainingSeconds, 7081)
+        driver.deviceTime = driver.deviceTime.addingTimeInterval(-172_800)
+        driver.elapsed = 7200; model.tick()
+        XCTAssertFalse(model.isActive)
+        XCTAssertEqual(model.remainingSeconds, 0)
+    }
+
+    @MainActor
+    func testFreshActiveAcknowledgementReplacesEndedStateOnceNoStopIsPending() async {
+        let driver = SessionTestDriver(); let model = driver.model(active: true)
+        driver.elapsed = 7200; model.tick()
+        XCTAssertTrue(model.lifecycle.hasEnded)
+        driver.freshSession = SessionAcknowledgement(sessionID: "fresh", startsAt: driver.end,
+            expiresAt: driver.end.addingTimeInterval(7200), serverTime: driver.end)
+        await model.refresh()
+        XCTAssertTrue(model.isActive)
+        XCTAssertFalse(model.lifecycle.hasEnded)
+        XCTAssertEqual(model.remainingSeconds, 7200)
+        XCTAssertTrue(model.stopLocally())
+        driver.failure = .offline
+        await model.refresh()
+        XCTAssertFalse(model.isActive)
+        XCTAssertEqual(driver.refreshes, 1)
+        driver.failure = nil
+        await model.refresh() // Uploads the pending stop before another get is permitted.
+        XCTAssertFalse(model.isActive)
+        await model.refresh()
+        XCTAssertTrue(model.isActive)
         XCTAssertEqual(driver.refreshes, 2)
+    }
+
+    @MainActor
+    func testDiscoveryPrerequisiteNavigatesForStartAndRefresh() async {
+        let driver = SessionTestDriver(); let model = driver.model()
+        driver.failure = .prerequisiteMissing(details: ["discovery"])
+        await model.start()
+        XCTAssertEqual(driver.discoveryRoutes, 1)
+        XCTAssertFalse(model.isActive)
+        await model.refresh()
+        XCTAssertEqual(driver.discoveryRoutes, 2)
+        driver.failure = .prerequisiteMissing(details: ["profile"])
+        await model.start()
+        XCTAssertEqual(driver.discoveryRoutes, 2)
     }
 
     @MainActor
@@ -101,7 +155,7 @@ final class SessionModelTests: XCTestCase {
         let model = driver.model()
         await model.refresh()
         XCTAssertTrue(model.isActive)
-        let pending = SessionModel(state: .stopping, actions: driver.actions, now: { driver.now })
+        let pending = SessionModel(state: .stopping, actions: driver.actions, navigation: driver.navigation, monotonicNow: { driver.elapsed })
         XCTAssertFalse(pending.isActive)
         await pending.refresh()
         XCTAssertEqual(driver.stops, 1)
@@ -111,12 +165,20 @@ final class SessionModelTests: XCTestCase {
 
 @MainActor
 private final class SessionTestDriver {
-    var now = Date(timeIntervalSince1970: 10_000)
-    var end: Date { now.addingTimeInterval(7200) }
+    let serverTime = Date(timeIntervalSince1970: 10_000)
+    var elapsed: TimeInterval = 0
+    var deviceTime = Date(timeIntervalSince1970: 10_600)
+    var end: Date { serverTime.addingTimeInterval(7200) }
+    var acknowledgement: SessionAcknowledgement {
+        SessionAcknowledgement(sessionID: "session", startsAt: serverTime, expiresAt: end,
+                               serverTime: serverTime.addingTimeInterval(elapsed))
+    }
     var failure: SessionActionError?
     var starts = 0
     var stops = 0
     var refreshes = 0
+    var discoveryRoutes = 0
+    var freshSession: SessionAcknowledgement?
     var duringStart: (@MainActor () async -> Void)?
     var duringRefresh: (@MainActor () -> Void)?
 
@@ -125,7 +187,7 @@ private final class SessionTestDriver {
             self.starts += 1
             await self.duringStart?()
             if let failure = self.failure { throw failure }
-            return self.end
+            return self.freshSession ?? self.acknowledgement
         }, stopSession: {
             self.stops += 1
             if let failure = self.failure { throw failure }
@@ -133,11 +195,18 @@ private final class SessionTestDriver {
             self.refreshes += 1
             self.duringRefresh?()
             if let failure = self.failure { throw failure }
-            return .active(endsAt: self.end)
+            if let freshSession = self.freshSession { return .active(freshSession) }
+            return self.elapsed < 7200 ? .active(self.acknowledgement) : .none
         })
     }
 
+    var navigation: SessionNavigationActions {
+        SessionNavigationActions(openQR: {}, openEncounter: { _ in }, close: {},
+                                 openDiscoveryOff: { self.discoveryRoutes += 1 })
+    }
+
     func model(active: Bool = false) -> SessionModel {
-        SessionModel(state: active ? .active(endsAt: end) : .none, actions: actions, now: { self.now })
+        SessionModel(state: active ? .active(acknowledgement) : .none, actions: actions, navigation: navigation,
+                     monotonicNow: { self.elapsed })
     }
 }

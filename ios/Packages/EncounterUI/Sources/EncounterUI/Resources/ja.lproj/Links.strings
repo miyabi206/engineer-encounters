@@ -70,3 +70,13 @@
 "page" = "%ldページ";
 "moveUp" = "上へ移動";
 "moveDown" = "下へ移動";
+"connectedWithoutHandle" = "GitHubに接続済みです";
+"readerFailure" = "GitHubを読み込めませんでした。もう一度お試しください。";
+"retryLinks" = "リンクの読み込みを再試行";
+"retryConnection" = "接続の確認を再試行";
+"retryConnect" = "GitHubへの接続を再試行";
+"retryRepositories" = "リポジトリの読み込みを再試行";
+"retryPreview" = "プレビューを再試行";
+"retrySave" = "リンクの保存を再試行";
+"retryReorder" = "リンクの並べ替えを再試行";
+"retryRefresh" = "プレビューの更新を再試行";

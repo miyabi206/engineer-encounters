@@ -11,10 +11,26 @@ enum LinkString: String, CaseIterable {
     case connected, connectionFailed, connectionCancelled, notAvailable, chooseSource, saveError, refreshError
     case deleteError, reorderError, invalidField, requiredTitle, tooLong, addTag, removeTag
     case replace, discard, lastLink, discoverySettings, nextPage, previousPage, page
-    case moveUp, moveDown
+    case moveUp, moveDown, connectedWithoutHandle, readerFailure
+    case retryLinks, retryConnection, retryConnect, retryRepositories, retryPreview, retrySave, retryReorder, retryRefresh
 }
 
 enum LinkStrings {
+    static func retryLabel(_ operation: LinkOperation) -> String {
+        let key: LinkString
+        switch operation {
+        case .loadLinks: key = .retryLinks
+        case .loadConnection: key = .retryConnection
+        case .connect: key = .retryConnect
+        case .repositories: key = .retryRepositories
+        case .preview: key = .retryPreview
+        case .save: key = .retrySave
+        case .reorder: key = .retryReorder
+        case .refresh: key = .retryRefresh
+        case .delete: key = .delete
+        }
+        return text(key)
+    }
     static func text(_ key: LinkString) -> String {
         Bundle.module.localizedString(forKey: key.rawValue, value: nil, table: "Links")
     }

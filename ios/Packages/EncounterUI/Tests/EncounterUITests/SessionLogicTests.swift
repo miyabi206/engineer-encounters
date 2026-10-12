@@ -4,6 +4,10 @@ import XCTest
 final class SessionLogicTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 10_000)
 
+    private func acknowledgement(endsAt: Date) -> SessionAcknowledgement {
+        SessionAcknowledgement(sessionID: "session", startsAt: now, expiresAt: endsAt, serverTime: now)
+    }
+
     func testCountdownRoundsUpAndClampsAtExpiry() {
         XCTAssertEqual(SessionCountdown.seconds(until: now.addingTimeInterval(7200), now: now), 7200)
         XCTAssertEqual(SessionCountdown.seconds(until: now.addingTimeInterval(0.01), now: now), 1)
@@ -19,13 +23,13 @@ final class SessionLogicTests: XCTestCase {
         XCTAssertTrue(state.beginStart())
         XCTAssertEqual(state.state, .starting)
         XCTAssertFalse(state.isActive)
-        state.receive(.active(endsAt: now.addingTimeInterval(1)), now: now)
+        state.receive(.active(acknowledgement(endsAt: now.addingTimeInterval(1))), now: now)
         XCTAssertEqual(state.state, .starting)
         let end = now.addingTimeInterval(7200)
-        state.acknowledgeStart(endsAt: end, now: now)
+        state.acknowledgeStart(acknowledgement(endsAt: end), now: now)
         XCTAssertTrue(state.isActive)
         XCTAssertFalse(state.beginStart())
-        XCTAssertEqual(state.state, .active(endsAt: end))
+        XCTAssertEqual(state.state, .active(acknowledgement(endsAt: end)))
     }
 
     func testOfflineAndFailureRequireExplicitRetry() {
@@ -36,13 +40,13 @@ final class SessionLogicTests: XCTestCase {
         state.beginStart(); state.failStart(offline: false)
         XCTAssertEqual(state.state, .failed)
         XCTAssertTrue(state.beginStart())
-        state.acknowledgeStart(endsAt: now, now: now)
+        state.acknowledgeStart(acknowledgement(endsAt: now), now: now)
         XCTAssertTrue(state.hasEnded)
         XCTAssertFalse(state.isActive)
     }
 
     func testLocalStopStaysEndedOnUploadFailureOrStaleRefresh() {
-        var state = SessionLifecycle(state: .active(endsAt: now.addingTimeInterval(7200)), now: now)
+        var state = SessionLifecycle(state: .active(acknowledgement(endsAt: now.addingTimeInterval(7200))), now: now)
         XCTAssertTrue(state.stopLocally())
         XCTAssertEqual(state.state, .stopping)
         XCTAssertFalse(state.isActive)
@@ -52,25 +56,27 @@ final class SessionLogicTests: XCTestCase {
         XCTAssertEqual(state.state, .none)
         XCTAssertTrue(state.stopPending)
         XCTAssertTrue(state.stopFailed)
-        state.receive(.active(endsAt: now.addingTimeInterval(7200)), now: now)
+        state.receive(.active(acknowledgement(endsAt: now.addingTimeInterval(7200))), now: now)
         XCTAssertFalse(state.isActive)
         state.finishStop(succeeded: true)
         XCTAssertFalse(state.stopPending)
-        state.receive(.active(endsAt: now.addingTimeInterval(7200)), now: now)
-        XCTAssertFalse(state.isActive)
-        XCTAssertTrue(state.beginStart())
+        state.receive(.active(acknowledgement(endsAt: now.addingTimeInterval(7200))), now: now)
+        XCTAssertTrue(state.isActive)
+        XCTAssertFalse(state.hasEnded)
+        XCTAssertFalse(state.beginStart())
     }
 
-    func testExpiryAtTheExactBoundaryLatchesEnded() {
-        var state = SessionLifecycle(state: .active(endsAt: now.addingTimeInterval(1)), now: now)
+    func testExpiryAtTheExactBoundaryYieldsToFreshAcknowledgement() {
+        var state = SessionLifecycle(state: .active(acknowledgement(endsAt: now.addingTimeInterval(1))), now: now)
         state.expire(now: now)
         XCTAssertTrue(state.isActive)
         state.expire(now: now.addingTimeInterval(1))
         XCTAssertTrue(state.hasEnded)
         XCTAssertFalse(state.stopPending)
-        state.receive(.active(endsAt: now.addingTimeInterval(7200)), now: now)
-        XCTAssertFalse(state.isActive)
-        let restored = SessionLifecycle(state: .active(endsAt: now), now: now)
+        state.receive(.active(acknowledgement(endsAt: now.addingTimeInterval(7200))), now: now)
+        XCTAssertTrue(state.isActive)
+        XCTAssertFalse(state.hasEnded)
+        let restored = SessionLifecycle(state: .active(acknowledgement(endsAt: now)), now: now)
         XCTAssertTrue(restored.hasEnded)
         let stopping = SessionLifecycle(state: .stopping, now: now)
         XCTAssertFalse(stopping.isActive)

@@ -31,7 +31,8 @@ public struct QRCode: Equatable, Sendable {
 }
 
 public enum QRActionError: Error, Equatable, Sendable {
-    case selfScan, expired, alreadyUsed, unknownCode, replaced, network, cameraUnavailable
+    case selfScan, notFound, unknownCode, network, cameraUnavailable, rateLimited
+    case prerequisiteMissing(details: [String])
 }
 
 public enum QRSegment: Hashable, Sendable { case show, scan }
@@ -83,11 +84,14 @@ public struct QRActions {
 public struct QRNavigationActions {
     public var openEncounter: @MainActor (String) -> Void
     public var openIOSSettings: @MainActor () -> Void
+    public var openDiscoveryOff: @MainActor () -> Void
     public var close: @MainActor () -> Void
 
     public init(openEncounter: @escaping @MainActor (String) -> Void,
                 openIOSSettings: @escaping @MainActor () -> Void,
-                close: @escaping @MainActor () -> Void) {
+                close: @escaping @MainActor () -> Void,
+                openDiscoveryOff: @escaping @MainActor () -> Void) {
+        self.openDiscoveryOff = openDiscoveryOff
         self.openEncounter = openEncounter; self.openIOSSettings = openIOSSettings; self.close = close
     }
 }
