@@ -160,7 +160,7 @@ Force-quitting the app stops discovery until it is reopened. Onboarding must exp
 - A Start session button starts a session lasting 2 hours or until the user stops it.
 - The built own-session Live Activity runs Start/Stop intents in the app process; expiry during suspension marks it stale until the app next executes. Device behavior remains unverified.
 - The built Control Center start control requires authentication, opens the app and uses the acknowledged online start path; it cannot bypass prerequisites or device authentication.
-- Two users who are both in a session see each other immediately after confirmation.
+- Two users who are both in a session see each other immediately after confirmation. Unacknowledged-start cancellation, local control refusals and request-identifier limits follow `design.md`, **Sessions** / **iOS client and navigation** / **Open items and risks**.
 
 ## 7. Reveal and notifications
 
@@ -172,7 +172,7 @@ A **revealed encounter per viewer** is a confirmed encounter that a user is now 
 - Session encounters and QR encounters pass both viewers' reveal gates immediately.
 - The release build has no immediate ambient notifications.
 - Do not issue someone-is-nearby notifications or prompts of any kind. There is no weekly digest.
-- Development/Internal have a built demo reveal switch, with server environment/operator gating and Release exclusions. **Orchestrator decision:** every demo notification uses neutral report-ready text; the uncompleted change is tracked in `design.md`, **Open items and risks**.
+- Development/Internal have a built demo reveal switch, with server environment/operator gating and Release exclusions. **FACT:** every demo notification uses neutral report-ready text, with removal of earlier notifications under `design.md`, **Daily reveal and demo**.
 
 APNs daily notifications remain Unit 7. **FACT:** Unit 4 in-app scheduling/report reads and local demo notification behavior follow `design.md`, **Unit 4 and 5 contract**, **Daily reveal and demo**; push-token lifecycle remains under **Daily report delivery**. Notification and session surfaces belong in `ui.md`, **Surfaces outside the app**.
 
@@ -180,7 +180,7 @@ APNs daily notifications remain Unit 7. **FACT:** Unit 4 in-app scheduling/repor
 
 ### Eligibility and compatibility
 
-- **Eligible:** a confirmed encounter, discovery on for both users, and no block in either direction.
+- **Eligible:** a confirmed encounter, effective discovery on for both users, and no block in either direction. `design.md`, **Server boundary, common wire types and errors**, defines countable links and successful caller-locked stale-switch cleanup.
 - **Compatible:** eligible, with overlapping purposes and the interest threshold of each side met.
 - **DEFAULT:** each user's interest threshold starts at 1 shared interest and is adjustable.
 
@@ -209,9 +209,9 @@ Current settings apply in both directions, including to past encounters, favorit
 - Never request or store location in v1. The server never stores location.
 - Store an encounter's date, not its time. Times exist only inside unresolved candidates and are discarded on confirmation or dropping the candidate.
 - Drop unresolved candidates after 48 hours.
-- Ordinary access expires per viewer after 30 days; a favorite or saved-link reference retains only that viewer's access, subject to current permissions. Removing retention re-authorizes the cached card; independent view cleanup is in `design.md`, **Feed with favorites** and **Account deletion and cleanup**.
+- Ordinary access expires per viewer after 30 days; a favorite or currently shareable saved-link reference retains only that viewer's access under `design.md`, **Saved links and encounter deletion**; stale references do not retain it and can be unsaved without reopening the card. Removing retention re-authorizes the cached card; independent view cleanup is in `design.md`, **Feed with favorites** and **Account deletion and cleanup**.
 - An encounter deletion or block by either user removes the encounter for both, including favorites.
-- Users can save individual link cards. **DEFAULT:** saved links follow the same rules as favorites and disappear when the encounter is removed.
+- Users can save individual link cards under `design.md`, **Saved links and encounter deletion**; removing the encounter also removes its references.
 - Account deletion is available inside the app and is immediate and permanent for all personal data, with one safety exception: the server keeps only a one-way hash of the Apple account identifier together with operator moderation outcomes and the blocks other people placed on that account, for a period the privacy policy states, and re-applies them if the same Apple identity signs up again. No other active product data survives; managed Auth-log limitations are in `design.md`, **Open items and risks**. Binding/private restoration are built but Unit 7 still must enforce the sign-up hook before participation. The hash cannot be turned back into the Apple identifier; the kept record holds no name, profile field, link, token, encounter or contact detail. A block is dropped when the person who placed it deletes their own account. The privacy policy and the S20 deletion confirmation disclose this exception. The exact retention period is an open item to settle with the legal review.
 - Bluetooth exchanges must not carry account IDs, names, GitHub handles, email addresses or links; only temporary tokens identify the participants.
 
@@ -221,7 +221,7 @@ The retention and deletion contract must also cover on-device diagnostics, on-de
 
 - Block, report and account deletion are required in v1.
 - Successful report acceptance hides the subject while the report is retained, including after resolution; the app conceals pending submissions locally with Retry and re-authorizes before reopening.
-- Three distinct unresolved reporters hide an account until operator review within 72 hours. No automatic process reactivates it; subject-wide review/appeal can dismiss, hide or suspend. The SQL API permits report then block using the retained encounter, subject to the other gates; the app affordance remains open under `design.md`, **Open items and risks**. Profile-less/hidden/suspended callers cannot report; exact rules are in `design.md`, **Block and report**.
+- Three distinct unresolved reporters hide an account until operator review within 72 hours. No automatic process reactivates it; subject-wide review/appeal can dismiss, hide or suspend. S26 offers Block and Done after accepted reporting through the retained encounter, subject to the other gates; accepted-report and pending-concealment rules are in `design.md`, **Block and report**. Profile-less/hidden/suspended callers cannot report; exact rules are in `design.md`, **Block and report**.
 - **DEFAULT:** report reasons are spam, harassment or inappropriate content, impersonation, and other.
 - The owner is the operator and publishes a moderation contact address.
 - Receipt uploads and encounter resolution must be rate-limited per account.
@@ -408,7 +408,7 @@ Discovery off, the 21:00 daily report, profile visibility and private contact de
 
 ## 15. Open items
 
-- **Units 4/5 — remaining work:** the two app fix units, neutral-demo decision, owner inputs, accepted limitations, production prerequisites and never-verified app/device/hosted/OAuth gates are listed once in `design.md`, **Open items and risks**. Code-derived behavior, review verdicts and commit-scoped tester results are in **Unit 4 and 5 contract**, **Security requirements** and **Automatic checks**.
+- **Units 4/5 — remaining work:** owner/API inputs, accepted limitations, production prerequisites and never-verified app/device/hosted/OAuth gates are listed once in `design.md`, **Open items and risks**. The completed app/server fixes and cancellation policy are in **Unit 4 and 5 contract**; review verdicts, the final tester pass and independent-review limits are in **Security requirements** / **Automatic checks**.
 
 - **Owner — interests and threshold:** supply the real curated interest list and threshold range; the retained scope decision fixes interim values.
 - **Owner — token prerequisite:** revisit requiring discovery once onboarding/link flows exist; see the retained account decision.

@@ -121,7 +121,7 @@ All rungs operate at the same time. The app never switches modes.
 
 - Started with a Start session button. A session lasts 2 hours or until the user stops it.
 - The built own-session Live Activity and Control Center start control run their intents in the app process. While suspended, expiry only makes the activity stale until the app executes again; device availability remains unverified. See `design.md`, **iOS client and navigation**.
-- Two users who are both in a session see each other immediately.
+- Two users who are both in a session see each other immediately. Cancelling an unacknowledged start uses the bounded monotonic policy in `design.md`, **Sessions**, with its owner API item and accepted limit under **Open items and risks**.
 
 ### Platform facts and unknowns
 
@@ -137,7 +137,7 @@ All rungs operate at the same time. The app never switches modes.
 - The notification of the daily report may show names. The protection is the delay, not hiding names.
 - Session encounters and QR encounters are revealed immediately.
 - The release build has no immediate notification for ambient encounters.
-- The built demo switch reveals ambient encounters immediately only in Development/Internal against an explicitly permitted backend; Release excludes it. **Orchestrator decision:** demo notifications always use the neutral body; implementation status is in `design.md`, **Daily reveal and demo** and **Open items and risks**. Later daily APNs names are a separate Unit 7 policy.
+- The built demo switch reveals ambient encounters immediately only in Development/Internal against an explicitly permitted backend; Release excludes it. **FACT:** demo bodies are neutral and earlier notifications are removed as defined in `design.md`, **Daily reveal and demo**. Later daily APNs names are a separate Unit 7 policy.
 - There is no weekly digest.
 - Rationale: revealing ambient encounters immediately would let a user learn in real time which nearby stranger is which person.
 
@@ -146,20 +146,20 @@ All rungs operate at the same time. The app never switches modes.
 - The server never stores location.
 - The server stores the date of an encounter, not its time. Times exist only inside unresolved candidates and are discarded when a candidate is confirmed or dropped.
 - Unresolved candidates are dropped after 48 hours.
-- Ordinary encounter access expires per viewer after 30 days; a favorite or saved-link reference retains that viewer's access, always subject to current permissions. Independent view cleanup and retention removal are in `design.md`, **Feed with favorites** and **Account deletion and cleanup**.
+- Ordinary encounter access expires per viewer after 30 days; a favorite or currently shareable saved-link reference retains that viewer's access under `design.md`, **Saved links and encounter deletion**; a stale reference does not retain it. Independent view cleanup and retention removal are in `design.md`, **Feed with favorites** and **Account deletion and cleanup**.
 - Deleting an encounter, or a block, by either person removes the encounter for both people, even if it was a favorite.
 - Account deletion is available inside the app and is immediate and permanent for all personal data, with one safety exception: the server keeps only a one-way hash of the Apple account identifier together with operator moderation outcomes and the blocks other people placed on that account, for a period the privacy policy states, and re-applies them if the same Apple identity signs up again. No other active product data survives; managed Auth-log limits are in `design.md`, **Open items and risks**, and the Unit 7 sign-up hook still must enforce binding/restoration before participation. The hash cannot be turned back into the Apple identifier; the kept record holds no name, profile field, link, token, encounter or contact detail. A block is dropped when the person who placed it deletes their own account. The privacy policy and the S20 deletion confirmation disclose this exception. The exact retention period is an open item to settle with the legal review.
 - Block, report and account deletion are all part of v1.
-- Successful report acceptance hides the subject from that reporter while the report is retained; pending app submission conceals it locally with Retry and fresh authorization before reopening. Three distinct unresolved reporters hide the account until operator review within 72 hours; no automatic expiry reactivates it. The SQL API permits report then block through the retained encounter; the app affordance remains open in the canonical design list; operator appeals use subject-wide `service.review_account`. Exact rules are in `design.md`, **Block and report**.
+- Successful report acceptance hides the subject from that reporter while the report is retained; pending app submission conceals it locally with Retry and fresh authorization before reopening. Three distinct unresolved reporters hide the account until operator review within 72 hours; no automatic expiry reactivates it. S26 now keeps an accepted report open with Block and Done as defined in `design.md`, **Block and report**; operator appeals use subject-wide `service.review_account`. Exact rules are in `design.md`, **Block and report**.
 - **DEFAULT:** report reasons are spam, harassment or inappropriate content, impersonation, other.
 - The operator is the owner, with a published contact address.
 - New users see one clearly labelled sample encounter. It also gives App Review something to open.
 - **DEFAULT:** the sample encounter exists only on the device, and the user can dismiss it.
-- Users can also save individual link cards. **DEFAULT:** a saved link follows the same rules as a favorite. It shows only what the owner currently allows and disappears if the encounter is removed.
+- Users can also save individual link cards. Their current-visibility retention and stale-reference removal follow `design.md`, **Saved links and encounter deletion**; removing an encounter also removes its references.
 
 ## 6. Matching and visibility
 
-- **Eligible:** a confirmed encounter, discovery on for both people, and no block in either direction.
+- **Eligible:** a confirmed encounter, effective discovery on for both people, and no block in either direction. The current-link definition and caller-locked stale-switch cleanup are in `design.md`, **Server boundary, common wire types and errors**.
 - **Compatible:** eligible, plus overlapping purposes, plus the interest threshold of each side met.
 - **DEFAULT:** the interest threshold defaults to 1 shared interest and is adjustable by the user.
 - Three visibility levels: everyone eligible, compatible only, private. The v0.2 mutual connections level is removed together with connection requests.
@@ -476,7 +476,7 @@ For each screen `ui.md` gives: its purpose, how the user reaches it, a text sket
 
 ## 13. Open and unverified items
 
-- **Units 4/5 — remaining work:** the two app fix units, neutral-demo decision, owner inputs, accepted limitations, production prerequisites and never-verified app/device/hosted/OAuth gates are listed once in `design.md`, **Open items and risks**. Code-derived behavior, review verdicts and commit-scoped tester results are in **Unit 4 and 5 contract**, **Security requirements** and **Automatic checks**.
+- **Units 4/5 — remaining work:** owner/API inputs, accepted limitations, production prerequisites and never-verified app/device/hosted/OAuth gates are listed once in `design.md`, **Open items and risks**. The completed app/server fixes and cancellation policy are in **Unit 4 and 5 contract**; review verdicts, the final tester pass and independent-review limits are in **Security requirements** / **Automatic checks**.
 
 - **Owner — interests and threshold:** supply the real curated interest list and threshold range; the retained scope decision fixes interim values.
 - **Owner — token prerequisite:** revisit requiring discovery once onboarding/link flows exist; see the retained account decision.
