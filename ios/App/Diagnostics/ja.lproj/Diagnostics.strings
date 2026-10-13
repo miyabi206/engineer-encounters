@@ -80,3 +80,8 @@
 
 "signOut" = "サインアウト";
 "signOutFailed" = "サインアウトできませんでした。もう一度お試しください。";
+
+"demoNotificationTitle" = "Engineer Encounters";
+"demoNotificationReady" = "出会いをアプリで確認できます。";
+"demoNotificationName" = "{name}さんとの出会いをアプリで確認できます。";
+"demoUnavailable" = "このバックエンドでは即時デモを利用できません。";

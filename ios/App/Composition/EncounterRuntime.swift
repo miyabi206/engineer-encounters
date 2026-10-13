@@ -37,6 +37,7 @@ final class EncounterRuntime: ObservableObject {
     private let storageIsReady: @MainActor () -> Bool
     private let canCallBackend: @MainActor () -> Bool
     private let backendFence: @MainActor () -> BackendCallFence
+    var receiptsDidResolve: @MainActor () async -> Void = {}
     private var uploader: ReceiptUploader?
     private var uploadQueue: AccountReceiptQueue?
     private(set) var uploadTask: Task<Void, Never>?
@@ -484,6 +485,8 @@ final class EncounterRuntime: ObservableObject {
             guard canCallBackend() else { return }
             let fence = callFence()
             let outcome = try await fence.call { try await uploader.upload(at: time.wall) }
+            guard validForAccount, generation == uploadGeneration else { return }
+            if outcome.error == nil { await receiptsDidResolve() }
             guard validForAccount, generation == uploadGeneration, let next = outcome.nextAttemptAt else { return }
             scheduledUpload = uploadScheduler.schedule(at: next) { [weak self] in
                 guard let self, self.validForAccount, generation == self.uploadGeneration else { return }

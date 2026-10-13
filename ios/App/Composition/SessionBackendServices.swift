@@ -57,14 +57,17 @@ final class SessionBackendServices {
     func call<Value>(outgoing: Bool = false,
                      _ operation: @MainActor (Services) async throws -> Value) async throws -> Value {
         try requireSession(outgoing: outgoing)
-        let value = try await fence.call { try await operation(services) }
+        let value: Value
+        if outgoing { value = try await fence.call { try await operation(services) } }
+        else { value = try await account.protectedOperation { try await fence.call { try await operation(services) } } }
         try requireSession(outgoing: outgoing)
         return value
     }
 
     private func requireSession(outgoing: Bool) throws {
+        if !outgoing, account.deletionSuspended { throw CancellationError() }
         guard isCurrent, account.state.isSignedIn, !account.sessionCleanupPending,
-              outgoing || !account.sessionChangeInProgress else { throw BackendError.notAuthenticated }
+              outgoing || (!account.sessionChangeInProgress && !account.deletionSuspended) else { throw BackendError.notAuthenticated }
         guard account.canRefreshSession() else { throw BackendError.storageFailure }
     }
 }

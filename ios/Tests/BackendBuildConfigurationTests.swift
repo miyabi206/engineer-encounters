@@ -48,7 +48,7 @@ final class BackendBuildConfigurationTests: XCTestCase {
             address: fixture.address.absoluteString.replacingOccurrences(of: "https", with: "http"),
             publicClientKey: fixture.publicClientKey))
         let keychain = AppMemoryKeychain()
-        let composition = AppComposition(configuration: configuration, defaults: appBackendDefaults(),
+        let composition = AppComposition(configuration: configuration, defaults: appBackendDefaults(), notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
             keychain: keychain, queueOpener: { EncounterDomain.InMemoryReceiptQueue() })
         await composition.waitForRestoration()
         #if DEVELOPMENT_BUILD

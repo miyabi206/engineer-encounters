@@ -80,3 +80,8 @@
 
 "signOut" = "Sign out";
 "signOutFailed" = "Could not sign out. Please try again.";
+
+"demoNotificationTitle" = "Engineer Encounters";
+"demoNotificationReady" = "Your encounter is ready in the app.";
+"demoNotificationName" = "Your encounter with {name} is ready in the app.";
+"demoUnavailable" = "Immediate ambient demo is unavailable on this backend.";

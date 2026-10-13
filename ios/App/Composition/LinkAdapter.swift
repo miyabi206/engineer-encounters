@@ -14,6 +14,7 @@ final class LinkAdapter: ObservableObject {
     private let runner: any GitHubWebAuthenticationRunning
     private var own: OwnLinkService?
     private var github: GitHubLinksService?
+    var protectedContentDidChange: @MainActor () -> Void = {}
     private var pending: UUID?
 
     init(account: AccountModel, runner: any GitHubWebAuthenticationRunning) {
@@ -56,6 +57,7 @@ final class LinkAdapter: ObservableObject {
                         openingText: draft.openingText, visibility: Self.wire(visibility), replaceExisting: replace))
                 }
                 if let links = self.links { self.links = links.filter { $0.id != saved.id } + [saved] }
+                self.protectedContentDidChange()
                 await self.refreshProfile(epoch: epoch, fallbackCount: self.links?.count ?? (replace ? nil : self.account.profile.map { $0.linkCount + 1 }))
                 return saved
             },
@@ -66,6 +68,7 @@ final class LinkAdapter: ObservableObject {
                         openingText: draft.openingText, visibility: Self.wire(visibility)))
                 }
                 if let links = self.links { self.links = links.filter { $0.id != saved.id } + [saved] }
+                self.protectedContentDidChange()
                 await self.refreshProfile(epoch: epoch, fallbackCount: self.links?.count)
                 return saved
             },
@@ -74,6 +77,7 @@ final class LinkAdapter: ObservableObject {
                 let remaining = self.links?.filter { $0.id != id }
                 self.links = remaining
                 let count = remaining.map { $0.count } ?? self.account.profile.map { max(0, $0.linkCount - 1) }
+                self.protectedContentDidChange()
                 await self.refreshProfile(epoch: epoch, fallbackCount: count)
                 do { return try await self.loadLinks(epoch: epoch) }
                 catch {
@@ -86,6 +90,7 @@ final class LinkAdapter: ObservableObject {
                     try await own.reorderOwnLinks(linkIDs: ids.map(Self.identifier)).map(Self.present)
                 }
                 self.links = links
+                self.protectedContentDidChange()
                 return links
             },
             refreshPreview: { draft in try await self.operation(epoch: epoch) { _, github in
@@ -104,6 +109,7 @@ final class LinkAdapter: ObservableObject {
         do {
             let value = try await operation(epoch: epoch) { own, _ in Self.present(try await own.disconnectGitHub()) }
             connection = value
+            protectedContentDidChange()
             needsGitHubSync = false
             // Each follow-up runs independently: a failed read must not skip Auth unlink.
             var followUpError: (any Error)?
@@ -138,6 +144,7 @@ final class LinkAdapter: ObservableObject {
     }
 
     private func requireSession(epoch: UUID) throws {
+        if account.deletionSuspended { throw CancellationError() }
         guard account.hasCurrentSessionContext, !account.sessionCleanupPending, !account.sessionChangeInProgress,
               account.sessionGeneration == epoch, case .signedIn = account.state else { throw BackendError.notAuthenticated }
         guard account.canRefreshSession() else { throw BackendError.storageFailure }
@@ -151,7 +158,7 @@ final class LinkAdapter: ObservableObject {
         guard let own, let github else { throw Self.presentationError(BackendError.notAuthenticated) }
         let fence = account.backendCallFence()
         let value: Value
-        do { value = try await fence.call { try await action(own, github) } }
+        do { value = try await account.protectedOperation { try await fence.call { try await action(own, github) } } }
         catch is CancellationError { throw CancellationError() }
         catch {
             await rejectIfDead(error, epoch: epoch)
@@ -198,6 +205,7 @@ final class LinkAdapter: ObservableObject {
                 synced = try await operation(epoch: epoch) { _, github in try await github.syncIdentity() }
             }
             needsGitHubSync = false
+            protectedContentDidChange()
             connection = Self.present(synced)
             let value = try await operation(epoch: epoch) { own, _ in Self.present(try await own.getGitHubConnection()) }
             connection = value
@@ -238,6 +246,8 @@ final class LinkAdapter: ObservableObject {
             let names = ["main_language": LinkField.mainLanguage, "opening_text": .openingText, "source_label": .sourceLabel]
             return .init(code: .invalidInput, fields: details.compactMap { names[$0] ?? LinkField(rawValue: $0) }, details: details)
         case .prerequisiteMissing(let details): return .init(code: .prerequisiteMissing, details: details)
+        case .accountNotReady: return .init(code: .unavailable, details: ["account_not_ready"])
+        case .declarationRequired: return .init(code: .unavailable, details: ["declaration_required"])
         case .rateLimited: return .init(code: .unavailable, details: ["rate_limited"])
         case .notFound: return .init(code: .unavailable, details: ["not_found"])
         case .notAuthenticated: return .init(code: .unavailable, details: ["not_authenticated"])

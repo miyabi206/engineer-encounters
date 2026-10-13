@@ -18,6 +18,7 @@ struct DiagnosticsView: View {
     @ObservedObject private var account: AccountModel
     @ObservedObject private var session: SessionAdapter
     @ObservedObject private var log: TrialLog
+    @ObservedObject private var demoReveal: DemoRevealController
     @ObservedObject private var demo: DemoSwitchSetting
     @DiagnosticsViewState private var isLoading = false
     @DiagnosticsViewState private var resetResult: Bool?
@@ -28,6 +29,7 @@ struct DiagnosticsView: View {
         session = composition.sessionAdapter
         log = composition.trialLog
         demo = composition.demoSwitch
+        demoReveal = composition.demoReveal
     }
 
     var body: some View {
@@ -54,6 +56,7 @@ struct DiagnosticsView: View {
                 if account.sessionCleanupFailed { Text(text("signOutFailed")) }
             }
             Section {
+                if demoReveal.unavailable { Text(text("demoUnavailable")) }
                 Picker(text("approach"), selection: Binding(
                     get: { composition.presenceApproach == .secondExchange },
                     set: { second in

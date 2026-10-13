@@ -17,6 +17,7 @@ final class AppComposition: ObservableObject {
     let sessionAdapter: SessionAdapter
     let discoverAdapter: DiscoverAdapter
     let qrAdapter: QRAdapter
+    let settingsSafetyAdapter: SettingsSafetyAdapter
     let productNavigation = ProductNavigationModel()
     let sampleEncounter: SampleEncounterModel
     private var productSubscriptions: Set<AnyCancellable> = []
@@ -55,7 +56,8 @@ final class AppComposition: ObservableObject {
     #if DEVELOPMENT_BUILD || INTERNAL_BUILD
     let trialLog: TrialLog
     let trialRecorder: TrialRecorder
-    let demoSwitch = DemoSwitchSetting()
+    let demoSwitch: DemoSwitchSetting
+    let demoReveal: DemoRevealController
     private let approachSetting = PresenceApproachSetting()
     @Published private(set) var presenceApproach: PresenceApproach
     #endif
@@ -71,6 +73,8 @@ final class AppComposition: ObservableObject {
 
     init(configuration: BackendConfiguration? = AppComposition.backendConfiguration(),
          defaults: UserDefaults = .standard,
+         notificationCenter: (any LocalNotificationCenter)? = nil,
+         trialLogURL: URL? = nil,
          transport: any HTTPTransport = URLSessionHTTPTransport(),
          keychain: any KeychainClient = SystemKeychainClient(),
          sessionStore: (any SessionStore)? = nil,
@@ -145,6 +149,7 @@ final class AppComposition: ObservableObject {
         qrAdapter = QRAdapter(account: account, clock: clock)
         sampleEncounter = SampleEncounterModel(store: InstallationSampleDismissalStore(defaults: defaults), isNewUser: true)
         linkAdapter = LinkAdapter(account: account, runner: webAuthenticationRunner ?? SystemGitHubWebAuthenticationRunner())
+        settingsSafetyAdapter = SettingsSafetyAdapter(account: account, links: linkAdapter, discover: discoverAdapter)
         sessionHolder = SessionHolder(clock: clock, stops: PendingSessionStopStore(defaults: defaults))
         let sessionNetwork = sessionNetwork ?? SessionNetworkAvailability()
         self.sessionNetwork = sessionNetwork
@@ -156,11 +161,32 @@ final class AppComposition: ObservableObject {
             }
         }
         #if DEVELOPMENT_BUILD || INTERNAL_BUILD
-        trialLog = TrialLog()
+        demoSwitch = DemoSwitchSetting(defaults: defaults)
+        demoReveal = DemoRevealController(setting: demoSwitch, center: notificationCenter ?? SystemDemoNotificationCenter(), account: account)
+        trialLog = TrialLog(fileURL: trialLogURL)
         trialRecorder = TrialRecorder(log: trialLog)
         presenceApproach = approachSetting.value
         #endif
         isParticipating = participation.isEnabled
+        settingsSafetyAdapter.suspendParticipation = { [weak self] in self?.suspendForDeletion() }
+        settingsSafetyAdapter.resumeParticipation = { [weak self] in self?.resumeAfterDeletionFailure() }
+        account.protectedContentDidChange = { [weak discoverAdapter] in discoverAdapter?.protectedContentDidChange() }
+        linkAdapter.protectedContentDidChange = { [weak discoverAdapter] in discoverAdapter?.protectedContentDidChange() }
+        discoverAdapter.encounterWasDeleted = { [weak productNavigation] _ in
+            guard let productNavigation else { return }
+            productNavigation.encounterRemoved(in: productNavigation.selection)
+        }
+        #if DEVELOPMENT_BUILD || INTERNAL_BUILD
+        demoReveal.allowsNotification = { [weak discoverAdapter] in discoverAdapter?.allowsNotification(for: $0) == true }
+        discoverAdapter.beforeFeedRead = { [weak self] in
+            await self?.runtime?.uploadTask?.value
+            try await self?.revealDemo()
+        }
+        demoSwitch.$isEnabled.removeDuplicates().dropFirst().sink { [weak self] enabled in
+            if enabled { Task { await self?.demoReveal.switchedOn() } }
+            else { self?.demoReveal.switchedOff() }
+        }.store(in: &productSubscriptions)
+        #endif
         account.prepareForSessionChange = { [weak self] in try await self?.prepareForSessionChange() }
         account.prepareToDiscardSession = { [weak self] in
             self?.discoverAdapter.clearAuthorization()
@@ -210,6 +236,7 @@ final class AppComposition: ObservableObject {
             let linkAdapter = self?.linkAdapter
             let sessionAdapter = self?.sessionAdapter
             let storagePreparation = self?.storagePreparationTask
+            self?.settingsSafetyAdapter.invalidate()
             self?.discoverAdapter.invalidate()
             self?.qrAdapter.invalidate()
             self?.productNavigation.reset()
@@ -245,6 +272,7 @@ final class AppComposition: ObservableObject {
     }
 
     func setParticipation(_ enabled: Bool) async {
+        guard !account.deletionSuspended else { return }
         participation.isEnabled = enabled
         isParticipating = enabled
         if !enabled {
@@ -255,7 +283,7 @@ final class AppComposition: ObservableObject {
             return
         }
         await waitForRestoration()
-        guard participation.isEnabled, !sessionChangeInProgress else { return }
+        guard participation.isEnabled, !sessionChangeInProgress, !account.deletionSuspended else { return }
         let runtime = makeRuntime()
         #if DEVELOPMENT_BUILD || INTERNAL_BUILD
         trialRecorder.beginIfNeeded(metadata: trialMetadata)
@@ -265,7 +293,7 @@ final class AppComposition: ObservableObject {
 
     func requestBluetooth() async throws {
         await waitForRestoration()
-        guard !sessionChangeInProgress else { throw BackendError.notAuthenticated }
+        guard !sessionChangeInProgress, !account.deletionSuspended else { throw BackendError.notAuthenticated }
         try await makeRuntime().requestBluetooth()
     }
 
@@ -276,15 +304,16 @@ final class AppComposition: ObservableObject {
             await account.refresh()
             return
         }
+        guard !account.deletionSuspended else { return }
         if account.state == .signedInPending(nil) || (binding != nil && binding?.preparedOwner == nil && account.state.isSignedIn) {
             storageReady = false
             await account.restore()
         } else if !storageReady || keychainUnavailable { await recreateRuntime(force: true) }
-        guard !sessionChangeInProgress, !account.sessionChangeInProgress else { return }
+        guard !sessionChangeInProgress, !account.sessionChangeInProgress, !account.deletionSuspended else { return }
         await account.refresh()
-        guard !sessionChangeInProgress, !account.sessionChangeInProgress else { return }
+        guard !sessionChangeInProgress, !account.sessionChangeInProgress, !account.deletionSuspended else { return }
         await sessionAdapter.foreground()
-        guard !sessionChangeInProgress, !account.sessionChangeInProgress else { return }
+        guard !sessionChangeInProgress, !account.sessionChangeInProgress, !account.deletionSuspended else { return }
         await runtime?.refresh()
         await discoverAdapter.foreground()
         #if DEVELOPMENT_BUILD || INTERNAL_BUILD
@@ -294,7 +323,7 @@ final class AppComposition: ObservableObject {
     #if DEVELOPMENT_BUILD || INTERNAL_BUILD
     func resetTrial() async -> Bool {
         await waitForRestoration()
-        guard !sessionChangeInProgress else { return false }
+        guard !sessionChangeInProgress, !account.deletionSuspended else { return false }
         var recorded = false
         let reset = await makeRuntime().resetTrial {
             recorded = self.trialRecorder.resetCompleted(success: true, metadata: self.trialMetadata)
@@ -303,7 +332,7 @@ final class AppComposition: ObservableObject {
     }
     func selectPresenceApproach(_ approach: PresenceApproach) async {
         await waitForRestoration()
-        guard !sessionChangeInProgress else { return }
+        guard !sessionChangeInProgress, !account.deletionSuspended else { return }
         trialRecorder.selectPresenceApproach(approach)
         approachSetting.value = approach
         presenceApproach = approach
@@ -312,7 +341,7 @@ final class AppComposition: ObservableObject {
 
     func retryDiagnostics() async {
         await waitForRestoration()
-        guard !sessionChangeInProgress else { return }
+        guard !sessionChangeInProgress, !account.deletionSuspended else { return }
         if keychainUnavailable || !storageReady { await refresh(); return }
         if trialLog.state == .failed { trialLog.retry() }
         if isParticipating {
@@ -324,21 +353,75 @@ final class AppComposition: ObservableObject {
 
     func refreshLocalSummary() async {
         await waitForRestoration()
-        guard !sessionChangeInProgress else { return }
+        guard !sessionChangeInProgress, !account.deletionSuspended else { return }
         await makeRuntime().refreshLocalSummary()
     }
 
+    private func suspendForDeletion() {
+        account.suspendForDeletion()
+        isParticipating = false
+        runtime?.suspendForAccountChange()
+        discoverAdapter.clearAuthorization()
+        qrAdapter.hidePresentation()
+    }
+
+    private func resumeAfterDeletionFailure() {
+        guard !account.accountWasDeleted else { return }
+        account.resumeAfterDeletionFailure()
+        isParticipating = participation.isEnabled
+        discoverAdapter.invalidate()
+        Task { [weak self] in await self?.recreateRuntime(force: true) }
+    }
+
+    #if DEVELOPMENT_BUILD || INTERNAL_BUILD
+    private func revealDemo() async throws {
+        let epoch = account.sessionGeneration
+        let fence = account.backendCallFence()
+        do { try await demoReveal.reveal() }
+        catch is CancellationError { throw CancellationError() }
+        catch {
+            let value = AccountModel.presentationError(error)
+            if value.code == .notAuthenticated, fence.isCurrent(), !account.deletionSuspended {
+                await account.rejectDeadSession(generation: epoch)
+            }
+            throw value
+        }
+    }
+    #endif
+
     private func prepareForSessionChange() async throws {
+        // Stop recording/radio before storage cleanup; later callbacks cannot recreate account data.
+        let discardingAccount = account.discardingSession || account.state.isSignedIn || account.accountWasDeleted
+        if discardingAccount {
+            participation.isEnabled = false
+            isParticipating = false
+        }
+        #if DEVELOPMENT_BUILD || INTERNAL_BUILD
+        var trialCleared = true
+        if discardingAccount {
+            trialRecorder.close()
+            trialCleared = trialLog.clear()
+            demoSwitch.isEnabled = false
+            demoReveal.clear()
+            approachSetting.value = .secondExchange
+            presenceApproach = .secondExchange
+        }
+        #endif
+        settingsSafetyAdapter.invalidate()
         discoverAdapter.invalidate()
         qrAdapter.invalidate()
         productNavigation.reset()
         sessionChangeInProgress = true
         storageReady = false
         sessionServices = nil
+        await sessionHolder.discardPendingStops()
         await sessionAdapter.invalidate()
         await linkAdapter.invalidate()
         binding?.invalidatePreparation()
         try await serializeStoragePreparation { try await self.clearStorageForSessionChange() }
+        #if DEVELOPMENT_BUILD || INTERNAL_BUILD
+        if !trialCleared { throw BackendError.storageFailure }
+        #endif
     }
 
     private func clearStorageForSessionChange() async throws {
@@ -379,7 +462,7 @@ final class AppComposition: ObservableObject {
     }
 
     private func recreatePreparedRuntime(force: Bool) async {
-        guard binding?.isCurrent != false else { return }
+        guard binding?.isCurrent != false, !account.deletionSuspended || account.state == .signedOut else { return }
         let force = force || keychainUnavailable || (runtime != nil && (!storageReady || runtimeOwner != binding?.preparedOwner))
         sessionChangeInProgress = true
         if let sessions = account.sessions {
@@ -403,6 +486,10 @@ final class AppComposition: ObservableObject {
         await sessionAdapter.configure(sessionServices)
         discoverAdapter.configure(sessionServices)
         qrAdapter.configure(sessionServices)
+        settingsSafetyAdapter.configure(sessionServices)
+        #if DEVELOPMENT_BUILD || INTERNAL_BUILD
+        demoReveal.configure(sessionServices)
+        #endif
         sessionChangeInProgress = false
         guard binding?.isCurrent != false else { return }
         guard force || participation.isEnabled || account.state.isSignedIn else { return }
@@ -533,12 +620,13 @@ final class AppComposition: ObservableObject {
             },
             canCallBackend: { [weak self] in
                 guard let self else { return false }
-                return self.account.state.isSignedIn ? self.account.canRefreshSession() : self.storageReady
+                return !self.account.deletionSuspended && (self.account.state.isSignedIn ? self.account.canRefreshSession() : self.storageReady)
             },
             backendFence: { [weak self] in self?.account.backendCallFence() ?? BackendCallFence { false } })
         #if DEVELOPMENT_BUILD || INTERNAL_BUILD
         let recorder = trialRecorder
         runtime.observeEvents { event in recorder.record(event) }
+        runtime.receiptsDidResolve = { [weak self] in try? await self?.revealDemo() }
         #endif
         self.runtime = runtime
         runtimeOwner = binding?.preparedOwner

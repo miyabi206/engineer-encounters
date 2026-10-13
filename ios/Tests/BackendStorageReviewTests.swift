@@ -279,7 +279,7 @@ final class BackendStorageReviewTests: XCTestCase {
             "register_time_zone": [.response(appAccountOK()), .response(appAccountOK())]
         ])
         // Intentionally omit queueOpener: exercise the actual file-backed app path.
-        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults,
+        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults, notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
             transport: transport, keychain: keychain, signedOutTokenStore: InMemoryTokenBatchStore(),
             uploadScheduler: ManualReceiptUploadScheduler(), now: { appBackendTestNow })
         await composition.waitForRestoration()
@@ -334,7 +334,7 @@ final class BackendStorageReviewTests: XCTestCase {
         let reading = Task { try await first.account.loadOwnProfile() }
         try await appBackendEventually { await transport.isHeld("get_own_profile") }
         let other = try XCTUnwrap(BackendConfiguration(address: "https://other.example", publicClientKey: "fixture-key"))
-        let replacement = AppComposition(configuration: other, defaults: defaults, transport: AppBackendTransport(),
+        let replacement = AppComposition(configuration: other, defaults: defaults, notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(), transport: AppBackendTransport(),
             keychain: keychain, signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { InMemoryReceiptQueue() })
         await replacement.waitForRestoration()
         await transport.release("get_own_profile", with: appOwnProfileResponse())
@@ -433,7 +433,7 @@ private func reviewComposition(defaults: UserDefaults, keychain: any KeychainCli
     sessionStore: (any SessionStore)? = nil, tokens: any TokenBatchStore = InMemoryTokenBatchStore(),
     queue: any ReceiptQueue = InMemoryReceiptQueue()) -> AppComposition {
     let clock = ManualEncounterClock()
-    return AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults, transport: transport,
+    return AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults, notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(), transport: transport,
         keychain: keychain, sessionStore: sessionStore, serverTokenStore: tokens, signedOutTokenStore: InMemoryTokenBatchStore(),
         queueOpener: { queue }, transportFactory: {
             await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)

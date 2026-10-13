@@ -4,7 +4,7 @@ import Foundation
 /// Independent tab histories, with encounter origins retained by the stack itself.
 enum ProductTab: Hashable { case discover, profile, settings }
 enum ProductRoute: Hashable {
-    case encounter(String), favorites, sample, session, qr, profile, discovery, visibility, links, bluetooth
+    case encounter(String), favorites, sample, session, qr, profile, discovery, visibility, links, bluetooth, dailyReport, blockedUsers, account, legal
     #if DEVELOPMENT_BUILD || INTERNAL_BUILD
     case diagnostics
     #endif

@@ -4,7 +4,13 @@ import SwiftUI
 public struct ReportSettingsView: View {
     @ObservedObject private var model: ReportSettingsModel
     @SafetyViewState private var confirmsDiscard = false
-    public init(model: ReportSettingsModel) { self.model = model }
+    private let notificationControlsEnabled: Bool
+    public init(model: ReportSettingsModel, notificationControlsEnabled: Bool = true) {
+        self.model = model; self.notificationControlsEnabled = notificationControlsEnabled
+    }
+    var showsNotificationControls: Bool {
+        notificationControlsEnabled && (model.pushAvailable || model.showsNotificationSwitch)
+    }
     public var body: some View {
         SafetyPage(title: ReportSettingsStrings.text(.title)) {
             if model.data != nil {
@@ -15,7 +21,7 @@ public struct ReportSettingsView: View {
                     Text(ReportSettingsStrings.text(.localTime)).foregroundStyle(.secondary)
                     if !model.time.isValid { Text(ReportSettingsStrings.text(.invalidTime)).foregroundStyle(.red) }
                 }
-                if model.pushAvailable || model.showsNotificationSwitch {
+                if showsNotificationControls {
                     OnboardingCard {
                         if model.showsNotificationSwitch {
                             Toggle(ReportSettingsStrings.text(.notifications), isOn: Binding(

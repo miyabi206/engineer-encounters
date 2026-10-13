@@ -324,7 +324,7 @@ private func makeRecoveryComposition(transport: any HTTPTransport, sessions: any
     tokens: any TokenBatchStore = InMemoryTokenBatchStore(), queue: any ReceiptQueue = InMemoryReceiptQueue(),
     defaults: UserDefaults? = nil) -> AppComposition {
     let clock = ManualEncounterClock()
-    return AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults ?? appBackendDefaults(),
+    return AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults ?? appBackendDefaults(), notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
         transport: transport, keychain: AppMemoryKeychain(), sessionStore: sessions, serverTokenStore: tokens,
         signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { queue }, transportFactory: {
             await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)

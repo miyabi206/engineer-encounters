@@ -9,12 +9,14 @@ struct ProductRootView: View {
     @ObservedObject var composition: AppComposition
     @ObservedObject private var discoverAdapter: DiscoverAdapter
     @ObservedObject private var sessionAdapter: SessionAdapter
+    @ObservedObject private var safetyAdapter: SettingsSafetyAdapter
     @ObservedObject private var navigation: ProductNavigationModel
 
     init(settings: SettingsModel, links: LinksModel?, composition: AppComposition) {
         self.settings = settings; self.links = links; self.composition = composition
         discoverAdapter = composition.discoverAdapter; sessionAdapter = composition.sessionAdapter
         navigation = composition.productNavigation
+        safetyAdapter = composition.settingsSafetyAdapter
     }
 
     var body: some View {
@@ -24,6 +26,9 @@ struct ProductRootView: View {
                 discoverAdapter.interests = settings.interests
             }
             .onChange(of: settings.interests) { _, interests in discoverAdapter.interests = interests }
+            .sheet(item: Binding(get: { safetyAdapter.sheet }, set: { _ in })) { presentation in
+                SafetyReportSheet(model: presentation.model)
+            }
     }
 
     private func stack(_ tab: ProductTab) -> some View {
@@ -45,15 +50,11 @@ struct ProductRootView: View {
                     retryOwnState: { await composition.refresh() }, retryBluetooth: { await composition.refresh() })
             } else { ProgressView() }
         case .profile:
-            // Profile uses the existing editor until the later unit supplies the own-card S11.
-            EditProfileView(model: settings, navigation: settingsNavigation(.profile))
+            ProductMyCardView(adapter: safetyAdapter, navigation: .init(
+                editProfile: { navigation.push(.profile, in: .profile) }, links: { navigation.push(.links, in: .profile) },
+                visibility: { navigation.push(.visibility, in: .profile) }))
         case .settings:
-            SettingsListView(navigation: settingsNavigation(.settings)) {
-                Button(AccountStrings.text("links")) { navigation.push(.links, in: .settings) }
-                #if DEVELOPMENT_BUILD || INTERNAL_BUILD
-                Button(DiagnosticsStrings.text("title")) { navigation.push(.diagnostics, in: .settings) }
-                #endif
-            }
+            SettingsListView(navigation: settingsNavigation(.settings), destinations: settingsDestinations())
         }
     }
 
@@ -76,6 +77,17 @@ struct ProductRootView: View {
                 ProductSessionView(adapter: sessionAdapter, discover: discover, navigation: sessionNavigation(tab))
             }
         case .qr: ProductQRView(adapter: composition.qrAdapter, navigation: qrNavigation(tab))
+        case .dailyReport:
+            ProductReportSettingsView(adapter: safetyAdapter, navigation: .init(back: { navigation.back(in: tab) },
+                systemSettings: AccountFlowModel.openBluetoothSettings))
+        case .blockedUsers:
+            ProductBlockedView(adapter: safetyAdapter, navigation: .init(back: { navigation.back(in: tab) }))
+        case .account:
+            ProductAccountSettingsView(adapter: safetyAdapter, navigation: .init(back: { navigation.back(in: tab) },
+                signedOut: { if !composition.account.state.isSignedIn { navigation.reset() } }, discovery: { navigation.push(.discovery, in: tab) },
+                support: { navigation.push(.legal, in: tab) }))
+        case .legal:
+            ProductLegalView(navigation: .init(back: { navigation.back(in: tab) }))
         case .profile: EditProfileView(model: settings, navigation: settingsNavigation(tab))
         case .discovery: DiscoveryAndMatchingView(model: settings, navigation: settingsNavigation(tab))
         case .visibility: VisibilitySettingsView(model: settings, navigation: settingsNavigation(tab))
@@ -104,6 +116,16 @@ struct ProductRootView: View {
         case .notRequested: .checking
         }
     }
+    private func settingsDestinations() -> AccountSettingsListNavigationActions {
+        var destinations = AccountSettingsListNavigationActions(
+            dailyReport: { navigation.push(.dailyReport, in: .settings) },
+            blockedUsers: { navigation.push(.blockedUsers, in: .settings) },
+            account: { navigation.push(.account, in: .settings) }, legal: { navigation.push(.legal, in: .settings) })
+        #if DEVELOPMENT_BUILD || INTERNAL_BUILD
+        destinations.diagnostics = { navigation.push(.diagnostics, in: .settings) }
+        #endif
+        return destinations
+    }
     private func settingsNavigation(_ tab: ProductTab) -> SettingsNavigationActions {
         .init(back: { navigation.back(in: tab) }, editProfile: { navigation.push(.profile, in: tab) },
               discovery: { navigation.push(.discovery, in: tab) }, visibility: { navigation.push(.visibility, in: tab) },
@@ -113,8 +135,10 @@ struct ProductRootView: View {
         .init(openEncounter: { navigation.push(.encounter($0), in: tab) }, openFavorites: { navigation.push(.favorites, in: tab) },
               openSession: { navigation.push(.session, in: tab) }, openQR: { navigation.push(.qr, in: tab) },
               openDiscoverySettings: { navigation.push(.discovery, in: tab) }, openProfileEditing: { navigation.push(.profile, in: tab) },
-              // Optional safety/report/delete actions stay absent until the safety unit.
-              openReportOrBlock: nil, reportImpersonation: nil,
+              openReportOrBlock: { id in safetyAdapter.presentReport(id.id, linkID: nil,
+                  completed: { navigation.encounterRemoved(in: tab) }) },
+              reportImpersonation: { id, link in safetyAdapter.presentReport(id.id, linkID: link,
+                  completed: { navigation.encounterRemoved(in: tab) }) },
               openSample: { navigation.push(.sample, in: tab) }, openOwnLinks: { navigation.push(.links, in: tab) },
               openSystemSettings: AccountFlowModel.openBluetoothSettings,
               openBluetoothRecovery: { navigation.push(.session, in: tab) },
@@ -229,4 +253,52 @@ private struct ProductTabContainer<Discover: View, Profile: View, Settings: View
             navigation.select(ProductTabContainer.tabs[tabBarController.selectedIndex])
         }
     }
+}
+
+
+@MainActor
+private struct ProductMyCardView: View {
+    @StateObject private var model: MyCardModel
+    init(adapter: SettingsSafetyAdapter, navigation: MyCardNavigationActions) {
+        _model = StateObject(wrappedValue: MyCardModel(actions: adapter.myCardActions(), navigation: navigation))
+    }
+    var body: some View { MyCardView(model: model) }
+}
+
+@MainActor
+private struct ProductReportSettingsView: View {
+    @StateObject private var model: ReportSettingsModel
+    init(adapter: SettingsSafetyAdapter, navigation: ReportSettingsNavigationActions) {
+        _model = StateObject(wrappedValue: ReportSettingsModel(pushAvailable: false, permission: .unavailable,
+            actions: adapter.reportSettingsActions(), navigation: navigation))
+    }
+    var body: some View { ReportSettingsView(model: model, notificationControlsEnabled: false) }
+}
+
+@MainActor
+private struct ProductBlockedView: View {
+    @StateObject private var model: SafetyBlockedModel
+    init(adapter: SettingsSafetyAdapter, navigation: SafetyBlockedNavigationActions) {
+        _model = StateObject(wrappedValue: SafetyBlockedModel(actions: adapter.blockedActions(), navigation: navigation))
+    }
+    var body: some View { SafetyBlockedUsersView(model: model) }
+}
+
+@MainActor
+private struct ProductAccountSettingsView: View {
+    @StateObject private var model: AccountSettingsModel
+    init(adapter: SettingsSafetyAdapter, navigation: AccountSettingsNavigationActions) {
+        _model = StateObject(wrappedValue: AccountSettingsModel(actions: adapter.accountActions(), navigation: navigation))
+    }
+    var body: some View { AccountSettingsView(model: model) }
+}
+
+@MainActor
+private struct ProductLegalView: View {
+    @StateObject private var model: LegalModel
+    init(navigation: LegalNavigationActions) {
+        _model = StateObject(wrappedValue: LegalModel(data: SettingsSafetyAdapter.legalData(),
+            actions: SettingsSafetyAdapter.legalActions(), navigation: navigation))
+    }
+    var body: some View { LegalView(model: model) }
 }

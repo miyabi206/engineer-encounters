@@ -2,6 +2,7 @@ import EncounterBackend
 import EncounterDomain
 import EncounterDomainTestSupport
 import EncounterStorage
+import EncounterUI
 import Foundation
 import Security
 import XCTest
@@ -285,4 +286,31 @@ actor RetryingAppTokenIssuer: TokenIssuer {
             validFrom: now, validUntil: now.addingTimeInterval(900))
         try await store.save(TokenBatch(windows: [window]))
     }
+}
+
+@MainActor
+final class TestLocalNotificationCenter: LocalNotificationCenter {
+    var authorization = ReportSettingsPermission.notRequested
+    var requests = 0
+    var bodies: [String] = []
+    var clears = 0
+    func permission() async -> ReportSettingsPermission { authorization }
+    func requestPermission() async throws { requests += 1 }
+    private var notifications: [String: String] = [:]
+    var holdsPosts = false
+    private var postContinuation: CheckedContinuation<Void, Never>?
+    var hasHeldPost: Bool { postContinuation != nil }
+    func releasePost() { postContinuation?.resume(); postContinuation = nil; holdsPosts = false }
+    func post(body: String) async throws -> String {
+        if holdsPosts { await withCheckedContinuation { postContinuation = $0 } }
+        let id = UUID().uuidString; notifications[id] = body; bodies.append(body); return id
+    }
+    func remove(_ id: String) {
+        if let body = notifications.removeValue(forKey: id), let index = bodies.firstIndex(of: body) { bodies.remove(at: index) }
+    }
+    func clear() { clears += 1; bodies = []; notifications = [:] }
+}
+
+func appTrialLogURL() -> URL {
+    FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("trial.json")
 }

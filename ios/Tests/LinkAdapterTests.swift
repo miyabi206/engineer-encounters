@@ -533,7 +533,7 @@ private func authorizationResponse() -> HTTPResponse {
 @MainActor
 private func linkComposition(transport: any HTTPTransport, runner: (any GitHubWebAuthenticationRunning)? = nil,
                              store: (any SessionStore)? = nil) throws -> AppComposition {
-    AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(), transport: transport,
+    AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(), notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(), transport: transport,
         keychain: AppMemoryKeychain(), sessionStore: try store ?? InMemorySessionStore(session: appBackendTestSession()),
         serverTokenStore: InMemoryTokenBatchStore(), signedOutTokenStore: InMemoryTokenBatchStore(),
         queueOpener: { InMemoryReceiptQueue() }, now: { appBackendTestNow }, webAuthenticationRunner: runner,

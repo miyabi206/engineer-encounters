@@ -33,7 +33,7 @@ for configuration in Development Internal Release; do
         strings -a "$resource" >> "$bundle_report"
     done < "$derived/$configuration-resources.txt"
 
-    for marker in ProductDiagnosticsDestination DiagnosticsView DiagnosticsParticipationControl TrialRecorder TrialLog DemoSwitchSetting LocalTestTokenIssuer DevelopmentDiagnosticsEntry LocalTestTokens DevelopmentTemporaryAccountSignIn DevelopmentTemporaryAccountText DevelopmentWelcomeView; do
+    for marker in ProductDiagnosticsDestination DiagnosticsView DiagnosticsParticipationControl TrialRecorder TrialLog DemoSwitchSetting DemoRevealController SystemDemoNotificationCenter demoNotificationReady LocalTestTokenIssuer DevelopmentDiagnosticsEntry LocalTestTokens DevelopmentTemporaryAccountSignIn DevelopmentTemporaryAccountText DevelopmentWelcomeView; do
         case "$marker:$configuration" in
             LocalTestTokenIssuer:Internal|DevelopmentDiagnosticsEntry:Internal|LocalTestTokens:Internal|DevelopmentTemporaryAccountSignIn:Internal|DevelopmentTemporaryAccountText:Internal|DevelopmentWelcomeView:Internal|*:Release) expected=absent ;;
             *) expected=present ;;

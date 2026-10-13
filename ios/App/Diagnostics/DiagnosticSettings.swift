@@ -9,7 +9,7 @@ import UIKit
 final class DemoSwitchSetting: ObservableObject {
     private let defaults: UserDefaults
     private static let key = "diagnostics.immediateAmbientDemo"
-    // This setting deliberately has no consumer in exchange, evidence or reveal logic.
+    // Only the gated demo reveal consumer reads this; evidence rules never do.
     @Published var isEnabled: Bool {
         didSet { defaults.set(isEnabled, forKey: Self.key) }
     }

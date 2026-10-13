@@ -2,6 +2,17 @@ import XCTest
 @testable import EncounterUI
 
 final class ReportSettingsTests: XCTestCase {
+    @MainActor
+    func testViewOptionSuppressesControlsWithoutChangingTheStoredPreference() {
+        let driver = ReportSettingsTestDriver()
+        driver.data.notificationsEnabled = true
+        let model = driver.model(pushAvailable: false)
+        XCTAssertTrue(ReportSettingsView(model: model).showsNotificationControls)
+        XCTAssertFalse(ReportSettingsView(model: model, notificationControlsEnabled: false).showsNotificationControls)
+        XCTAssertTrue(model.showsNotificationSwitch)
+        XCTAssertEqual(model.data?.notificationsEnabled, true)
+    }
+
     func testTimeBoundsAndDefault() {
         XCTAssertEqual(ReportSettingsTime(), .init(hour: 21, minute: 0))
         for hour in [-1, 0, 23, 24] {

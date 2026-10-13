@@ -18,6 +18,9 @@ final class InstallationSampleDismissalStore: SampleEncounterDismissalStore {
 final class DiscoverAdapter: ObservableObject {
     @Published private(set) var model: DiscoverModel?
     @Published private(set) var failure: ProfileActionError?
+    var beforeFeedRead: @MainActor () async throws -> Void = {}
+    var encounterWasDeleted: @MainActor (String) -> Void = { _ in }
+    private var pendingHiddenIDs: Set<String> = []
     var interests: [InterestOption] = []
     private let account: AccountModel
     private var backend: SessionBackendServices?
@@ -45,6 +48,7 @@ final class DiscoverAdapter: ObservableObject {
 
     func invalidate() {
         clearAuthorization()
+        pendingHiddenIDs = []
         model = nil; backend = nil; epoch = nil; lastProfile = nil; interests = []; failure = nil
     }
 
@@ -58,7 +62,7 @@ final class DiscoverAdapter: ObservableObject {
             // Initial access belongs to the first screen load. An access-restoration
             // task could otherwise reread a screen requested before that task runs.
             model = DiscoverModel(actions: actions(), discoveryOn: profile.discoveryOn,
-                                  isAuthorized: backend?.isCurrent == true && profile.moderationState == "active")
+                                  isAuthorized: backend?.isCurrent == true && !account.deletionSuspended && profile.moderationState == "active")
             lastProfile = profile
             return
         }
@@ -69,7 +73,7 @@ final class DiscoverAdapter: ObservableObject {
         }
         lastProfile = profile
         model.receiveAccess(discoveryOn: profile?.discoveryOn ?? false,
-                            isAuthorized: backend?.isCurrent == true && profile?.moderationState == "active")
+                            isAuthorized: backend?.isCurrent == true && !account.deletionSuspended && profile?.moderationState == "active")
     }
 
     /// Later safety/deletion consumers call this after their acknowledged mutation.
@@ -77,6 +81,22 @@ final class DiscoverAdapter: ObservableObject {
     func protectedContentDidChange() {
         model?.receiveAccess(discoveryOn: false, isAuthorized: false)
         receive(profile: account.profile)
+    }
+
+    func conceal(_ id: String) {
+        pendingHiddenIDs.insert(id)
+        protectedContentDidChange()
+    }
+    func clearPendingHide(_ id: String) { pendingHiddenIDs.remove(id) }
+    func allowsNotification(for id: String) -> Bool { !pendingHiddenIDs.contains(id) }
+
+    func authorizeReopening(_ id: String) async -> Bool {
+        guard let model, let profile = account.profile, !account.deletionSuspended else { return false }
+        model.receiveAccess(discoveryOn: false, isAuthorized: false)
+        let reload = model.receiveAccess(discoveryOn: profile.discoveryOn,
+            isAuthorized: backend?.isCurrent == true && profile.moderationState == "active")
+        await reload?.value
+        return model.card?.card.id == id
     }
 
     func foreground() async {
@@ -88,9 +108,12 @@ final class DiscoverAdapter: ObservableObject {
         let epoch = account.sessionGeneration
         let fence = account.backendCallFence()
         return DiscoverActions(loadFeed: {
+            guard fence.isCurrent(), self.account.sessionGeneration == epoch, !self.account.deletionSuspended else { throw CancellationError() }
+            try await self.beforeFeedRead()
             let result = try await self.call(epoch: epoch, fence: fence) { try await $0.encounter.getEncounterFeed() }
             return try self.present(result)
         }, loadCard: { id in
+            if self.pendingHiddenIDs.contains(id) { return nil }
             let id = try Self.identifier(id, field: "encounter_id")
             let result = try await self.call(epoch: epoch, fence: fence) { try await $0.encounter.getEncounterCard(encounterID: id) }
             return EncounterDetail(card: try self.present(result.card), favorite: result.favorite,
@@ -104,13 +127,22 @@ final class DiscoverAdapter: ObservableObject {
         }, unsaveLink: { id, link in
             try await self.setSaved(id, link: link, saved: false, epoch: epoch, fence: fence)
         },
-        // Safety and shared encounter deletion are supplied by the later safety unit.
-        deleteEncounter: nil, loadFavorites: {
+        deleteEncounter: { [self] value in
+            let id = try Self.identifier(value, field: "encounter_id")
+            do { _ = try await self.call(epoch: epoch, fence: fence) { try await $0.encounter.deleteEncounter(encounterID: id) } }
+            catch let error as ProfileActionError where error.code == .notFound { }
+            // Navigation removes S07 synchronously; the task drops/reloads after DiscoverModel completes its write.
+            self.encounterWasDeleted(value)
+            Task { [weak self] in
+                guard let self, fence.isCurrent(), self.account.sessionGeneration == epoch else { return }
+                self.protectedContentDidChange()
+            }
+        }, loadFavorites: {
             let result = try await self.call(epoch: epoch, fence: fence) { try await $0.encounter.listEncounterFavorites() }
             return try self.present(result)
         }, loadSavedLinks: {
             let result = try await self.call(epoch: epoch, fence: fence) { try await $0.encounter.listSavedLinks() }
-            return EncounterSavedLinkList(links: try result.links.map {
+            return EncounterSavedLinkList(links: try result.links.filter { !self.pendingHiddenIDs.contains($0.encounterID.uuidString.lowercased()) }.map {
                 EncounterSavedLink(encounterID: $0.encounterID.uuidString.lowercased(), day: Self.day($0.day),
                     kind: EncounterUI.EncounterKind(rawValue: $0.kind.rawValue)!, link: try Self.present($0.link))
             }, truncated: result.truncated)
@@ -129,6 +161,7 @@ final class DiscoverAdapter: ObservableObject {
     }
 
     private func call<Value>(epoch: UUID, fence: BackendCallFence, _ operation: @MainActor (SessionBackendServices.Services) async throws -> Value) async throws -> Value {
+        guard !account.deletionSuspended else { throw CancellationError() }
         guard fence.isCurrent(), account.sessionGeneration == epoch, case .signedIn = account.state,
               !account.sessionChangeInProgress, let backend, backend.isCurrent else {
             throw ProfileActionError(code: .notAuthenticated)
@@ -154,7 +187,7 @@ final class DiscoverAdapter: ObservableObject {
     }
 
     private func present(_ value: EncounterFeedTransfer) throws -> EncounterCardList {
-        EncounterCardList(cards: try value.cards.map {
+        EncounterCardList(cards: try value.cards.filter { !pendingHiddenIDs.contains($0.card.encounterID.uuidString.lowercased()) }.map {
             EncounterFeedCard(card: try present($0.card), favorite: $0.favorite,
                               sharedInterestIDs: $0.sharedInterestIDs.map(Set.init))
         }, truncated: value.truncated)
@@ -169,7 +202,7 @@ final class DiscoverAdapter: ObservableObject {
             contactDetail: value.contactDetail, links: try (value.links ?? []).map(Self.present), isShell: value.shell == true)
     }
 
-    private static func day(_ value: WireDay) -> EncounterDay {
+    static func day(_ value: WireDay) -> EncounterDay {
         let fields = value.rawValue.split(separator: "-").map { Int($0)! }
         return EncounterDay(year: fields[0], month: fields[1], day: fields[2])
     }
@@ -182,7 +215,7 @@ final class DiscoverAdapter: ObservableObject {
             openingText: value.openingText, url: url, verified: value.verificationState == .verified)
     }
 
-    private static func identifier(_ value: String, field: String) throws -> UUID {
+    static func identifier(_ value: String, field: String) throws -> UUID {
         guard let id = UUID(uuidString: value) else { throw ProfileActionError(code: .invalidInput, fields: [field]) }
         return id
     }

@@ -113,6 +113,7 @@ extension AccountModel {
         let epoch = sessionGeneration
         var accepted = profile ?? OwnProfileState()
         try await ownAccountOperation(write)
+        protectedContentDidChange()
         applying(&accepted)
         // The mutation is committed. A later read cannot turn it into a failed write.
         do { return try await loadOwnProfile() }
@@ -122,7 +123,7 @@ extension AccountModel {
         }
     }
 
-    private func ownAccountOperation<Value>(_ operation: @MainActor (OwnAccountService) async throws -> Value) async throws -> Value {
+    func ownAccountOperation<Value>(allowingDeletion: Bool = false, _ operation: @MainActor (OwnAccountService) async throws -> Value) async throws -> Value {
         guard hasCurrentSessionContext, !sessionCleanupPending, state.isSignedIn, let service else {
             throw ProfileActionError(code: .notAuthenticated)
         }
@@ -131,7 +132,9 @@ extension AccountModel {
         let epoch = sessionGeneration
         let fence = backendCallFence()
         do {
-            let result = try await fence.call { try await operation(service) }
+            let result: Value
+            if allowingDeletion { result = try await fence.call { try await operation(service) } }
+            else { result = try await protectedOperation { try await fence.call { try await operation(service) } } }
             guard hasCurrentSessionContext, !sessionCleanupPending, sessionGeneration == epoch, state == .signedIn(user) else {
                 throw ProfileActionError(code: .notAuthenticated)
             }

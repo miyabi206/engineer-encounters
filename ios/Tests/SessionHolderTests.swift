@@ -948,7 +948,7 @@ final class SessionHolderTests: XCTestCase {
                 "stop_session": [.response(sessionNull)],
                 "issue_token_batch": [.response(HTTPResponse(data: batchData, statusCode: 200))],
                 "submit_receipts": [.response(HTTPResponse(data: Data("[]".utf8), statusCode: 200))]])
-            let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(),
+            let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(), notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
                 transport: transport, keychain: AppMemoryKeychain(),
                 sessionStore: InMemorySessionStore(session: try appBackendTestSession()),
                 serverTokenStore: InMemoryTokenBatchStore(batch: batch),
@@ -1018,7 +1018,7 @@ private func sessionComposition(_ transport: any HTTPTransport, clock: ManualEnc
     network: SessionNetworkAvailability? = nil,
     tokens: any TokenBatchStore = InMemoryTokenBatchStore(),
     queue: any ReceiptQueue = InMemoryReceiptQueue()) throws -> AppComposition {
-    AppComposition(configuration: configuration, defaults: defaults ?? appBackendDefaults(), transport: transport,
+    AppComposition(configuration: configuration, defaults: defaults ?? appBackendDefaults(), notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(), transport: transport,
         keychain: keychain, sessionStore: try store ?? InMemorySessionStore(session: appBackendTestSession()),
         serverTokenStore: tokens, signedOutTokenStore: InMemoryTokenBatchStore(),
         queueOpener: { queue }, transportFactory: {

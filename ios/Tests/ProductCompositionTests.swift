@@ -85,7 +85,7 @@ final class ProductCompositionTests: XCTestCase {
         XCTAssertEqual(favoriteResult, .init(encounterID: productEncounterID, favorite: false))
         XCTAssertEqual(saveResult, .init(encounterID: productEncounterID, linkID: productLinkID, saved: true))
         XCTAssertFalse(unsaveResult.saved)
-        XCTAssertNil(actions.deleteEncounter)
+        XCTAssertNotNil(actions.deleteEncounter)
         let requests = await transport.recorded()
         XCTAssertEqual(requests.compactMap { $0.url?.lastPathComponent }, ["register_time_zone", "get_encounter_feed",
             "get_encounter_card", "list_encounter_favorites", "list_saved_links", "set_encounter_favorite", "save_link", "unsave_link"])
@@ -292,6 +292,8 @@ func productAuthorize(_ composition: AppComposition) {
 func productComposition(_ transport: any HTTPTransport, defaults: UserDefaults? = nil, store: (any SessionStore)? = nil,
                         clock: ManualEncounterClock = ManualEncounterClock()) throws -> AppComposition {
     AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults ?? appBackendDefaults(),
+        notificationCenter: TestLocalNotificationCenter(),
+        trialLogURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("trial.json"),
         transport: transport, keychain: AppMemoryKeychain(),
         sessionStore: try store ?? InMemorySessionStore(session: appBackendTestSession()),
         serverTokenStore: InMemoryTokenBatchStore(), signedOutTokenStore: InMemoryTokenBatchStore(),
