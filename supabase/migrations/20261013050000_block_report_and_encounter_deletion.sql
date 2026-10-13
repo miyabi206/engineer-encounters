@@ -74,11 +74,15 @@ language sql stable security definer set search_path = '' as $$
         select c.* from candidates as c cross join viewer_zone as z
         where c.favorite or exists (select 1 from private.saved_links as s
             where s.viewer_id = $1 and s.encounter_id = c.encounter_id)
-          or pg_catalog.now() < pg_catalog.timezone(z.name, (c.day + 30)::timestamp)
+          or pg_catalog.now() < private.try_time_zone(z.name, (c.day + 30)::timestamp)
     ), counterparts as materialized (
         select distinct r.counterpart_id from retained as r
     ), owners as materialized (
-        select p.user_id, a.compatible, a.shared_interest_count
+        select p.user_id, a.compatible,
+            case when exists (select 1 from private.field_visibility as f
+                where f.owner_id = p.user_id and f.field = 'interests'
+                  and (f.level = 'everyone_eligible' or (f.level = 'compatible_only' and a.compatible)))
+                then a.shared_interest_count else 0 end as shared_interest_count
         from counterparts as c join private.profiles as p on p.user_id = c.counterpart_id
         cross join lateral private.encounter_authorization($1, p.user_id) as a
         where a.eligible and p.moderation_state = 'active'
@@ -143,11 +147,13 @@ language sql stable security definer set search_path = '' as $$
             'opening_text', l.opening_text, 'verification_state', l.verification_state
         ) order by l.display_order, l.link_id) as value
         from private.external_links as l join owners as o on o.user_id = l.owner_id
-        where l.visibility = 'everyone_eligible' or (l.visibility = 'compatible_only' and o.compatible)
+        where (l.visibility = 'everyone_eligible' or (l.visibility = 'compatible_only' and o.compatible))
+          and (l.source <> 'github' or private.github_identity_is_live(l.owner_id))
         group by l.owner_id
     )
     select g.encounter_id, g.counterpart_id, g.kind, g.day, g.favorite,
-        g.compatible, g.shared_interest_count, coalesce(i.shared_ids, '[]'::jsonb),
+        g.compatible, g.shared_interest_count,
+        case when f.value ? 'interests' then coalesce(i.shared_ids, '[]'::jsonb) else '[]'::jsonb end,
         pg_catalog.jsonb_build_object('encounter_id', g.encounter_id, 'kind', g.kind, 'day', g.day)
         || coalesce(f.value, '{}'::jsonb)
         || case when l.value is null then '{}'::jsonb else pg_catalog.jsonb_build_object('links', l.value) end
@@ -167,10 +173,10 @@ returns jsonb language sql stable security definer set search_path = '' as $$
         order by g.counterpart_id, g.kind, g.day, g.favorite desc, g.encounter_id
     ), limited as materialized (
         select g.* from winners as g
-        order by g.day desc, g.compatible desc, g.shared_interest_count desc, g.encounter_id limit 201
+        order by g.day desc, g.shared_interest_count desc, g.encounter_id limit 201
     ), numbered as materialized (
         select g.*, pg_catalog.row_number() over (
-            order by g.day desc, g.compatible desc, g.shared_interest_count desc, g.encounter_id
+            order by g.day desc, g.shared_interest_count desc, g.encounter_id
         ) as position from limited as g
     ), cards as materialized (
         select g.* from private.visible_encounter_cards($1, array(
@@ -206,7 +212,8 @@ begin
         select g.encounter_id, g.day, g.kind, l.*
         from visible as g join private.saved_links as s on s.viewer_id = caller and s.encounter_id = g.encounter_id
         join private.external_links as l on l.link_id = s.link_id and l.owner_id = g.counterpart_id
-        where l.visibility = 'everyone_eligible' or (l.visibility = 'compatible_only' and g.compatible)
+        where (l.visibility = 'everyone_eligible' or (l.visibility = 'compatible_only' and g.compatible))
+          and (l.source <> 'github' or private.github_identity_is_live(l.owner_id))
         order by g.day desc, g.encounter_id, l.display_order, l.link_id limit 201
     ), numbered as (
         select l.*, pg_catalog.row_number() over (
@@ -479,9 +486,9 @@ begin
     with limited as (
         select p.user_id, p.moderation_state, p.operator_outcome
         from private.profiles as p where p.moderation_state <> 'active'
-        order by p.user_id limit 201
+        order by (p.operator_outcome is not null), p.user_id limit 201
     ), numbered as (
-        select p.*, pg_catalog.row_number() over (order by p.user_id) as position from limited as p
+        select p.*, pg_catalog.row_number() over (order by (p.operator_outcome is not null), p.user_id) as position from limited as p
     )
     select pg_catalog.jsonb_build_object('accounts', coalesce(pg_catalog.jsonb_agg(
         pg_catalog.jsonb_build_object('account_id', p.user_id, 'moderation_state', p.moderation_state,
@@ -550,7 +557,7 @@ begin
 end;
 $$;
 
-create index profiles_moderated_idx on private.profiles (user_id) where moderation_state <> 'active';
+create index profiles_moderated_idx on private.profiles ((operator_outcome is not null), user_id) where moderation_state <> 'active';
 
 -- Exact wire parameter names live on SQL wrappers, avoiding column ambiguity.
 create function public.block_encounter_person(encounter_id uuid)

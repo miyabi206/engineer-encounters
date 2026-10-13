@@ -38,9 +38,14 @@ grant execute on all functions in schema report_worker_test to authenticated;
 insert into auth.users (id) select report_worker_test.id(n) from pg_catalog.generate_series(1,7) as n;
 insert into private.profiles (user_id, age_18_declared, terms_version, privacy_version, discovery_on)
 select report_worker_test.id(n), true, 'draft', 'draft', true from pg_catalog.generate_series(1,6) as n;
+insert into private.external_links (owner_id, source, url, visibility)
+select report_worker_test.id(n), 'other', 'https://example.invalid/fixture', 'private'
+from pg_catalog.generate_series(1,6) as n;
 insert into private.notification_preferences (user_id, time_zone, report_hour, report_minute)
 select report_worker_test.id(n), case when n=4 then 'No/SuchZone' else 'UTC' end, 0, 0
 from pg_catalog.generate_series(1,5) as n;
+-- Simulate a catalog name that the installed timezone parser cannot use.
+insert into private.iana_time_zones(name) values ('No/SuchZone');
 update private.profiles set moderation_state='hidden' where user_id=report_worker_test.id(5);
 insert into private.report_deliveries (user_id,report_day,status) values
     (report_worker_test.id(1),(pg_catalog.now() at time zone 'UTC')::date,'closed'),
@@ -53,13 +58,19 @@ values (report_worker_test.id(101),report_worker_test.id(1),report_worker_test.i
 insert into private.encounter_views (encounter_id,viewer_id,revealed,reveal_report_day)
 values (report_worker_test.id(101),report_worker_test.id(1),true,(pg_catalog.now() at time zone 'UTC')::date),
     (report_worker_test.id(103),report_worker_test.id(3),false,(pg_catalog.now() at time zone 'UTC')::date);
+insert into private.encounters (encounter_id,user_a,user_b,kind,day_a,day_b)
+values (report_worker_test.id(104),report_worker_test.id(1),report_worker_test.id(2),'ambient',
+    (pg_catalog.now() at time zone 'UTC')::date,(pg_catalog.now() at time zone 'UTC')::date);
+insert into private.encounter_views (encounter_id,viewer_id,revealed,reveal_report_day)
+values (report_worker_test.id(104),report_worker_test.id(1),false,(pg_catalog.now() at time zone 'UTC')::date);
 create temporary table worker_results (label text primary key, value jsonb);
 insert into worker_results values ('before', (select pg_catalog.jsonb_build_array(d.ctid::text,d.xmin::text,d.xmax::text,d.status)
     from private.report_deliveries as d where d.user_id=report_worker_test.id(1)));
 
 -- Procedure/ACL 9 + due predicate 5 + fast path 8 + isolation 5 + zone source 9
--- + transition selection 5 = 41. No CALL: pgTAP runs in one transaction.
-select extensions.plan(41);
+-- + transition selection 5 + unusable zone 2 + late closed view 1 + next-step catch-up 1 = 45.
+-- No CALL: pgTAP runs in one transaction.
+select extensions.plan(45);
 select extensions.ok(p.prokind='p' and not p.prosecdef and p.proconfig is null,
     'worker is an invoker procedure without SET, so top-level CALL can commit')
 from pg_catalog.pg_proc as p where p.oid='private.run_due_reports(timestamptz)'::regprocedure;
@@ -82,6 +93,11 @@ select extensions.ok(not exists (select 1 from pg_catalog.aclexplode(p.proacl) a
     where a.grantee=0 and a.privilege_type='EXECUTE'), 'PUBLIC cannot execute the worker')
 from pg_catalog.pg_proc as p where p.oid='private.run_due_reports(timestamptz)'::regprocedure;
 
+select extensions.is(private.latest_due_report_day('No/SuchZone',0,0,pg_catalog.now()),null::date,
+    'latest due calculation skips a cached but unusable zone name');
+select extensions.is(private.run_account_report(report_worker_test.id(4)),
+    '{"report_day":null,"newly_revealed_encounter_ids":[],"closed":false}'::jsonb,
+    'unusable zone skips this account report without failing other accounts');
 select extensions.is(array(select d.account_id from private.due_report_accounts(pg_catalog.now()) as d
     order by d.account_id), array[report_worker_test.id(2),report_worker_test.id(3)],
     'only ready valid-zone accounts with an unclosed due day are selected');
@@ -126,6 +142,8 @@ select extensions.ok(not exists(select 1 from pg_catalog.pg_locks as l
 select extensions.is((select pg_catalog.jsonb_build_array(d.ctid::text,d.xmin::text,d.xmax::text,d.status)
     from private.report_deliveries as d where d.user_id=report_worker_test.id(1)),
     (select value from worker_results where label='before'),'delivery tuple and row-lock metadata are unchanged');
+select extensions.ok((select not revealed from private.encounter_views
+    where encounter_id=report_worker_test.id(104)), 'late view on a closed date stays waiting without taking a report lock');
 drop trigger reject_delivery_write on private.report_deliveries;
 drop trigger reject_view_write on private.encounter_views;
 
@@ -193,5 +211,17 @@ select extensions.ok(not exists(select 1 from private.due_report_accounts(timest
     where account_id=report_worker_test.id(2)), 'due predicate waits before advanced gap minute');
 select extensions.ok(exists(select 1 from private.due_report_accounts(timestamptz '2026-03-08 07:00+00')
     where account_id=report_worker_test.id(2)), 'due predicate selects the first real gap minute');
+
+-- Restore the late view's closed-date assignment after the zone-change tests.
+-- The next delivery after all closed keys must catch it up and reveal it.
+update private.notification_preferences set time_zone='UTC',report_hour=0,report_minute=0
+where user_id=report_worker_test.id(1);
+update private.encounter_views set reveal_report_day=(pg_catalog.now() at time zone 'UTC')::date
+where encounter_id=report_worker_test.id(104) and viewer_id=report_worker_test.id(1);
+select extensions.is(private.run_account_report(report_worker_test.id(1), (
+    select (pg_catalog.max(d.report_day)+1)::timestamp at time zone 'UTC'
+    from private.report_deliveries as d where d.user_id=report_worker_test.id(1) and d.status='closed'
+))->'newly_revealed_encounter_ids',pg_catalog.to_jsonb(array[report_worker_test.id(104)]),
+    'next report step reveals the late view assigned to the already closed date');
 select * from extensions.finish();
 rollback;

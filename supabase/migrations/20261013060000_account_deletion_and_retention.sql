@@ -2,7 +2,7 @@
 -- Only private definers can read it; it is not part of the retained record.
 create table private.apple_identity_bindings (
     account_id uuid primary key references auth.users (id) on delete cascade,
-    apple_id_hash bytea not null check (pg_catalog.octet_length(apple_id_hash) = 32)
+    apple_id_hash bytea not null unique check (pg_catalog.octet_length(apple_id_hash) = 32)
 );
 alter table private.apple_identity_bindings enable row level security;
 revoke all on table private.apple_identity_bindings from public, anon, authenticated, service_role;
@@ -67,8 +67,15 @@ begin
     perform pg_catalog.pg_advisory_xact_lock(31001, pg_catalog.hashtext(account_id::text));
     safety_hash := private.apple_safety_hash(account_id);
     if safety_hash is null then return; end if;
+    if exists (select 1 from private.apple_identity_bindings as b
+        where b.apple_id_hash = safety_hash and b.account_id <> $1) then
+        perform private.raise_error('account_not_ready');
+    end if;
     insert into private.apple_identity_bindings (account_id, apple_id_hash)
     values (account_id, safety_hash) on conflict on constraint apple_identity_bindings_pkey do nothing;
+exception when unique_violation then
+    -- Concurrent first bindings use the same identifier-free public error.
+    perform private.raise_error('account_not_ready');
 end;
 $$;
 
@@ -429,7 +436,7 @@ begin
                join private.iana_time_zones as z on z.name = n.time_zone
                where v.encounter_id = e.encounter_id and not v.favorite
                  and not exists (select 1 from private.saved_links as s where s.viewer_id = v.viewer_id and s.encounter_id = v.encounter_id)
-                 and pg_catalog.timezone(z.name,
+                 and private.try_time_zone(z.name,
                      ((case when e.user_a = v.viewer_id then e.day_a else e.day_b end) + 30)::timestamp) <= cleanup_at
            )
         order by e.encounter_id for update of e skip locked
@@ -439,14 +446,14 @@ begin
         where v.encounter_id = expired_encounter.encounter_id and not v.favorite
           and n.user_id = v.viewer_id and z.name = n.time_zone
           and not exists (select 1 from private.saved_links as s where s.viewer_id = v.viewer_id and s.encounter_id = v.encounter_id)
-          and pg_catalog.timezone(z.name,
+          and private.try_time_zone(z.name,
               ((case when expired_encounter.user_a = v.viewer_id then expired_encounter.day_a else expired_encounter.day_b end) + 30)::timestamp) <= cleanup_at;
         delete from private.encounters as e where e.encounter_id = expired_encounter.encounter_id
           and not exists (select 1 from private.encounter_views as v where v.encounter_id = e.encounter_id);
     end loop;
     delete from private.report_deliveries as d using private.notification_preferences as n, private.iana_time_zones as z
     where n.user_id = d.user_id and z.name = n.time_zone and d.status = 'closed'
-      and d.report_day <= (cleanup_at at time zone z.name)::date - 30
+      and d.report_day <= private.try_time_zone(z.name, cleanup_at)::date - 30
       and not exists (select 1 from private.waiting_ambient_views(d.user_id, cleanup_at) as w
           where w.reveal_report_day <= d.report_day);
     delete from private.reports as r
@@ -735,13 +742,12 @@ begin
     if due_day is null then
         return pg_catalog.jsonb_build_object('report_day', null, 'newly_revealed_encounter_ids', '[]'::jsonb, 'closed', false);
     end if;
-    -- A closed, caught-up read does not serialize or attempt any row write.
+    -- A closed latest date cannot reveal a late waiting view. With no older open
+    -- delivery, skip serialization and writes even if such a view is waiting.
     if exists (select 1 from private.report_deliveries as d
         where d.user_id = account_id and d.report_day = due_day and d.status = 'closed')
         and not exists (select 1 from private.report_deliveries as d
-            where d.user_id = account_id and d.status = 'open' and d.report_day < due_day)
-        and not exists (select 1 from private.waiting_ambient_views(account_id, report_at) as w
-            where w.reveal_report_day <= due_day) then
+            where d.user_id = account_id and d.status = 'open' and d.report_day < due_day) then
         return pg_catalog.jsonb_build_object('report_day', due_day, 'newly_revealed_encounter_ids', '[]'::jsonb, 'closed', false);
     end if;
     perform pg_catalog.pg_advisory_xact_lock(31001, pg_catalog.hashtext(account_id::text));

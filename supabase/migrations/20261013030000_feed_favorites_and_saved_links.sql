@@ -6,6 +6,23 @@ insert into private.iana_time_zones (name) select z.name from pg_catalog.pg_time
 alter table private.iana_time_zones enable row level security;
 revoke all on table private.iana_time_zones from public, anon, authenticated, service_role;
 
+-- The cached zone catalog can outlive installed tzdata. A bad stored name
+-- makes this account's retention unknown rather than aborting a batch.
+create function private.try_time_zone(zone_name text, at_time timestamp)
+returns timestamptz language plpgsql stable set search_path = '' as $$
+begin
+    return pg_catalog.timezone(zone_name, at_time);
+exception when invalid_parameter_value then return null;
+end;
+$$;
+create function private.try_time_zone(zone_name text, at_time timestamptz)
+returns timestamp language plpgsql stable set search_path = '' as $$
+begin
+    return pg_catalog.timezone(zone_name, at_time);
+exception when invalid_parameter_value then return null;
+end;
+$$;
+
 create table private.saved_links (
     viewer_id uuid not null references auth.users (id) on delete cascade,
     encounter_id uuid not null references private.encounters (encounter_id) on delete cascade,
@@ -54,7 +71,7 @@ language sql stable security definer set search_path = '' as $$
         left join saved_encounters as s on s.encounter_id = c.encounter_id
         -- Add local calendar days before converting midnight to an instant.
         where c.favorite or s.encounter_id is not null
-            or pg_catalog.now() < pg_catalog.timezone(z.name, (c.day + 30)::timestamp)
+            or pg_catalog.now() < private.try_time_zone(z.name, (c.day + 30)::timestamp)
     ), counterparts as materialized (
         select distinct r.counterpart_id from retained as r
     ), owners as materialized (
@@ -99,11 +116,14 @@ language sql stable security definer set search_path = '' as $$
             'opening_text', l.opening_text, 'verification_state', l.verification_state
         ) order by l.display_order, l.link_id) as value
         from private.external_links as l join owners as o on o.user_id = l.owner_id
-        where l.visibility = 'everyone_eligible' or (l.visibility = 'compatible_only' and o.compatible)
+        where (l.visibility = 'everyone_eligible' or (l.visibility = 'compatible_only' and o.compatible))
+          and (l.source <> 'github' or private.github_identity_is_live(l.owner_id))
         group by l.owner_id
     )
     select r.encounter_id, r.counterpart_id, r.kind, r.day, r.favorite,
-        o.compatible, o.shared_interest_count, coalesce(i.shared_ids, '[]'::jsonb),
+        o.compatible, case when f.value ? 'interests' then
+            pg_catalog.jsonb_array_length(coalesce(i.shared_ids, '[]'::jsonb)) else 0 end,
+        case when f.value ? 'interests' then coalesce(i.shared_ids, '[]'::jsonb) else '[]'::jsonb end,
         pg_catalog.jsonb_build_object('encounter_id', r.encounter_id, 'kind', r.kind, 'day', r.day)
         || coalesce(f.value, '{}'::jsonb)
         || case when l.value is null then '{}'::jsonb
@@ -159,11 +179,11 @@ returns jsonb language sql stable security definer set search_path = '' as $$
         order by g.counterpart_id, g.kind, g.day, g.favorite desc, g.encounter_id
     ), limited as (
         select g.* from winners as g
-        order by g.day desc, g.compatible desc, g.shared_interest_count desc, g.encounter_id
+        order by g.day desc, g.shared_interest_count desc, g.encounter_id
         limit 201
     ), numbered as (
         select g.*, pg_catalog.row_number() over (
-            order by g.day desc, g.compatible desc, g.shared_interest_count desc, g.encounter_id
+            order by g.day desc, g.shared_interest_count desc, g.encounter_id
         ) as position from limited as g
     )
     select pg_catalog.jsonb_build_object('cards', coalesce(pg_catalog.jsonb_agg(

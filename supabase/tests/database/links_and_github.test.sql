@@ -292,7 +292,8 @@ select links_github_test.expect_error($stmt$select links_github_test.as_service(
 
 -- Read shapes, private visibility, no profile, and display-order ties.
 select extensions.is(links_github_test.as_caller(links_github_test.id(1), 'public.list_own_links()'),
-    pg_catalog.jsonb_build_array(links_github_test.expected_link(201,4), links_github_test.expected_link(202,4)), 'own list includes private links and UUID tie order');
+    pg_catalog.jsonb_build_array(links_github_test.expected_link(201,4) || '{"verification_state":"unverified"}'::jsonb,
+        links_github_test.expected_link(202,4) || '{"verification_state":"unverified"}'::jsonb), 'own list includes private links and UUID tie order');
 select extensions.is(links_github_test.as_caller(links_github_test.id(3), 'public.list_own_links()'), '[]'::jsonb, 'no profile returns empty links');
 select extensions.is(links_github_test.as_caller(links_github_test.id(1), 'public.get_github_connection()'),
     '{"connected":false,"handle":null}'::jsonb, 'live unsynced identity needs a cache to connect');
@@ -413,6 +414,7 @@ select extensions.is(links_github_test.as_service($call$service.save_github_link
     '9223372036854775807','maximum repository ID stays lossless decimal text');
 
 -- Account 2 starts with one link; nine inserts fill it.
+select links_github_test.as_service($call$service.sync_github_identity(links_github_test.id(2),'102','owner-2','{}'::text[])$call$);
 insert into links_github_test.results
 select 'cap-' || n,links_github_test.as_service(pg_catalog.format(
     'service.save_github_link(links_github_test.id(2),%L,''102'',%L,''Title'','''',null,''{}''::text[],'''',''private'',false)',
@@ -545,8 +547,7 @@ select extensions.is((select pg_catalog.array_agg(source order by source) from p
 select extensions.is((select discovery_on from private.profiles where user_id=links_github_test.id(1)),true,'successful disconnect preserves discovery with remaining link');
 
 -- The cache's live-account FK cascades independently of disconnect.
-insert into private.linked_identities (user_id, provider, provider_user_id, handle)
-values (links_github_test.id(2),'github','102','owner-2');
+-- Reuse account 2's cache created by the earlier service sync.
 delete from auth.users where id=links_github_test.id(2);
 select extensions.is((select pg_catalog.count(*) from private.linked_identities where user_id=links_github_test.id(2)),0::bigint,'Auth deletion cascades cached identity');
 

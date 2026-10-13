@@ -5,8 +5,8 @@ create extension if not exists pgtap with schema extensions;
 -- 4 roles x 3 schemas x 3 object kinds = 36 catalog scans;
 -- 7 schema ACLs + 12 default ACLs + 3 RPC inventory checks + 3 public
 -- function denial scans + 1 service overload check + 10 Apple binding
--- table/function boundary checks = 72 assertions.
-select extensions.plan(72);
+-- table/function boundary checks + 15 new helper boundary checks = 87 assertions.
+select extensions.plan(87);
 
 create temporary table protected_schemas (name text primary key);
 insert into protected_schemas values ('public'), ('private'), ('service');
@@ -205,6 +205,20 @@ select extensions.ok(not pg_catalog.has_function_privilege(r.name, 'private.bind
     r.name || ' cannot execute the Apple binding helper')
 from (values ('anon'), ('authenticated'), ('service_role')) as r(name);
 
+-- Identity and fallible-zone helpers remain private, including both overloads.
+select extensions.ok(p.proconfig = array['search_path=""'], t.signature || ' uses an empty search path')
+from (values ('private.github_identity_is_live(uuid)'), ('private.try_time_zone(text,timestamp)'),
+    ('private.try_time_zone(text,timestamptz)')) as t(signature)
+join pg_catalog.pg_proc as p on p.oid=t.signature::regprocedure;
+select extensions.ok(case when r.name='PUBLIC' then not exists (
+    select 1 from pg_catalog.aclexplode(coalesce(p.proacl,pg_catalog.acldefault('f',p.proowner))) as a
+    where a.grantee=0 and a.privilege_type='EXECUTE')
+    else not pg_catalog.has_function_privilege(r.name,p.oid,'execute') end,
+    r.name || ' cannot execute ' || t.signature)
+from (values ('private.github_identity_is_live(uuid)'), ('private.try_time_zone(text,timestamp)'),
+    ('private.try_time_zone(text,timestamptz)')) as t(signature)
+join pg_catalog.pg_proc as p on p.oid=t.signature::regprocedure
+cross join (values ('PUBLIC'),('anon'),('authenticated'),('service_role')) as r(name);
 select * from extensions.finish();
 
 rollback;

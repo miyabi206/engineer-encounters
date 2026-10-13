@@ -191,8 +191,8 @@ create temporary table results (label text primary key, value jsonb);
 
 -- Fixed row cardinalities are counted by section below.
 -- Original sections: 36 + 25 + 17 + 16 + 56 + 20 + 31 + 29 + 16 + 12 + 17 + 14 + 9 = 298.
--- Review additions: 15 + 30 + 12 + 30 + 7 + 6 = 100; total 398.
-select extensions.plan(398);
+-- Review additions: 15 + 30 + 12 + 30 + 7 + 6 = 100; security queue priority 4; total 402.
+select extensions.plan(402);
 
 -- Catalog: 36 assertions (9 signatures x 3, default 1, columns 1, RLS 2,
 -- policies 2, FK actions 1, indexes 1, operator column 1).
@@ -730,8 +730,21 @@ select extensions.ok(not exists(select 1 from pg_catalog.jsonb_array_elements(sa
 update private.profiles set moderation_state='active' where user_id=safety_test.id(210);
 select extensions.is(safety_test.call(235,'moderated')->'truncated','false'::jsonb,'exactly 200 moderated accounts do not truncate');
 update private.profiles set moderation_state='suspended',operator_outcome='suspended' where user_id=safety_test.id(10);
-select extensions.is(safety_test.call(235,'moderated')#>'{accounts,0}',pg_catalog.jsonb_build_object('account_id',safety_test.id(10),
+select extensions.is((select a from pg_catalog.jsonb_array_elements(safety_test.call(235,'moderated')->'accounts') as a
+    where a->>'account_id'=safety_test.id(10)::text),pg_catalog.jsonb_build_object('account_id',safety_test.id(10),
     'moderation_state','suspended','operator_outcome','suspended','open_report_count',0),'suspended accounts without reports remain reviewable');
+
+-- More than 200 operator outcomes cannot displace an unreviewed auto-hide.
+update private.profiles set moderation_state='hidden',operator_outcome='hidden'
+where user_id between safety_test.id(10) and safety_test.id(210);
+update private.profiles set moderation_state='hidden',operator_outcome=null where user_id=safety_test.id(233);
+select extensions.is(safety_test.call(235,'moderated')#>>'{accounts,0,account_id}',safety_test.id(233)::text,
+    'unreviewed account sorts before 201 lower-ID accounts with operator outcomes');
+select extensions.is(safety_test.call(235,'moderated')#>>'{accounts,199,account_id}',safety_test.id(208)::text,
+    'reviewed accounts keep UUID order after the unreviewed account');
+select extensions.is(pg_catalog.jsonb_array_length(safety_test.call(235,'moderated')->'accounts'),200,
+    'unreviewed-first queue keeps its 200 cap');
+select extensions.is(safety_test.call(235,'moderated')->'truncated','true'::jsonb,'queue detects the additional reviewed accounts');
 
 -- Link/encounter context loss and automatic reactivation prohibition: 9 assertions.
 select safety_test.prepare();

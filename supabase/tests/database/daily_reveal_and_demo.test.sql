@@ -17,6 +17,10 @@ $$;
 insert into auth.users (id) select daily_test.id(n) from pg_catalog.generate_series(1, 230) as n;
 insert into private.profiles (user_id, age_18_declared, terms_version, privacy_version, discovery_on, display_name)
 select daily_test.id(n), true, 'draft', 'draft', true, 'Owner' || n from pg_catalog.generate_series(1, 230) as n;
+-- Private links satisfy discovery without changing the expected card payload.
+insert into private.external_links (owner_id, source, url, visibility)
+select daily_test.id(n), 'other', 'https://example.invalid/fixture', 'private'
+from pg_catalog.generate_series(1, 230) as n;
 insert into private.notification_preferences (user_id, time_zone)
 select daily_test.id(n), 'UTC' from pg_catalog.generate_series(1, 229) as n;
 insert into private.interests (interest_id, label_ja, label_en) values ('daily-a', 'a', 'a');

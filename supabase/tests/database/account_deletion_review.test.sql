@@ -73,8 +73,9 @@ from (values (1), (3), (9), (10), (11), (12), (13), (15)) as f(n);
 
 -- Binding/error contract 5 + unlink and lock witnesses 11 + repeat/merge 16
 -- + expired replacement 5 + expired/empty deletion 6 + restore binding/locks 5
--- + immutable binding 1 + unblock 6 + calendar/cleanup locks 8 = 63.
-select extensions.plan(63);
+-- + immutable binding 1 + unblock 6 + calendar/cleanup locks 8
+-- + live Apple exclusivity/race 10 + unusable zone cleanup 3 = 76.
+select extensions.plan(76);
 
 select extensions.is((select pg_catalog.array_agg(a.attname::text order by a.attnum)
     from pg_catalog.pg_attribute as a where a.attrelid = 'private.apple_identity_bindings'::regclass
@@ -96,6 +97,26 @@ select extensions.ok(private.apple_safety_hash(deletion_review_test.id(1)) is nu
 select private.bind_apple_identity(deletion_review_test.id(1));
 select extensions.is((select apple_id_hash from private.apple_identity_bindings where account_id = deletion_review_test.id(1)),
     (select hash from review_results where label = 'apple-1'), 'binding survives a repeat call after unlink');
+-- The first live account retains its binding after an independent Auth unlink.
+-- Another account may now hold the managed identity, but cannot bind that hash.
+insert into auth.identities (id,user_id,provider,provider_id,identity_data)
+values (deletion_review_test.id(2014),deletion_review_test.id(14),'apple','review-fixture-1','{"sub":"review-fixture-1"}');
+select extensions.ok(exists(select 1 from pg_catalog.pg_constraint as c
+    where c.conrelid='private.apple_identity_bindings'::regclass and c.contype='u'
+      and pg_catalog.pg_get_constraintdef(c.oid)='UNIQUE (apple_id_hash)'), 'one live binding per Apple hash is enforced by a unique constraint');
+select deletion_review_test.error('select private.bind_apple_identity(deletion_review_test.id(14))','account_not_ready','',
+    'second live account cannot bind an Apple hash and receives no identifier detail');
+select deletion_review_test.error('select deletion_review_test.declare_account(14)','account_not_ready','',
+    'declarations refuse the already bound Apple identity');
+select deletion_review_test.error('select deletion_review_test.call(14,''select public.delete_own_account()'')','account_not_ready','',
+    'public deletion refuses the already bound Apple identity without leaking a hash');
+select deletion_review_test.error('select private.restore_deletion_safety(deletion_review_test.id(14))','account_not_ready','',
+    'restoration cannot consume safety records through an identity bound to another account');
+select extensions.ok(not exists(select 1 from private.apple_identity_bindings where account_id=deletion_review_test.id(14))
+    and exists(select 1 from auth.users where id=deletion_review_test.id(14)), 'refused binding/deletion leaves the second account intact and unbound');
+select extensions.is((select apple_id_hash from private.apple_identity_bindings where account_id=deletion_review_test.id(1)),
+    (select hash from review_results where label='apple-1'),'second-account refusals preserve the first binding');
+delete from auth.identities where user_id=deletion_review_test.id(14);
 insert into private.blocks (blocker_id, blocked_id, block_id, placed_day)
 values (deletion_review_test.id(2), deletion_review_test.id(1), deletion_review_test.id(1001), date '2026-10-10');
 insert into private.encounters (encounter_id, user_a, user_b, kind, day_a, day_b)
@@ -245,6 +266,25 @@ select extensions.ok(pg_catalog.strpos(p.prosrc, 'order by u.id for key share;')
     'restoration locks Auth in account order before retained blocks and profile')
 from pg_catalog.pg_proc as p where p.oid = 'private.restore_deletion_safety(uuid)'::regprocedure;
 
+-- Force a competing binding after the precheck to exercise the uniqueness
+-- handler and its subtransaction rollback, without a second test session.
+create function deletion_review_test.binding_race()
+returns trigger language plpgsql set search_path = '' as $$
+begin
+    insert into private.apple_identity_bindings(account_id,apple_id_hash)
+    values (deletion_review_test.id(14),new.apple_id_hash);
+    return new;
+end;
+$$;
+create trigger binding_race before insert on private.apple_identity_bindings
+for each row when (new.account_id=deletion_review_test.id(13)) execute function deletion_review_test.binding_race();
+select deletion_review_test.error('select deletion_review_test.declare_account(13)','account_not_ready','',
+    'a concurrent binding uniqueness failure exposes only account_not_ready');
+select extensions.ok(not exists(select 1 from private.apple_identity_bindings where account_id=deletion_review_test.id(13)),
+    'failed binding race leaves the caller unbound');
+select extensions.ok(not exists(select 1 from private.apple_identity_bindings where account_id=deletion_review_test.id(14)),
+    'failed binding race rolls back the injected competitor');
+drop trigger binding_race on private.apple_identity_bindings;
 select private.bind_apple_identity(deletion_review_test.id(13));
 update auth.identities set provider_id = 'changed-review-13', identity_data = '{"sub":"changed-review-13"}'
 where user_id = deletion_review_test.id(13) and provider = 'apple';
@@ -267,6 +307,10 @@ from pg_catalog.pg_proc as p cross join lateral (
 ) as s where p.oid = 'private.unblock(uuid)'::regprocedure;
 
 -- Missing preferences and invalid zone names both leave expiry unknown.
+insert into private.iana_time_zones(name) values ('Unknown/Zone');
+insert into private.report_deliveries(user_id,report_day,status) values
+    (deletion_review_test.id(19),date '2026-01-01','closed'),
+    (deletion_review_test.id(20),date '2026-01-01','closed');
 insert into private.encounters (encounter_id, user_a, user_b, kind, day_a, day_b)
 select deletion_review_test.id(8000+n), deletion_review_test.id(n), deletion_review_test.id(20), 'ambient', date '2026-01-01', date '2026-01-01'
 from (values (18), (19)) as f(n);
@@ -289,7 +333,12 @@ $$;
 create trigger observe_retention_locks before delete on private.encounter_views
 for each row when (old.encounter_id in (deletion_review_test.id(8018), deletion_review_test.id(8019)))
 execute function deletion_review_test.observe_cleanup_locks();
-select private.cleanup_retained_data(timestamptz '2026-10-13 00:00:00+00');
+select extensions.lives_ok($q$select private.cleanup_retained_data(timestamptz '2026-10-13 00:00:00+00')$q$,
+    'cleanup skips an unusable cached zone without aborting known-zone accounts');
+select extensions.ok(exists(select 1 from private.report_deliveries where user_id=deletion_review_test.id(19)),
+    'unusable zone leaves delivery expiry unknown');
+select extensions.ok(not exists(select 1 from private.report_deliveries where user_id=deletion_review_test.id(20)),
+    'known-zone delivery expiry still cleans up independently');
 select extensions.ok(exists (select 1 from private.encounter_views where viewer_id = deletion_review_test.id(18)), 'cleanup keeps a view with no viewer zone');
 select extensions.ok(exists (select 1 from private.encounter_views where viewer_id = deletion_review_test.id(19)), 'cleanup keeps a view with an unrecognized viewer zone');
 select extensions.is((select pg_catalog.count(*) from private.encounter_views where viewer_id = deletion_review_test.id(20)), 0::bigint, 'known-zone peers expire independently');

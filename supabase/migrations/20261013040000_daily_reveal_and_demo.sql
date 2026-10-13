@@ -109,7 +109,7 @@ language sql stable security definer set search_path = '' as $$
     where v.viewer_id = $1 and not v.revealed and e.kind = 'ambient' and $1 in (e.user_a, e.user_b)
       and (v.favorite or exists (select 1 from private.saved_links as s
             where s.viewer_id = $1 and s.encounter_id = v.encounter_id)
-        or $2 < pg_catalog.timezone(z.name, ((case when e.user_a = $1 then e.day_a else e.day_b end) + 30)::timestamp));
+        or $2 < private.try_time_zone(z.name, ((case when e.user_a = $1 then e.day_a else e.day_b end) + 30)::timestamp));
 $$;
 
 -- Ordinary days need only local-clock/offset arithmetic. Near a transition,
@@ -138,6 +138,9 @@ begin
         due_day := due_day - 1;
     end loop;
     return due_day;
+exception when invalid_parameter_value then
+    -- A cached name may no longer be usable by this PostgreSQL installation.
+    return null;
 end;
 $$;
 
@@ -185,13 +188,12 @@ begin
     if due_day is null then
         return pg_catalog.jsonb_build_object('report_day', null, 'newly_revealed_encounter_ids', '[]'::jsonb, 'closed', false);
     end if;
-    -- A closed, caught-up read does not serialize or attempt any row write.
+    -- A closed latest date cannot reveal a late waiting view. With no older open
+    -- delivery, skip serialization and writes even if such a view is waiting.
     if exists (select 1 from private.report_deliveries as d
         where d.user_id = account_id and d.report_day = due_day and d.status = 'closed')
         and not exists (select 1 from private.report_deliveries as d
-            where d.user_id = account_id and d.status = 'open' and d.report_day < due_day)
-        and not exists (select 1 from private.waiting_ambient_views(account_id, report_at) as w
-            where w.reveal_report_day <= due_day) then
+            where d.user_id = account_id and d.status = 'open' and d.report_day < due_day) then
         return pg_catalog.jsonb_build_object('report_day', due_day, 'newly_revealed_encounter_ids', '[]'::jsonb, 'closed', false);
     end if;
     perform pg_catalog.pg_advisory_xact_lock(31001, pg_catalog.hashtext(account_id::text));
@@ -402,10 +404,10 @@ returns jsonb language sql stable security definer set search_path = '' as $$
         order by g.counterpart_id, g.kind, g.day, g.favorite desc, g.encounter_id
     ), limited as (
         select g.* from winners as g
-        order by g.day desc, g.compatible desc, g.shared_interest_count desc, g.encounter_id limit 201
+        order by g.day desc, g.shared_interest_count desc, g.encounter_id limit 201
     ), numbered as (
         select g.*, pg_catalog.row_number() over (
-            order by g.day desc, g.compatible desc, g.shared_interest_count desc, g.encounter_id
+            order by g.day desc, g.shared_interest_count desc, g.encounter_id
         ) as position from limited as g
     )
     select pg_catalog.jsonb_build_object('cards', coalesce(pg_catalog.jsonb_agg(
@@ -506,9 +508,9 @@ begin
         then interval '1 day' else interval '1 hour' end;
     delete from private.qr_codes as q where q.expires_at <= pg_catalog.floor(extract(epoch from cleanup_at))::bigint;
     delete from private.sessions as s where least(s.expires_at, s.stopped_at) <= cleanup_at - interval '48 hours';
-    delete from private.report_deliveries as d using private.notification_preferences as n
-    where n.user_id = d.user_id and d.status = 'closed'
-      and d.report_day <= (cleanup_at at time zone n.time_zone)::date - 30
+    delete from private.report_deliveries as d using private.notification_preferences as n, private.iana_time_zones as z
+    where n.user_id = d.user_id and z.name = n.time_zone and d.status = 'closed'
+      and d.report_day <= private.try_time_zone(z.name, cleanup_at)::date - 30
       and not exists (select 1 from private.waiting_ambient_views(d.user_id, cleanup_at) as w
           where w.reveal_report_day <= d.report_day);
 end;

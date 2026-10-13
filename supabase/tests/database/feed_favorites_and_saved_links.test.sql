@@ -530,11 +530,11 @@ insert into private.encounter_views (encounter_id,viewer_id,revealed,reveal_repo
 select feed_test.id(1000+n),feed_test.id(1),true,feed_test.day(),true from pg_catalog.generate_series(4,7) as n;
 select extensions.is((select pg_catalog.jsonb_agg(c.value->'encounter_id' order by c.position)
     from pg_catalog.jsonb_array_elements(feed_test.as_caller(feed_test.id(1),'feed')->'cards') with ordinality as c(value,position)),
-    pg_catalog.jsonb_build_array(feed_test.id(1005),feed_test.id(1004),feed_test.id(1006),feed_test.id(1007),feed_test.id(100)),
-    'feed sorts day, compatibility, shared count, then UUID');
+    pg_catalog.jsonb_build_array(feed_test.id(1005),feed_test.id(1006),feed_test.id(1004),feed_test.id(1007),feed_test.id(100)),
+    'feed sorts day, visible shared count, then UUID');
 select extensions.is((select pg_catalog.jsonb_agg(c.value->'encounter_id' order by c.position)
     from pg_catalog.jsonb_array_elements(feed_test.as_caller(feed_test.id(1),'favorites')->'cards') with ordinality as c(value,position)),
-    pg_catalog.jsonb_build_array(feed_test.id(1005),feed_test.id(1004),feed_test.id(1006),feed_test.id(1007),feed_test.id(100)),
+    pg_catalog.jsonb_build_array(feed_test.id(1005),feed_test.id(1006),feed_test.id(1004),feed_test.id(1007),feed_test.id(100)),
     'favorites use the same full ordering');
 -- Simulate a later encounter after only the counterpart changes registered zone.
 update private.notification_preferences set time_zone = 'Etc/GMT-14' where user_id = feed_test.id(5);
@@ -542,9 +542,9 @@ insert into private.encounters values (feed_test.id(1505),feed_test.id(1),feed_t
 insert into private.encounter_views values (feed_test.id(1505),feed_test.id(1),true,feed_test.day(),true);
 update private.encounter_views set favorite = false where encounter_id = feed_test.id(1005);
 insert into private.saved_links values (feed_test.id(1),feed_test.id(1005),feed_test.link_id(5));
-select extensions.is(feed_test.as_caller(feed_test.id(1),'feed')#>>'{cards,0,encounter_id}',feed_test.id(1505)::text,
+select extensions.is(feed_test.as_caller(feed_test.id(1),'feed')#>>'{cards,1,encounter_id}',feed_test.id(1505)::text,
     'favorite wins same counterpart/kind/viewer day after counterpart zone change');
-select extensions.is(feed_test.as_caller(feed_test.id(1),'favorites')#>>'{cards,0,encounter_id}',feed_test.id(1505)::text,
+select extensions.is(feed_test.as_caller(feed_test.id(1),'favorites')#>>'{cards,1,encounter_id}',feed_test.id(1505)::text,
     'favorites filter before dedup');
 select extensions.is((select pg_catalog.count(*) from private.encounters where user_b = feed_test.id(5)),2::bigint,
     'dedup preserves both underlying date-pair rows');
@@ -559,7 +559,7 @@ select extensions.is(feed_test.as_caller(feed_test.id(1),'feed')#>>'{cards,0,enc
     'without a favorite the smallest encounter UUID wins');
 select extensions.is((select pg_catalog.jsonb_agg(c.value->'encounter_id' order by c.position)
     from pg_catalog.jsonb_array_elements(feed_test.as_caller(feed_test.id(1),'favorites')->'cards') with ordinality as c(value,position)),
-    pg_catalog.jsonb_build_array(feed_test.id(1004),feed_test.id(1006),feed_test.id(1007),feed_test.id(100)),
+    pg_catalog.jsonb_build_array(feed_test.id(1006),feed_test.id(1004),feed_test.id(1007),feed_test.id(100)),
     'unfavorite removes only that encounter from favorite selection');
 update private.external_links set visibility = 'everyone_eligible',display_order = 0 where link_id = feed_test.link_id(5,2);
 insert into private.saved_links values (feed_test.id(1),feed_test.id(1005),feed_test.link_id(5,2)),

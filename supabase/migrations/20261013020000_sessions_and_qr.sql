@@ -214,7 +214,9 @@ declare
     issuer uuid;
     code_hash bytea;
     code_available boolean;
-    server_seconds bigint := pg_catalog.floor(extract(epoch from pg_catalog.now()))::bigint;
+    server_time timestamptz;
+    server_seconds bigint;
+    code_deadline bigint;
     confirmed_encounter uuid;
 begin
     perform pg_catalog.pg_advisory_xact_lock(31001, pg_catalog.hashtext(caller::text));
@@ -240,9 +242,12 @@ begin
     -- serialize with discovery/profile/link prerequisite changes, then lock QR.
     perform u.id from auth.users as u where u.id in (caller, issuer) order by u.id for key share;
     perform p.user_id from private.profiles as p where p.user_id in (caller, issuer) order by p.user_id for update;
-    perform 1 from private.qr_codes as q where q.code_digest = code_hash and q.issuer_id = issuer
-        and q.expires_at > server_seconds for update;
+    select q.expires_at into code_deadline from private.qr_codes as q
+    where q.code_digest = code_hash and q.issuer_id = issuer for update;
     code_available := found;
+    -- All lock waits and the row read precede the one redemption clock.
+    server_time := pg_catalog.clock_timestamp();
+    server_seconds := pg_catalog.floor(extract(epoch from server_time))::bigint;
     perform private.require_caller();
     if not private.account_is_ready(caller) then
         perform private.raise_error('account_not_ready');
@@ -250,7 +255,7 @@ begin
     if not exists (select 1 from private.profiles as p where p.user_id = caller and p.discovery_on) then
         perform private.raise_error('prerequisite_missing', array['discovery']);
     end if;
-    if not code_available or not exists (select 1 from auth.users as u where u.id = issuer)
+    if not code_available or code_deadline <= server_seconds or not exists (select 1 from auth.users as u where u.id = issuer)
         or not private.account_is_ready(issuer)
         or not exists (select 1 from private.profiles as p where p.user_id = issuer and p.discovery_on)
         or exists (select 1 from private.blocks as b
@@ -267,7 +272,7 @@ begin
         perform private.raise_error('rate_limited');
     end if;
     confirmed_encounter := private.confirm_encounter(caller, issuer, 'qr',
-        server_seconds, server_seconds, pg_catalog.now());
+        server_seconds, server_seconds, server_time);
     delete from private.qr_codes as q where q.code_digest = code_hash;
     return pg_catalog.jsonb_build_object('encounter_id', confirmed_encounter);
 exception when foreign_key_violation then
@@ -318,7 +323,8 @@ begin
     if not exists (select 1 from private.user_interests as i where i.user_id = caller) then
         missing_fields := pg_catalog.array_append(missing_fields, 'interest');
     end if;
-    if not exists (select 1 from private.external_links as l where l.owner_id = caller) then
+    if not exists (select 1 from private.external_links as l where l.owner_id = caller
+        and (l.source <> 'github' or private.github_identity_is_live(l.owner_id))) then
         missing_fields := pg_catalog.array_append(missing_fields, 'link');
     end if;
     if pg_catalog.cardinality(missing_fields) > 0 then

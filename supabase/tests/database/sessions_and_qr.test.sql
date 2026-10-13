@@ -119,8 +119,8 @@ delete from auth.users where id = sessions_qr_test.id(12);
 
 -- Every row-producing assertion below has a fixed cardinality. The plan is
 -- 24 RPC metadata + 5 schema + 18 Live + 12 Ready + 3 Discovery +
--- 114 existing behavior + 6 lock/clock predicates + 17 waiter regressions.
-select extensions.plan(199);
+-- 114 existing behavior + 6 lock/clock predicates + 17 waiter regressions + 9 QR wall-clock checks.
+select extensions.plan(208);
 
 select extensions.ok(p.prosecdef and 'search_path=""' = any(p.proconfig), f.signature || ' has the definer boundary')
 from sessions_qr_test.rpc as f join pg_catalog.pg_proc as p on p.oid = f.signature::regprocedure;
@@ -395,7 +395,7 @@ select extensions.is((select pg_catalog.count(*) from private.account_limit_even
 select extensions.is((select pg_catalog.count(*) from private.encounters where kind = 'qr'), 0::bigint, 'failed redemptions create no encounters');
 
 -- A live code just inside its expiry is accepted, using each viewer's zone.
-update private.qr_codes set expires_at = (select seconds + 1 from sessions_qr_test.clock) where issuer_id = sessions_qr_test.id(1);
+update private.qr_codes set expires_at = pg_catalog.floor(extract(epoch from pg_catalog.clock_timestamp()))::bigint + 2 where issuer_id = sessions_qr_test.id(1);
 insert into sessions_qr_test.results values ('redemption', sessions_qr_test.redeem(2, 'blocked'));
 select extensions.is((select pg_catalog.array_agg(k order by k) from sessions_qr_test.results as r,
     lateral pg_catalog.jsonb_object_keys(r.value) as k where r.label = 'redemption'), array['encounter_id'], 'redemption has exact wire keys');
@@ -498,5 +498,50 @@ select sessions_qr_test.unavailable(2, 'deleted', 'deleted issuer code is indist
 select extensions.ok(not exists (select 1 from private.account_limit_events where bucket in ('get_own_session', 'stop_session', 'cancel_qr_code', 'set_discovery')),
     'get, stop, cancel and discovery introduce no budgets');
 
+-- One session cannot wait behind another session's row lock. Advance the
+-- wall clock past a code that was live at transaction now, then verify the
+-- post-lock clock path and that a failed redemption rolls back every write.
+insert into private.qr_codes(code_digest,issuer_id,expires_at)
+values (pg_catalog.sha256(pg_catalog.decode(pg_catalog.repeat('ce',16),'hex')),sessions_qr_test.id(1),
+    pg_catalog.ceil(extract(epoch from pg_catalog.clock_timestamp()))::bigint + 1);
+select extensions.ok((select expires_at > extract(epoch from pg_catalog.now()) from private.qr_codes
+    where issuer_id=sessions_qr_test.id(1)), 'waiting QR was live at transaction now');
+insert into sessions_qr_test.results values ('before-expiry-wait',pg_catalog.jsonb_build_array(
+    (select pg_catalog.count(*) from private.encounters),
+    (select pg_catalog.count(*) from private.account_limit_events where bucket='redeem_qr_code')));
+select pg_catalog.pg_sleep(greatest(0,(select expires_at::numeric-extract(epoch from pg_catalog.clock_timestamp())+0.05
+    from private.qr_codes where issuer_id=sessions_qr_test.id(1)))::double precision);
+select sessions_qr_test.expect_error($q$select sessions_qr_test.as_caller(sessions_qr_test.id(2),
+    'public.redeem_qr_code(''cececececececececececececececece'')')$q$,
+    'not_found','','QR that expires while time advances is rejected by fresh wall time');
+select extensions.ok(exists(select 1 from private.qr_codes where issuer_id=sessions_qr_test.id(1)),
+    'expired redemption leaves the code for cleanup');
+select extensions.is((select pg_catalog.count(*) from private.account_limit_events where bucket='redeem_qr_code'),
+    (select (value->>1)::bigint from sessions_qr_test.results where label='before-expiry-wait'), 'expired waiting QR spends no budget');
+select extensions.is((select pg_catalog.count(*) from private.encounters),
+    (select (value->>0)::bigint from sessions_qr_test.results where label='before-expiry-wait'), 'expired waiting QR creates no encounter');
+select extensions.ok(pg_catalog.strpos(p.prosrc,'server_time := pg_catalog.clock_timestamp()')
+        > pg_catalog.strpos(p.prosrc,'where q.code_digest = code_hash and q.issuer_id = issuer for update;')
+    and pg_catalog.strpos(p.prosrc,'code_deadline <= server_seconds')>0
+    and pg_catalog.strpos(p.prosrc,'pg_catalog.now()')=0,
+    'redemption reads the wall clock after all locks and the code row, including expiry equality')
+from pg_catalog.pg_proc as p where p.oid='private.redeem_qr_code(text)'::regprocedure;
+select extensions.ok(pg_catalog.strpos(p.prosrc,'server_seconds, server_seconds, server_time')>0,
+    'redemption passes the same fresh clock to both encounter dates and scheduling')
+from pg_catalog.pg_proc as p where p.oid='private.redeem_qr_code(text)'::regprocedure;
+-- Passing a clock across a date boundary pins the shared confirmation helper's
+-- date/scheduling behavior independently of this transaction's frozen now.
+delete from private.encounters where user_a=sessions_qr_test.id(1) and user_b=sessions_qr_test.id(2) and kind='qr';
+insert into sessions_qr_test.results values ('dated-confirmation',pg_catalog.to_jsonb(private.confirm_encounter(
+    sessions_qr_test.id(1),sessions_qr_test.id(2),'qr',1791937800,1791937800,timestamptz '2026-10-14 00:30:00+00')));
+select extensions.ok((select day_a=date '2026-10-14' and day_b=date '2026-10-13'
+    from private.encounters where encounter_id=(select (value #>> '{}')::uuid
+        from sessions_qr_test.results where label='dated-confirmation')),
+    'confirmation uses the supplied redemption clock for both local encounter dates');
+select extensions.ok((select pg_catalog.bool_and(v.reveal_report_day=private.next_report_day(v.viewer_id,
+        timestamptz '2026-10-14 00:30:00+00'))
+    from private.encounter_views as v where v.encounter_id=(select (value #>> '{}')::uuid
+        from sessions_qr_test.results where label='dated-confirmation')),
+    'the same supplied redemption clock assigns both report dates');
 select * from extensions.finish();
 rollback;

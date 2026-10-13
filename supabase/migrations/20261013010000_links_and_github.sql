@@ -72,17 +72,79 @@ alter table private.external_links
         and private.github_repository_url(url) and private.trim_input(title) <> ''
         and verification_state = 'verified'));
 
--- Every operation needing two account locks acquires distinct account IDs in
--- ascending UUID order, before sorted nonce keys, sorted pair keys, then rows.
+-- Compute actual advisory keys before acquiring any, deduplicate collisions,
+-- then acquire in key order before sorted nonce keys, sorted pair keys and rows.
+-- Row locks still use ascending UUID order.
 create function private.lock_account_pair(account_a uuid, account_b uuid)
 returns void language plpgsql security definer set search_path = '' as $$
-declare account uuid;
+declare lock_keys integer[]; lock_key integer;
 begin
-    for account in select distinct a.id from (values (account_a), (account_b)) as a(id)
-        where a.id is not null order by a.id loop
-        perform pg_catalog.pg_advisory_xact_lock(31001, pg_catalog.hashtext(account::text));
+    select pg_catalog.array_agg(k.value order by k.value) into lock_keys
+    from (select distinct pg_catalog.hashtext(a.id::text) as value
+        from (values (account_a), (account_b)) as a(id) where a.id is not null) as k;
+    foreach lock_key in array coalesce(lock_keys, '{}'::integer[]) loop
+        perform pg_catalog.pg_advisory_xact_lock(31001, lock_key);
     end loop;
 end;
+$$;
+
+-- Repository evidence is current only while managed Auth and the cache agree.
+-- SQL EXISTS keeps both link and eligibility predicates set-based.
+create function private.github_identity_is_live(account_id uuid)
+returns boolean language sql stable set search_path = '' as $$
+    select exists (select 1 from private.linked_identities as c
+        join auth.identities as i on i.user_id = c.user_id and i.provider = c.provider
+            and i.provider_id = c.provider_user_id
+        where c.user_id = $1 and c.provider = 'github');
+$$;
+
+-- Treat discovery with no current link as off without mutating owner settings.
+create or replace function private.encounter_authorization(viewer_account uuid, owner_account uuid)
+returns table (eligible boolean, compatible boolean, shared_interest_count integer)
+language sql
+stable
+set search_path = ''
+as $$
+    with facts as (
+        select coalesce(viewer_account <> owner_account, false)
+            and exists (
+                select 1 from private.profiles as p
+                where p.user_id = viewer_account and p.discovery_on
+                  and exists (select 1 from private.external_links as l where l.owner_id = p.user_id
+                      and (l.source <> 'github' or private.github_identity_is_live(l.owner_id)))
+            )
+            and exists (
+                select 1 from private.profiles as p
+                where p.user_id = owner_account and p.discovery_on
+                  and exists (select 1 from private.external_links as l where l.owner_id = p.user_id
+                      and (l.source <> 'github' or private.github_identity_is_live(l.owner_id)))
+            )
+            and not exists (
+                select 1 from private.blocks as b
+                where (b.blocker_id = viewer_account and b.blocked_id = owner_account)
+                   or (b.blocker_id = owner_account and b.blocked_id = viewer_account)
+            ) as eligible,
+            exists (
+                select 1 from private.user_purposes as v
+                join private.user_purposes as o on o.purpose = v.purpose
+                where v.user_id = viewer_account and o.user_id = owner_account
+            ) as overlapping_purposes,
+            (select pg_catalog.count(*)::integer
+                from private.user_interests as v
+                join private.user_interests as o on o.interest_id = v.interest_id
+                where v.user_id = viewer_account and o.user_id = owner_account
+            ) as shared_interest_count,
+            coalesce((select m.minimum_shared_interests from private.matching_preferences as m
+                where m.user_id = viewer_account), 1) as viewer_threshold,
+            coalesce((select m.minimum_shared_interests from private.matching_preferences as m
+                where m.user_id = owner_account), 1) as owner_threshold
+    )
+    select f.eligible,
+        f.eligible and f.overlapping_purposes
+            and f.shared_interest_count >= f.viewer_threshold
+            and f.shared_interest_count >= f.owner_threshold,
+        f.shared_interest_count
+    from facts as f;
 $$;
 
 -- All account mutations take this lock before looking at live Auth or locking
@@ -167,7 +229,9 @@ returns jsonb language sql stable set search_path = '' as $$
         'link_id', (link).link_id, 'source', (link).source, 'source_item_id', (link).source_item_id,
         'url', (link).url, 'title', (link).title, 'description', (link).description,
         'main_language', (link).main_language, 'tags', (link).tags, 'opening_text', (link).opening_text,
-        'visibility', (link).visibility, 'verification_state', (link).verification_state,
+        'visibility', (link).visibility, 'verification_state', case
+            when (link).source = 'github' and not private.github_identity_is_live((link).owner_id)
+                then 'unverified' else (link).verification_state end,
         'display_order', (link).display_order);
 $$;
 
@@ -272,7 +336,11 @@ begin
         perform private.raise_error('not_found');
     end if;
     if exists (select 1 from private.profiles as p where p.user_id = caller and p.discovery_on)
-        and (select pg_catalog.count(*) from private.external_links as l where l.owner_id = caller) = 1 then
+        and exists (select 1 from private.external_links as l where l.link_id = input_link_id
+            and (l.source <> 'github' or private.github_identity_is_live(l.owner_id)))
+        and not exists (select 1 from private.external_links as l where l.owner_id = caller
+            and l.link_id <> input_link_id
+            and (l.source <> 'github' or private.github_identity_is_live(l.owner_id))) then
         perform private.raise_error('prerequisite_missing', array['link']);
     end if;
     -- Unit 4 saved_links references this PK with ON DELETE CASCADE.
@@ -447,7 +515,7 @@ begin
     perform private.lock_link_account(account_id);
     if not private.account_is_ready(account_id) then perform private.raise_error('account_not_ready'); end if;
     select i.provider_id into live_provider_id from auth.identities as i
-        left join private.linked_identities as c on c.user_id = i.user_id and c.provider = 'github'
+        join private.linked_identities as c on c.user_id = i.user_id and c.provider = 'github'
             and c.provider_user_id = i.provider_id
         where i.user_id = account_id and i.provider = 'github'
         order by (c.user_id is not null) desc, i.created_at, i.id limit 1 for share of i;
