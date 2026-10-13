@@ -4,8 +4,9 @@ create extension if not exists pgtap with schema extensions;
 
 -- 4 roles x 3 schemas x 3 object kinds = 36 catalog scans;
 -- 7 schema ACLs + 12 default ACLs + 3 RPC inventory checks + 3 public
--- function denial scans + 1 service overload check = 62 assertions.
-select extensions.plan(62);
+-- function denial scans + 1 service overload check + 10 Apple binding
+-- table/function boundary checks = 72 assertions.
+select extensions.plan(72);
 
 create temporary table protected_schemas (name text primary key);
 insert into protected_schemas values ('public'), ('private'), ('service');
@@ -179,6 +180,30 @@ select extensions.is((select pg_catalog.count(*) from service_rpc_signatures as 
     where p.pronamespace = 'service'::regnamespace), 9::bigint, 'all nine service RPC signatures exist');
 select extensions.is((select pg_catalog.count(*) from pg_catalog.pg_proc as p where p.pronamespace = 'service'::regnamespace),
     9::bigint, 'no unlisted service functions or overloads');
+
+-- Live Apple evidence has the same boundary as the retained safety record.
+select extensions.ok(c.relrowsecurity, 'Apple binding table has RLS')
+from pg_catalog.pg_class as c where c.oid = 'private.apple_identity_bindings'::regclass;
+select extensions.is((select pg_catalog.count(*) from pg_catalog.pg_policy as p
+    where p.polrelid = 'private.apple_identity_bindings'::regclass), 0::bigint, 'Apple binding table has no policies');
+select extensions.ok(not exists (
+    select 1 from pg_catalog.pg_class as c
+    cross join lateral pg_catalog.aclexplode(coalesce(c.relacl, pg_catalog.acldefault('r', c.relowner))) as a
+    where c.oid = 'private.apple_identity_bindings'::regclass and a.grantee = 0
+), 'PUBLIC has no Apple binding table grants');
+select extensions.ok(not pg_catalog.has_table_privilege(r.name, 'private.apple_identity_bindings',
+    'select,insert,update,delete,truncate,references,trigger,maintain')
+    and not pg_catalog.has_any_column_privilege(r.name, 'private.apple_identity_bindings', 'select,insert,update,references'),
+    r.name || ' cannot access Apple binding rows or columns')
+from (values ('anon'), ('authenticated'), ('service_role')) as r(name);
+select extensions.ok(not exists (
+    select 1 from pg_catalog.pg_proc as p
+    cross join lateral pg_catalog.aclexplode(coalesce(p.proacl, pg_catalog.acldefault('f', p.proowner))) as a
+    where p.oid = 'private.bind_apple_identity(uuid)'::regprocedure and a.grantee = 0
+), 'PUBLIC cannot execute the Apple binding helper');
+select extensions.ok(not pg_catalog.has_function_privilege(r.name, 'private.bind_apple_identity(uuid)', 'execute'),
+    r.name || ' cannot execute the Apple binding helper')
+from (values ('anon'), ('authenticated'), ('service_role')) as r(name);
 
 select * from extensions.finish();
 

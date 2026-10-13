@@ -1,3 +1,12 @@
+-- Live-account evidence survives an Auth unlink, but cascades on hard deletion.
+-- Only private definers can read it; it is not part of the retained record.
+create table private.apple_identity_bindings (
+    account_id uuid primary key references auth.users (id) on delete cascade,
+    apple_id_hash bytea not null check (pg_catalog.octet_length(apple_id_hash) = 32)
+);
+alter table private.apple_identity_bindings enable row level security;
+revoke all on table private.apple_identity_bindings from public, anon, authenticated, service_role;
+
 create table private.deletion_safety_records (
     apple_id_hash bytea primary key check (pg_catalog.octet_length(apple_id_hash) = 32),
     operator_outcome text check (operator_outcome in ('dismissed', 'hidden', 'suspended')),
@@ -45,6 +54,61 @@ begin
     end if;
     return extensions.hmac(pg_catalog.convert_to('EEAPPLE1:apple:' || apple_provider_id, 'UTF8'),
         pg_catalog.convert_to(safety_key, 'UTF8'), 'sha256');
+end;
+$$;
+
+-- Unit 7 must call this as soon as sign-up supplies verified Apple evidence.
+-- The first binding is immutable, including across unlink/relink operations.
+create function private.bind_apple_identity(account_id uuid)
+returns void language plpgsql security definer set search_path = '' as $$
+declare safety_hash bytea;
+begin
+    if account_id is null then perform private.raise_error('invalid_input', array['account_id']); end if;
+    perform pg_catalog.pg_advisory_xact_lock(31001, pg_catalog.hashtext(account_id::text));
+    safety_hash := private.apple_safety_hash(account_id);
+    if safety_hash is null then return; end if;
+    insert into private.apple_identity_bindings (account_id, apple_id_hash)
+    values (account_id, safety_hash) on conflict on constraint apple_identity_bindings_pkey do nothing;
+end;
+$$;
+
+create or replace function private.accept_declarations(input_age_18 boolean, input_terms_version text, input_privacy_version text)
+returns void language plpgsql security definer set search_path = '' as $$
+declare
+    caller uuid := private.require_caller();
+    invalid_fields text[] := '{}'::text[];
+begin
+    perform private.lock_link_account(caller);
+    if not exists (select 1 from private.profiles as p where p.user_id = caller)
+        and exists (select 1 from auth.identities as i where i.user_id = caller and i.provider = 'github') then
+        perform private.raise_error('account_not_ready');
+    end if;
+    if input_age_18 is distinct from true then
+        perform private.raise_error('declaration_required');
+    end if;
+    if input_terms_version is null or private.trim_input(input_terms_version) = '' or pg_catalog.char_length(private.trim_input(input_terms_version)) > 32 then
+        invalid_fields := pg_catalog.array_append(invalid_fields, 'terms_version');
+    end if;
+    if input_privacy_version is null or private.trim_input(input_privacy_version) = '' or pg_catalog.char_length(private.trim_input(input_privacy_version)) > 32 then
+        invalid_fields := pg_catalog.array_append(invalid_fields, 'privacy_version');
+    end if;
+    if pg_catalog.cardinality(invalid_fields) > 0 then
+        perform private.raise_error('invalid_input', invalid_fields);
+    end if;
+    perform private.bind_apple_identity(caller);
+    insert into private.profiles as p (user_id, age_18_declared, terms_version, privacy_version)
+    values (caller, true, private.trim_input(input_terms_version), private.trim_input(input_privacy_version))
+    on conflict (user_id) do update set age_18_declared = true,
+        terms_version = excluded.terms_version, privacy_version = excluded.privacy_version;
+    insert into private.matching_preferences (user_id) values (caller)
+    on conflict (user_id) do nothing;
+    insert into private.field_visibility (owner_id, field, level)
+    values (caller, 'display_name', 'everyone_eligible'), (caller, 'introduction', 'everyone_eligible'),
+        (caller, 'interests', 'everyone_eligible'), (caller, 'purposes', 'everyone_eligible'),
+        (caller, 'contact_detail', 'private')
+    on conflict (owner_id, field) do nothing;
+exception when foreign_key_violation then
+    perform private.link_write_race(caller);
 end;
 $$;
 
@@ -120,13 +184,12 @@ declare
     lock_key bigint;
     pair_key integer;
     operative_outcome text;
+    retention_seconds bigint;
+    written_blocks integer;
 begin
     if caller is null then perform private.raise_error('not_authenticated'); end if;
     perform pg_catalog.pg_advisory_xact_lock(31001, pg_catalog.hashtext(caller::text));
     perform private.require_caller();
-    -- Preflight before row locks or any change; the computed value never leaves
-    -- the private transaction. Auth metadata and linked identity caches are ignored.
-    perform private.apple_safety_hash(caller);
     for lock_key in
         select distinct pg_catalog.hashtextextended(pg_catalog.encode(n.digest, 'hex'), 0)
         from private.encounter_candidates as c
@@ -144,18 +207,41 @@ begin
             from private.blocks as b where b.blocker_id = caller or b.blocked_id = caller
         ) as p order by 1
     loop perform pg_catalog.pg_advisory_xact_lock(31003, pair_key); end loop;
+    -- Account, sorted nonce keys, sorted pair keys, then Auth before profile:
+    -- QR redemption also takes its pair lock, Auth key share, then profiles.
+    perform 1 from auth.users as u where u.id = caller for update;
+    if not found then perform private.raise_error('not_authenticated'); end if;
+    -- Validate the key before destructive writes, and preserve verified evidence
+    -- even if a previously bound identity has since been unlinked in Auth.
+    perform private.bind_apple_identity(caller);
+    select b.apple_id_hash into safety_hash from private.apple_identity_bindings as b where b.account_id = caller;
     perform private.turn_discovery_off(caller);
-    safety_hash := private.apple_safety_hash(caller);
     select p.operator_outcome into operative_outcome from private.profiles as p where p.user_id = caller;
     if safety_hash is not null then
-        insert into private.deletion_safety_records (apple_id_hash, operator_outcome, delete_after)
-        values (safety_hash, operative_outcome,
-            pg_catalog.floor(extract(epoch from pg_catalog.clock_timestamp()))::bigint + 31536000)
-        on conflict (apple_id_hash) do update set operator_outcome = excluded.operator_outcome,
-            delete_after = excluded.delete_after;
-        insert into private.deletion_safety_blocks (apple_id_hash, blocker_id, block_id, placed_day)
-        select safety_hash, b.blocker_id, b.block_id, b.placed_day from private.blocks as b where b.blocked_id = caller
-        on conflict (apple_id_hash, blocker_id) do nothing;
+        perform 1 from private.deletion_safety_records as r where r.apple_id_hash = safety_hash for update;
+        retention_seconds := pg_catalog.floor(extract(epoch from pg_catalog.clock_timestamp()))::bigint;
+        -- Expired outcomes and children are erased, never revived by an upsert.
+        delete from private.deletion_safety_records as r
+        where r.apple_id_hash = safety_hash and r.delete_after <= retention_seconds;
+        if operative_outcome is not null or exists (
+            select 1 from private.blocks as b where b.blocked_id = caller
+        ) then
+            insert into private.deletion_safety_records as r (apple_id_hash, operator_outcome, delete_after)
+            values (safety_hash, operative_outcome, retention_seconds + 31536000)
+            on conflict (apple_id_hash) do update
+                set operator_outcome = coalesce(excluded.operator_outcome, r.operator_outcome),
+                    delete_after = greatest(r.delete_after, excluded.delete_after)
+                where excluded.operator_outcome is not null;
+            insert into private.deletion_safety_blocks (apple_id_hash, blocker_id, block_id, placed_day)
+            select safety_hash, b.blocker_id, b.block_id, b.placed_day from private.blocks as b where b.blocked_id = caller
+            on conflict (apple_id_hash, blocker_id) do nothing;
+            get diagnostics written_blocks = row_count;
+            if written_blocks > 0 then
+                update private.deletion_safety_records as r
+                set delete_after = greatest(r.delete_after, retention_seconds + 31536000)
+                where r.apple_id_hash = safety_hash;
+            end if;
+        end if;
     end if;
     perform private.remove_encounter_pair(caller, null::uuid, null::uuid);
     delete from private.reports as r where r.reporter_id = caller or r.subject_id = caller;
@@ -199,23 +285,28 @@ begin
     select p.moderation_state into current_state from private.profiles as p where p.user_id = account_id;
     if not found then perform private.raise_error('account_not_ready'); end if;
     safety_hash := private.apple_safety_hash(account_id);
+    safety_hash := coalesce((select b.apple_id_hash from private.apple_identity_bindings as b where b.account_id = $1), safety_hash);
     if safety_hash is not null then
         for pair_key in
             select distinct pg_catalog.hashtext(least(account_id, b.blocker_id)::text || ':' || greatest(account_id, b.blocker_id)::text)
             from private.deletion_safety_blocks as b where b.apple_id_hash = safety_hash and b.blocker_id <> account_id order by 1
         loop perform pg_catalog.pg_advisory_xact_lock(31003, pair_key); end loop;
+    end if;
+    -- Auth before profile and retained child rows, in ascending account order.
+    -- A deleting blocker now locks Auth before removing its retained blocks.
+    perform u.id from auth.users as u where u.id = account_id or u.id in (
+        select b.blocker_id from private.deletion_safety_blocks as b where b.apple_id_hash = safety_hash
+    ) order by u.id for key share;
+    perform private.bind_apple_identity(account_id);
+    select b.apple_id_hash into safety_hash from private.apple_identity_bindings as b where b.account_id = $1;
+    if safety_hash is not null then
         select r.* into retained from private.deletion_safety_records as r where r.apple_id_hash = safety_hash for update;
         if found then
             if retained.delete_after <= pg_catalog.floor(extract(epoch from pg_catalog.clock_timestamp()))::bigint then
                 delete from private.deletion_safety_records as r where r.apple_id_hash = safety_hash;
             else
-                -- Lock the retained child rows before Auth FK key-share locks.
-                -- A deleting blocker removes its safety rows before Auth, too.
                 perform b.block_id from private.deletion_safety_blocks as b
                 where b.apple_id_hash = safety_hash order by b.blocker_id for update;
-                perform u.id from auth.users as u where u.id = account_id or u.id in (
-                    select b.blocker_id from private.deletion_safety_blocks as b where b.apple_id_hash = safety_hash
-                ) order by u.id for key share;
                 select p.moderation_state into current_state from private.profiles as p where p.user_id = account_id for update;
                 if not found then
                     if not exists (select 1 from auth.users as u where u.id = account_id) then perform private.raise_error('not_authenticated'); end if;
@@ -285,9 +376,22 @@ begin
         return pg_catalog.jsonb_build_object('unblocked', true);
     end if;
     select b.blocked_id into peer from private.blocks as b where b.blocker_id = caller and b.block_id = input_block_id;
+    if peer is not null then
+        perform pg_catalog.pg_advisory_xact_lock(31003,
+            pg_catalog.hashtext(least(caller, peer)::text || ':' || greatest(caller, peer)::text));
+    end if;
+    -- The blocked account may have transferred this block while we waited.
+    select r.apple_id_hash into safety_hash from private.deletion_safety_records as r
+    join private.deletion_safety_blocks as b on b.apple_id_hash = r.apple_id_hash
+    where b.blocker_id = caller and b.block_id = input_block_id
+      and r.delete_after > pg_catalog.floor(extract(epoch from pg_catalog.now()))::bigint for update of r;
+    if found then
+        delete from private.deletion_safety_blocks as b
+        where b.apple_id_hash = safety_hash and b.blocker_id = caller and b.block_id = input_block_id;
+        if not found then perform private.raise_error('not_found'); end if;
+        return pg_catalog.jsonb_build_object('unblocked', true);
+    end if;
     if peer is null then perform private.raise_error('not_found'); end if;
-    perform pg_catalog.pg_advisory_xact_lock(31003,
-        pg_catalog.hashtext(least(caller, peer)::text || ':' || greatest(caller, peer)::text));
     delete from private.blocks as b where b.blocker_id = caller and b.block_id = input_block_id;
     if not found then perform private.raise_error('not_found'); end if;
     return pg_catalog.jsonb_build_object('unblocked', true);
@@ -311,21 +415,35 @@ $$;
 
 create function private.cleanup_retained_data(cleanup_at timestamptz default pg_catalog.now())
 returns void language plpgsql security definer set search_path = '' as $$
+declare expired_encounter record;
 begin
     if cleanup_at is null then perform private.raise_error('invalid_input', array['cleanup_at']); end if;
-    delete from private.encounter_views as v using private.encounters as e
-    where e.encounter_id = v.encounter_id and not v.favorite
-      and not exists (select 1 from private.saved_links as s where s.viewer_id = v.viewer_id and s.encounter_id = v.encounter_id)
-      and exists (
-          select 1 from (select v.viewer_id as id) as viewer
-          left join private.notification_preferences as n on n.user_id = viewer.id
-          left join private.iana_time_zones as z on z.name = n.time_zone
-          where z.name is null or pg_catalog.timezone(z.name,
-              ((case when e.user_a = v.viewer_id then e.day_a else e.day_b end) + 30)::timestamp) <= cleanup_at
-      );
-    delete from private.encounters as e where not exists (
-        select 1 from private.encounter_views as v where v.encounter_id = e.encounter_id
-    );
+    -- As in user/account deletion, lock each encounter before its child views.
+    -- Busy encounters can wait for the next hourly pass; reads still gate expiry.
+    for expired_encounter in
+        select e.encounter_id, e.user_a, e.day_a, e.day_b from private.encounters as e
+        where not exists (select 1 from private.encounter_views as v where v.encounter_id = e.encounter_id)
+           or exists (
+               select 1 from private.encounter_views as v
+               join private.notification_preferences as n on n.user_id = v.viewer_id
+               join private.iana_time_zones as z on z.name = n.time_zone
+               where v.encounter_id = e.encounter_id and not v.favorite
+                 and not exists (select 1 from private.saved_links as s where s.viewer_id = v.viewer_id and s.encounter_id = v.encounter_id)
+                 and pg_catalog.timezone(z.name,
+                     ((case when e.user_a = v.viewer_id then e.day_a else e.day_b end) + 30)::timestamp) <= cleanup_at
+           )
+        order by e.encounter_id for update of e skip locked
+    loop
+        -- Recheck retention after locking; an unknown zone cannot prove expiry.
+        delete from private.encounter_views as v using private.notification_preferences as n, private.iana_time_zones as z
+        where v.encounter_id = expired_encounter.encounter_id and not v.favorite
+          and n.user_id = v.viewer_id and z.name = n.time_zone
+          and not exists (select 1 from private.saved_links as s where s.viewer_id = v.viewer_id and s.encounter_id = v.encounter_id)
+          and pg_catalog.timezone(z.name,
+              ((case when expired_encounter.user_a = v.viewer_id then expired_encounter.day_a else expired_encounter.day_b end) + 30)::timestamp) <= cleanup_at;
+        delete from private.encounters as e where e.encounter_id = expired_encounter.encounter_id
+          and not exists (select 1 from private.encounter_views as v where v.encounter_id = e.encounter_id);
+    end loop;
     delete from private.report_deliveries as d using private.notification_preferences as n, private.iana_time_zones as z
     where n.user_id = d.user_id and z.name = n.time_zone and d.status = 'closed'
       and d.report_day <= (cleanup_at at time zone z.name)::date - 30

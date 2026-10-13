@@ -158,14 +158,15 @@ select deletion_test.digest(nonce), deletion_test.id(owner), deletion_test.id(50
     pg_catalog.floor(extract(epoch from pg_catalog.now()))::bigint, 120, false, true, pg_catalog.now(), pg_catalog.now()+interval '1 hour'
 from (values (201,2,7),(202,7,2),(201,14,15)) as f(nonce,owner,peer);
 
--- 44 + 20 + 10 + 37 + 42 + 20 + 10 + 14 + 7 + 9 = 213 assertions.
-select extensions.plan(213);
+-- 54 + 22 + 10 + 37 + 42 + 20 + 10 + 14 + 7 + 9 = 225 assertions.
+select extensions.plan(225);
 
--- Catalog and scheduling: 44 assertions.
+-- Catalog and scheduling: 54 assertions.
 create temporary table deletion_functions (signature text, argument_names text[], return_type text);
 insert into deletion_functions values
     ('public.delete_own_account()', null, 'jsonb'),
     ('private.apple_safety_hash(uuid)', array['account_id'], 'bytea'),
+    ('private.bind_apple_identity(uuid)', array['account_id'], 'void'),
     ('private.restore_deletion_safety(uuid)', array['account_id'], 'jsonb'),
     ('private.cleanup_retained_data(timestamptz)', array['cleanup_at'], 'void');
 select extensions.is(p.proargnames, f.argument_names, f.signature || ': exact argument names')
@@ -177,19 +178,20 @@ from deletion_functions as f join pg_catalog.pg_proc as p on p.oid = f.signature
 select extensions.is((select pg_catalog.array_agg(a.attname::text order by a.attnum) from pg_catalog.pg_attribute as a
     where a.attrelid = ('private.' || f.table_name)::regclass and a.attnum > 0 and not a.attisdropped), f.columns,
     f.table_name || ': only the allocated safety columns')
-from (values ('deletion_safety_records', array['apple_id_hash','operator_outcome','delete_after']),
+from (values ('apple_identity_bindings', array['account_id','apple_id_hash']),
+    ('deletion_safety_records', array['apple_id_hash','operator_outcome','delete_after']),
     ('deletion_safety_blocks', array['apple_id_hash','blocker_id','block_id','placed_day'])) as f(table_name,columns);
 select extensions.ok(c.relrowsecurity, c.relname || ': RLS') from pg_catalog.pg_class as c
-where c.oid in ('private.deletion_safety_records'::regclass, 'private.deletion_safety_blocks'::regclass);
+where c.oid in ('private.apple_identity_bindings'::regclass, 'private.deletion_safety_records'::regclass, 'private.deletion_safety_blocks'::regclass);
 select extensions.is((select pg_catalog.count(*) from pg_catalog.pg_policy as p where p.polrelid = t.name::regclass),
-    0::bigint, t.name || ': no policies') from (values ('private.deletion_safety_records'),('private.deletion_safety_blocks')) as t(name);
+    0::bigint, t.name || ': no policies') from (values ('private.apple_identity_bindings'),('private.deletion_safety_records'),('private.deletion_safety_blocks')) as t(name);
 select extensions.ok(not pg_catalog.has_table_privilege(r.name,t.name,'select,insert,update,delete,truncate,references,trigger,maintain'),
     r.name || ': denied ' || t.name)
 from (values ('anon'),('authenticated'),('service_role')) as r(name)
-cross join (values ('private.deletion_safety_records'),('private.deletion_safety_blocks')) as t(name);
+cross join (values ('private.apple_identity_bindings'),('private.deletion_safety_records'),('private.deletion_safety_blocks')) as t(name);
 select extensions.ok(not exists (select 1 from pg_catalog.aclexplode(coalesce(c.relacl,pg_catalog.acldefault('r',c.relowner))) as a where a.grantee=0),
     c.relname || ': no PUBLIC grants') from pg_catalog.pg_class as c
-where c.oid in ('private.deletion_safety_records'::regclass, 'private.deletion_safety_blocks'::regclass);
+where c.oid in ('private.apple_identity_bindings'::regclass, 'private.deletion_safety_records'::regclass, 'private.deletion_safety_blocks'::regclass);
 select extensions.ok(exists (select 1 from pg_catalog.pg_index where indexrelid='private.deletion_safety_records_expiry_idx'::regclass)
     and exists (select 1 from pg_catalog.pg_index where indexrelid='private.deletion_safety_blocks_blocker_idx'::regclass)
     and exists (select 1 from pg_catalog.pg_index where indexrelid='private.reports_resolved_day_idx'::regclass), 'safety/report expiry and blocker FKs are indexed');
@@ -227,7 +229,7 @@ select extensions.is((select pg_catalog.count(*) from cron.job where jobname='en
 select extensions.ok(not exists (select 1 from pg_catalog.pg_trigger as t join pg_catalog.pg_proc as p on p.oid=t.tgfoid
     where t.tgrelid='auth.users'::regclass and pg_catalog.strpos(p.prosrc,'restore_deletion_safety')>0), 'restoration is not wired to sign-up');
 
--- Exact errors and anonymous deletion: 20 assertions.
+-- Exact errors and anonymous deletion: 22 assertions.
 delete from vault.secrets where name='deletion_safety_hmac_key_v1';
 select deletion_test.error($q$select deletion_test.call(null,'select public.delete_own_account()')$q$,'not_authenticated','','missing JWT is refused');
 select deletion_test.error($q$select deletion_test.call(999,'select public.delete_own_account()')$q$,'not_authenticated','','missing Auth caller is refused');
@@ -246,6 +248,8 @@ select extensions.is(deletion_test.call(3,'select public.delete_own_account()'),
 select extensions.is((select pg_catalog.count(*) from private.deletion_safety_records),0::bigint,'forged metadata leaves no safety record');
 insert into results (label,value) values ('before-key',deletion_test.snapshot());
 select deletion_test.error('select private.apple_safety_hash(deletion_test.id(2))','prerequisite_missing','deletion_safety_key','Apple hash needs the configured server key');
+select deletion_test.error('select private.bind_apple_identity(deletion_test.id(2))','prerequisite_missing','deletion_safety_key','Apple binding needs the configured server key');
+select deletion_test.error($q$select deletion_test.call(2,'select public.accept_declarations(true,''draft'',''draft'')')$q$,'prerequisite_missing','deletion_safety_key','Apple declarations cannot skip binding when its key is missing');
 select deletion_test.error($q$select deletion_test.call(2,'select public.delete_own_account()')$q$,'prerequisite_missing','deletion_safety_key','Apple deletion names the missing prerequisite');
 select deletion_test.error('select private.restore_deletion_safety(deletion_test.id(2))','prerequisite_missing','deletion_safety_key','Apple restoration needs the same server key');
 select extensions.ok(deletion_test.snapshot()=(select value from results where label='before-key'),'key preflight leaves every application row unchanged');
