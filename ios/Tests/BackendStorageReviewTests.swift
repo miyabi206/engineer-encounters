@@ -12,7 +12,7 @@ import XCTest
 final class BackendStorageReviewTests: XCTestCase {
     func testLockedMatchingSessionWithEmptyOrUnreadablePreferencesNeverStartsDeletion() async throws {
         for unreadable in [false, true] {
-            let defaults = ReviewDefaults(suiteName: "EngineerEncounters.Review.\(UUID())")!
+            let defaults = ReviewDefaults()
             defaults.setReadable(!unreadable)
             let keychain = AppMemoryKeychain()
             let configuration = appBackendTestConfiguration()
@@ -55,7 +55,7 @@ final class BackendStorageReviewTests: XCTestCase {
 
     func testUnreadablePreferencesWithReadableOrAbsentSessionHaveNoDestructiveStep() async throws {
         for hasSession in [false, true] {
-            let defaults = ReviewDefaults(suiteName: "EngineerEncounters.Review.\(UUID())")!
+            let defaults = ReviewDefaults()
             let keychain = AppMemoryKeychain()
             let store = KeychainSessionStore(backendIdentity: BackendStorageBinding.identity(appBackendTestConfiguration()), client: keychain)
             if hasSession { try await store.save(appBackendTestSession()) }
@@ -242,7 +242,7 @@ final class BackendStorageReviewTests: XCTestCase {
 
     func testEveryCredentialDeleteSeesAnAlreadySynchronizedMarker() async throws {
         for path in ["signIn", "signOut", "mismatch", "refresh"] {
-            let defaults = ReviewDefaults(suiteName: "EngineerEncounters.Review.\(UUID())")!
+            let defaults = ReviewDefaults()
             let keychain = AppMemoryKeychain(beforeSessionDeletion: { defaults.markerWasSynchronized })
             let backend = BackendStorageBinding.identity(appBackendTestConfiguration())
             let store = KeychainSessionStore(backendIdentity: path == "mismatch" ? "https://other.example:443" : backend, client: keychain)
@@ -359,7 +359,7 @@ final class BackendStorageReviewTests: XCTestCase {
 }
 
 /// Simulates protected preferences independently of the Keychain, without any sleeps.
-private final class ReviewDefaults: UserDefaults, @unchecked Sendable {
+private final class ReviewDefaults: AppInMemoryDefaults, @unchecked Sendable {
     private let lock = NSLock()
     private var readable = true
     private var synchronizedMarker = false

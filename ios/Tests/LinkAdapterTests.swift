@@ -202,6 +202,26 @@ final class LinkAdapterTests: XCTestCase {
         do { _ = try await loading.value; XCTFail("Old backend response must fail") }
         catch { XCTAssertEqual(error as? LinkActionError, .init(code: .unavailable, details: ["not_authenticated"])) }
         XCTAssertNil(composition.linkAdapter.links)
+        XCTAssertEqual(composition.account.state, .signedIn(appBackendTestUser))
+    }
+
+    func testObsoleteBackendActionsCannotReachTheBackendOrSignOut() async throws {
+        let transport = AppBackendTransport([appAccountOK()])
+        let composition = try linkComposition(transport: transport)
+        await composition.waitForRestoration()
+        let actions = composition.linkAdapter.actions()
+        let generation = UUID()
+        composition.account.bindingGeneration = { generation }
+        let calls: [@MainActor (LinkActions) async throws -> Void] = [
+            { _ = try await $0.loadLinks() }, { _ = try await $0.listRepositories(1) },
+            { _ = try await $0.connectGitHub() }]
+        for call in calls {
+            do { try await call(actions); XCTFail("Obsolete backend must refuse action") }
+            catch { XCTAssertEqual(error as? LinkActionError, .init(code: .unavailable, details: ["not_authenticated"])) }
+            XCTAssertEqual(composition.account.state, .signedIn(appBackendTestUser))
+        }
+        let requests = await transport.recorded()
+        XCTAssertEqual(requests.count, 1)
     }
 
     func testConnectionSuccessSyncsThenReloadsWithoutSwitchingAccounts() async throws {

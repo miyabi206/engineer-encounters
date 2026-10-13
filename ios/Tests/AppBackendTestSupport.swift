@@ -132,10 +132,7 @@ enum AppBackendTestFailure: Error { case didNotSettle }
 func appBackendDefaults(userID: UUID? = appBackendTestUser, bound: Bool = true,
                         defaults suppliedDefaults: UserDefaults? = nil,
                         file: StaticString = #filePath, line: UInt = #line) -> UserDefaults {
-    guard let defaults = suppliedDefaults ?? UserDefaults(suiteName: "EngineerEncounters.Backend.Tests.\(UUID().uuidString)") else {
-        XCTFail("Unable to create backend test defaults", file: file, line: line)
-        return AppInMemoryDefaults()
-    }
+    let defaults = suppliedDefaults ?? AppInMemoryDefaults()
     // Seed fakes with the binding that a preceding successful sign-in would have saved.
     if bound {
         let backend = BackendStorageBinding.identity(appBackendTestConfiguration())
@@ -153,7 +150,7 @@ func appBackendDefaults(userID: UUID? = appBackendTestUser, bound: Bool = true,
 }
 
 /// Each instance has its own store and never reads or writes a preferences suite.
-final class AppInMemoryDefaults: UserDefaults, @unchecked Sendable {
+class AppInMemoryDefaults: UserDefaults, @unchecked Sendable {
     private let lock = NSLock()
     private var values: [String: Any] = [:]
     override func synchronize() -> Bool { true }

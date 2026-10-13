@@ -126,10 +126,9 @@ final class LinkAdapter: ObservableObject {
             do {
                 try requireSession(epoch: epoch, fence: fence)
                 if let sessions = account.sessions {
-                    _ = try await fence.call { try await sessions.unlinkGitHubIdentity() }
+                    _ = try await backendCall(epoch: epoch, fence: fence) { try await sessions.unlinkGitHubIdentity() }
                 }
             } catch {
-                await rejectIfDead(error, epoch: epoch, fence: fence)
                 if followUpError == nil { followUpError = error }
             }
             if let followUpError { throw followUpError }
@@ -161,10 +160,9 @@ final class LinkAdapter: ObservableObject {
         catch { throw Self.presentationError(error) }
         guard let own, let github else { throw Self.presentationError(BackendError.notAuthenticated) }
         let value: Value
-        do { value = try await account.protectedOperation { try await fence.call { try await action(own, github) } } }
+        do { value = try await backendCall(epoch: epoch, fence: fence) { try await action(own, github) } }
         catch is CancellationError { throw CancellationError() }
         catch {
-            await rejectIfDead(error, epoch: epoch, fence: fence)
             throw Self.presentationError(error)
         }
         do { try requireSession(epoch: epoch, fence: fence) }
@@ -172,8 +170,29 @@ final class LinkAdapter: ObservableObject {
         return value
     }
 
-    private func rejectIfDead(_ error: any Error, epoch: UUID, fence: BackendCallFence) async {
-        guard fence.isCurrent(), error as? BackendError == .notAuthenticated,
+    private func backendCall<Value>(epoch: UUID, fence: BackendCallFence,
+        _ action: @MainActor () async throws -> Value) async throws -> Value {
+        var rejected = false
+        do {
+            return try await account.protectedOperation {
+                try await fence.call {
+                    do { return try await action() }
+                    catch {
+                        rejected = error as? BackendError == .notAuthenticated
+                        throw error
+                    }
+                }
+            }
+        } catch {
+            // A rejected refresh clears the binding before the error reaches us.
+            // A refusal produced by the fence itself is not an Auth rejection.
+            if rejected { await rejectIfDead(error, epoch: epoch) }
+            throw error
+        }
+    }
+
+    private func rejectIfDead(_ error: any Error, epoch: UUID) async {
+        guard error as? BackendError == .notAuthenticated,
               account.hasCurrentSessionContext, account.sessionGeneration == epoch,
               case .signedIn = account.state else { return }
         await account.rejectDeadSession(generation: epoch)
@@ -196,11 +215,11 @@ final class LinkAdapter: ObservableObject {
                 failure.details.contains("github") && !needsGitHubSync {
                 // A live identity with a missing cache can be synced without another authorization.
                 try requireSession(epoch: epoch, fence: fence)
-                let address = try await fence.call { try await sessions.beginGitHubLink() }
+                let address = try await backendCall(epoch: epoch, fence: fence) { try await sessions.beginGitHubLink() }
                 try requireSession(epoch: epoch, fence: fence)
                 let callback = try await fence.call { try await runner.authenticate(at: address, callbackScheme: "engineer-encounters") }
                 try requireSession(epoch: epoch, fence: fence)
-                _ = try await fence.call { try await sessions.completeGitHubLink(from: callback) }
+                _ = try await backendCall(epoch: epoch, fence: fence) { try await sessions.completeGitHubLink(from: callback) }
                 try requireSession(epoch: epoch, fence: fence)
                 needsGitHubSync = true
                 connection = .connected(handle: nil)
@@ -219,7 +238,6 @@ final class LinkAdapter: ObservableObject {
                 connection = .notConnected
                 return .notConnected
             }
-            await rejectIfDead(error, epoch: epoch, fence: fence)
             let failure = Self.presentationError(current ? error : BackendError.notAuthenticated)
             if current, pending == id {
                 if !needsGitHubSync { connection = .failed }
