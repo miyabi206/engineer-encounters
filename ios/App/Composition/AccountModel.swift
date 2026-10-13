@@ -30,12 +30,12 @@ final class AccountModel: ObservableObject {
     @Published private(set) var sessionCleanupFailed: Bool
     var sessionCleanupPending: Bool { cleanup.isPending }
     private var generation = UUID()
-    @Published private(set) var deletionSuspended = false
+    var isDeletionSuspended: @MainActor () -> Bool = { false }
+    var deletionSuspended: Bool { isDeletionSuspended() }
     private(set) var accountWasDeleted = false
     private var protectedGeneration = UUID()
 
     func suspendForDeletion() {
-        deletionSuspended = true
         protectedGeneration = UUID()
         refreshTask?.task.cancel(); refreshTask = nil
         setupTask?.task.cancel(); setupTask = nil
@@ -44,7 +44,6 @@ final class AccountModel: ObservableObject {
     func resumeAfterDeletionFailure() {
         guard !accountWasDeleted else { return }
         protectedGeneration = UUID()
-        deletionSuspended = false
     }
 
     /// Suspension also fences responses already in flight, even if cancellation is ignored.
@@ -226,7 +225,6 @@ final class AccountModel: ObservableObject {
             do { try await stagedStore.activate(sessionStore) } catch { storageFailed = true }
             guard self.hasCurrentSessionContext else { throw BackendError.notAuthenticated }
             self.accountWasDeleted = false
-            self.deletionSuspended = false
             self.sessions = newSessions
             self.service = serviceFactory(newSessions)
             self.registeredTimeZone = nil

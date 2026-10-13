@@ -17,3 +17,32 @@
 "discoverTab" = "Discover";
 "profileTab" = "Profile";
 "settingsTab" = "Settings";
+
+"accountSettingsTitle" = "Account";
+"accountSettingsSignIn" = "Sign-in method";
+"accountSettingsTemporary" = "Temporary account";
+"accountSettingsGithub" = "GitHub connection";
+"accountSettingsDisconnect" = "Disconnect GitHub";
+"accountSettingsDisconnectExplanation" = "Disconnecting makes links verified through this account unverified and removes repository link cards read through it.";
+"accountSettingsNotConnected" = "Not connected";
+"accountSettingsSignOut" = "Sign out";
+"accountSettingsDelete" = "Delete account";
+"accountSettingsTemporaryWarning" = "This temporary account does not survive reinstalling";
+"accountSettingsConnected" = "Connected";
+"accountSettingsConfirmSignOut" = "Sign out?";
+"accountSettingsSignOutExplanation" = "Signing out does not delete your account";
+"accountSettingsPermanent" = "Deletion is immediate and permanent, with a disclosed safety exception.";
+"accountSettingsLastLink" = "Turn discovery off before removing your last link";
+"accountSettingsPending" = "Account deletion is pending. Discovery and access to other people’s information are suspended.";
+"accountSettingsConfigurationRequired" = "Account deletion is unavailable until the operator configures the server. Retry deletion or check your account to resume.";
+"accountSettingsFailedDeletion" = "Could not delete your account. Retry deletion or check your account to resume using the app.";
+"accountSettingsCheckingAccount" = "Checking your account…";
+"accountSettingsFailedAccountCheck" = "Could not check your account. Retry before resuming.";
+"accountSettingsDeletionConfirmation" = "Your personal data is deleted immediately and permanently. This cannot be undone. The only safety exception is that we keep a one-way hash of your Apple account identifier, operator moderation outcomes and blocks other people placed on your account for the period stated in the privacy policy. The hash cannot be turned back into your Apple identifier. If you sign up again with the same Apple identity, we re-apply those outcomes and blocks. Nothing else survives: no name, profile field, link, token, encounter or contact detail. A block is dropped when the person who placed it deletes their own account.";
+
+"deletionRetry" = "Retry deletion";
+"deletionResume" = "Check account and resume";
+"support" = "Support";
+"back" = "Back";
+"cancel" = "Cancel";
+"cleanupError" = "Local account data could not be cleared. Retry before signing in.";

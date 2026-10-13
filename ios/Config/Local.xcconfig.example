@@ -12,3 +12,9 @@ RELEASE_BACKEND_PUBLIC_KEY =
 // In an address, use /$()/ between the scheme's colon and the host so xcconfig
 // preserves both slashes. Only Development accepts HTTP/local networking.
 // Internal and Release require HTTPS and have no ATS exceptions.
+
+// Public legal and support destinations; leave empty until supplied.
+TermsURL =
+PrivacyURL =
+SupportURL =
+ModerationContact =

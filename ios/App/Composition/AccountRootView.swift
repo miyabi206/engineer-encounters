@@ -12,44 +12,55 @@ enum AccountStrings {
 @MainActor
 struct AccountRootView: View {
     @ObservedObject private var composition: AppComposition
+    @ObservedObject private var account: AccountModel
     @StateObject private var flow: AccountFlowModel
 
     init(composition: AppComposition) {
         self.composition = composition
+        account = composition.account
         _flow = StateObject(wrappedValue: AccountFlowModel(composition: composition))
     }
 
     var body: some View {
-        VStack(spacing: 16) {
-            if flow.savedWithStaleProfile {
-                Text(AccountStrings.text("savedStale"))
-                Button(AccountStrings.text("retry")) { Task { await flow.refresh() } }
-            }
-            switch flow.root {
-            case .restoring:
-                ProgressView(AccountStrings.text("restoring"))
-            case .welcome:
-                NavigationStack { welcome }
-            case .loadingProfile:
-                NavigationStack {
-                    VStack(spacing: 16) {
-                        ProgressView(AccountStrings.text("loadingProfile"))
-                        diagnosticsLink
+        ZStack {
+            VStack(spacing: 16) {
+                if account.sessionCleanupFailed {
+                    Text(AccountStrings.text("cleanupError"))
+                    Button(AccountStrings.text("retry")) { Task { await flow.refresh() } }
+                }
+                if flow.savedWithStaleProfile {
+                    Text(AccountStrings.text("savedStale"))
+                    Button(AccountStrings.text("retry")) { Task { await flow.refresh() } }
+                }
+                switch flow.root {
+                case .restoring:
+                    ProgressView(AccountStrings.text("restoring"))
+                case .welcome:
+                    NavigationStack { welcome }
+                case .loadingProfile:
+                    NavigationStack {
+                        VStack(spacing: 16) {
+                            ProgressView(AccountStrings.text("loadingProfile"))
+                            diagnosticsLink
+                        }
                     }
+                case .profileUnavailable:
+                    NavigationStack {
+                        VStack(spacing: 16) {
+                            Text(AccountStrings.text("profileError"))
+                            Button(AccountStrings.text("retry")) { Task { await flow.refresh() } }
+                            diagnosticsLink
+                        }.padding()
+                    }
+                case .onboarding:
+                    if let model = flow.onboarding { OnboardingView(model: model) }
+                case .settings:
+                    if let model = flow.settings { ProductRootView(settings: model, links: flow.links, composition: composition) }
                 }
-            case .profileUnavailable:
-                NavigationStack {
-                    VStack(spacing: 16) {
-                        Text(AccountStrings.text("profileError"))
-                        Button(AccountStrings.text("retry")) { Task { await flow.refresh() } }
-                        diagnosticsLink
-                    }.padding()
-                }
-            case .onboarding:
-                if let model = flow.onboarding { OnboardingView(model: model) }
-            case .settings:
-                if let model = flow.settings { ProductRootView(settings: model, links: flow.links, composition: composition) }
             }
+            .disabled(composition.deletionSuspended)
+            .accessibilityHidden(composition.deletionSuspended)
+            if composition.deletionSuspended { AccountDeletionRecoveryView(composition: composition) }
         }
         .task { await flow.start() }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in

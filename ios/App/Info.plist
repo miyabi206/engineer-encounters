@@ -38,6 +38,14 @@
     <string>$(CURRENT_PROJECT_VERSION)</string>
     <key>BuildConfiguration</key>
     <string>$(CONFIGURATION)</string>
+    <key>TermsURL</key>
+    <string>$(TermsURL)</string>
+    <key>PrivacyURL</key>
+    <string>$(PrivacyURL)</string>
+    <key>SupportURL</key>
+    <string>$(SupportURL)</string>
+    <key>ModerationContact</key>
+    <string>$(ModerationContact)</string>
     <key>BackendURL</key>
     <string>$(BACKEND_URL)</string>
     <key>BackendPublicKey</key>

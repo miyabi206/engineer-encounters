@@ -61,7 +61,7 @@ final class DemoRevealController: ObservableObject {
         generation = UUID(); running?.task.cancel(); running = nil; backend = nil; unavailable = false
     }
     func clear() { invalidate(); center.clear() }
-    func switchedOff() { generation = UUID(); running?.task.cancel(); running = nil }
+    func switchedOff() { generation = UUID(); running?.task.cancel(); running = nil; unavailable = false }
     func switchedOn() async {
         guard setting.isEnabled, !requestedPermission else { return }
         requestedPermission = true
@@ -86,7 +86,9 @@ final class DemoRevealController: ObservableObject {
                         // Recheck at handoff; discard the response immediately after posting.
                         let detail: EncounterCardTransfer
                         do { detail = try await backend.call { try await $0.encounter.getEncounterCard(encounterID: item.card.encounterID) } }
-                        catch BackendError.notFound { continue }
+                        catch BackendError.notAuthenticated { throw BackendError.notAuthenticated }
+                        catch is CancellationError { throw CancellationError() }
+                        catch { continue }
                         guard self.current(revision, backend: backend) else { return }
                         guard self.allowsNotification(detail.card.encounterID.uuidString.lowercased()) else { continue }
                         await self.notify(displayName: detail.card.displayName, revision: revision, backend: backend)

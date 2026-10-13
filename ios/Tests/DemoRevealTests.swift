@@ -31,14 +31,22 @@ final class DemoRevealTests: XCTestCase {
 
     func testPermissionIsAskedOnlyOnceAndRefusalDoesNotDisableReveal() async throws {
         let center = TestLocalNotificationCenter()
-        let composition = settingsComposition(productTransport([:]), defaults: appBackendDefaults(),
+        let transport = productTransport(["reveal_ambient_now": [.response(demoFeed())],
+            "get_encounter_feed": [.response(productFeed())]])
+        let composition = settingsComposition(transport, defaults: appBackendDefaults(),
             store: InMemorySessionStore(session: try appBackendTestSession()), center: center)
-        await composition.waitForRestoration()
+        await composition.waitForRestoration(); productAuthorize(composition)
         composition.demoSwitch.isEnabled = true
         await composition.demoReveal.switchedOn(); await composition.demoReveal.switchedOn()
+        center.authorization = .denied
         composition.demoSwitch.isEnabled = false; composition.demoSwitch.isEnabled = true
         await composition.demoReveal.switchedOn()
         XCTAssertEqual(center.requests, 1); XCTAssertTrue(composition.demoSwitch.isEnabled)
+        XCTAssertEqual(center.authorization, .denied)
+        _ = try await composition.discoverAdapter.actions().loadFeed()
+        let refusedReveal = await transport.count("reveal_ambient_now")
+        XCTAssertEqual(refusedReveal, 1)
+        XCTAssertTrue(center.bodies.isEmpty)
         let allowed = TestLocalNotificationCenter(); allowed.authorization = .allowed
         let other = settingsComposition(productTransport([:]), defaults: appBackendDefaults(),
             store: InMemorySessionStore(session: try appBackendTestSession()), center: allowed)
@@ -113,6 +121,63 @@ final class DemoRevealTests: XCTestCase {
             ["submit_receipts", "reveal_ambient_now", "get_encounter_feed"].contains($0)
         }
         XCTAssertEqual(paths, ["submit_receipts", "reveal_ambient_now", "reveal_ambient_now", "get_encounter_feed"])
+    }
+
+    func testSwitchOffFeedFinishesWhileUploadIsStillHeld() async throws {
+        let queue = InMemoryReceiptQueue()
+        let receipt = appBackendFinalReceipt()
+        try await queue.enqueue(receipt)
+        let transport = productTransport(["submit_receipts": [.held],
+            "get_encounter_feed": [.response(productFeed())]])
+        let composition = settingsComposition(transport, defaults: appBackendDefaults(), queue: queue,
+            store: InMemorySessionStore(session: try appBackendTestSession()))
+        await composition.waitForRestoration(); productAuthorize(composition)
+        try await appBackendEventually { await transport.isHeld("submit_receipts") }
+        let feed = Task { try await composition.discoverAdapter.actions().loadFeed() }
+        try await appBackendEventually { await transport.count("get_encounter_feed") == 1 }
+        _ = try await feed.value
+        let stillHeld = await transport.isHeld("submit_receipts")
+        XCTAssertTrue(stillHeld)
+        let reveals = await transport.count("reveal_ambient_now")
+        XCTAssertEqual(reveals, 0)
+        let response = HTTPResponse(data: try JSONEncoder().encode([ReceiptStatusTransfer(id: receipt.id, status: .resolved)]), statusCode: 200)
+        await transport.release("submit_receipts", with: response)
+        await composition.runtime?.uploadTask?.value
+    }
+
+    func testFailedCardRecheckDoesNotFailFeedOrSuppressOtherNotifications() async throws {
+        var second = productCard()
+        second["encounter_id"] = "00000000-0000-0000-0000-000000000abc"
+        var detail = productCard(detail: true)
+        detail["encounter_id"] = second["encounter_id"]
+        let transport = productTransport(["reveal_ambient_now": [.response(demoFeed(cards: [productCard(), second]))],
+            "get_encounter_card": [.failure, .response(productResponse(detail))],
+            "get_encounter_feed": [.response(productFeed())]])
+        let center = TestLocalNotificationCenter(); center.authorization = .allowed
+        let composition = settingsComposition(transport, defaults: appBackendDefaults(),
+            store: InMemorySessionStore(session: try appBackendTestSession()), center: center)
+        await composition.waitForRestoration(); productAuthorize(composition); composition.demoSwitch.isEnabled = true
+        _ = try await composition.discoverAdapter.actions().loadFeed()
+        let rechecks = await transport.count("get_encounter_card")
+        XCTAssertEqual(rechecks, 2)
+        XCTAssertEqual(center.bodies, [DemoRevealController.notificationBody(displayName: "Person")])
+        XCTAssertFalse(composition.demoReveal.unavailable)
+    }
+
+    func testUnavailableLatchResetsWhenDemoIsSwitchedOffAndOn() async throws {
+        let transport = productTransport(["reveal_ambient_now": [.response(productError("not_found")), .response(demoFeed())],
+            "get_encounter_feed": [.response(productFeed()), .response(productFeed())]])
+        let composition = try productComposition(transport)
+        await composition.waitForRestoration(); productAuthorize(composition); composition.demoSwitch.isEnabled = true
+        _ = try await composition.discoverAdapter.actions().loadFeed()
+        XCTAssertTrue(composition.demoReveal.unavailable)
+        composition.demoSwitch.isEnabled = false
+        XCTAssertFalse(composition.demoReveal.unavailable)
+        composition.demoSwitch.isEnabled = true
+        _ = try await composition.discoverAdapter.actions().loadFeed()
+        let reveals = await transport.count("reveal_ambient_now")
+        XCTAssertEqual(reveals, 2)
+        XCTAssertFalse(composition.demoReveal.unavailable)
     }
 
     func testLateNotificationCompletionIsRemovedAfterSignOut() async throws {

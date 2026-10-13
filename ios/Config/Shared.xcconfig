@@ -11,4 +11,10 @@ RELEASE_BACKEND_URL =
 RELEASE_BACKEND_PUBLIC_KEY =
 INFOPLIST_PREPROCESS = YES
 
+// Public legal and support destinations; leave empty until supplied.
+TermsURL =
+PrivacyURL =
+SupportURL =
+ModerationContact =
+
 #include? "Local.xcconfig"

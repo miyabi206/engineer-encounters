@@ -104,7 +104,7 @@ final class SettingsSafetyAdapterTests: XCTestCase {
                                                   "token": [.response(appBackendAuthResponse())]])
                 let composition = try productComposition(transport)
                 await composition.waitForRestoration(); productAuthorize(composition)
-                let alreadyDeleted = path == "delete_encounter" && code == "not_found"
+                let alreadyDeleted = ["delete_encounter", "report_encounter_person", "block_encounter_person"].contains(path) && code == "not_found"
                 do { try await operation(composition); if !alreadyDeleted { XCTFail("Expected failure: \(path)") } }
                 catch {
                     XCTAssertFalse(alreadyDeleted)
@@ -347,11 +347,14 @@ final class SettingsSafetyAdapterTests: XCTestCase {
             composition.trialRecorder.beginIfNeeded(metadata: composition.trialMetadata)
             XCTAssertFalse(composition.trialLog.records.isEmpty)
             #endif
+            await composition.setParticipation(true)
+            XCTAssertTrue(composition.isParticipating)
             if deleted { _ = try await composition.settingsSafetyAdapter.accountActions().deleteAccount() }
             else { try await composition.account.signOut() }
             XCTAssertEqual(composition.account.state, .signedOut); XCTAssertNil(composition.account.profile)
             XCTAssertNil(composition.discoverAdapter.model); XCTAssertTrue(discover.feed.isEmpty); XCTAssertNil(discover.card)
             XCTAssertNil(composition.settingsSafetyAdapter.sheet); XCTAssertFalse(composition.isParticipating)
+            XCTAssertFalse(composition.deletionSuspended)
             let session = try await store.load(); XCTAssertNil(session)
             let savedTokens = try await tokens.load(); XCTAssertNil(savedTokens)
             let pendingReceipts = try await queue.pending(); XCTAssertTrue(pendingReceipts.isEmpty)
@@ -391,25 +394,169 @@ final class SettingsSafetyAdapterTests: XCTestCase {
         XCTAssertNotNil(defaults.data(forKey: InstallationStorageSalt.key))
     }
 
+    func testDeletedAccountCredentialCleanupCanRetryThroughFlowWithoutRelaunch() async throws {
+        let defaults = appBackendDefaults()
+        let store = FailingAppSessionStore(session: try appBackendTestSession(), failClear: true)
+        let transport = productTransport(["delete_own_account": [.response(productResponse(["deleted": true]))],
+            "get_own_profile": [.response(appOwnProfileResponse(appLinkedPresentationProfile()))],
+            "signup": [.response(appBackendAuthResponse())], "accept_declarations": [.response(appAccountOK())]])
+        let composition = settingsComposition(transport, defaults: defaults, store: store)
+        let flow = AccountFlowModel(composition: composition)
+        await flow.start(); productAuthorize(composition)
+        let deleted = try await composition.settingsSafetyAdapter.accountActions().deleteAccount()
+        XCTAssertTrue(deleted)
+        XCTAssertEqual(composition.account.state, .signedOut)
+        XCTAssertFalse(composition.deletionSuspended)
+        XCTAssertTrue(composition.account.sessionCleanupFailed)
+        await store.recover()
+        await flow.refresh()
+        XCTAssertFalse(composition.account.sessionCleanupFailed)
+        XCTAssertFalse(defaults.bool(forKey: SessionCleanupMarker.key))
+        #if DEVELOPMENT_BUILD
+        try await composition.account.signInTemporaryAccount(isAdult: true, acceptsTermsAndPrivacy: true)
+        XCTAssertTrue(composition.account.state.isSignedIn)
+        XCTAssertFalse(composition.deletionSuspended)
+        #endif
+    }
+
     func testSuccessfulDeletionKeepsQuarantineUntilFailedLocalPurgeCanBeRetried() async throws {
         let defaults = appBackendDefaults()
         let tokens = SettingsPurgeTokenStore()
-        let transport = productTransport(["delete_own_account": [.response(productResponse(["deleted": true]))]])
+        let transport = productTransport(["delete_own_account": [.response(productResponse(["deleted": true]))],
+            "get_own_profile": [.response(appOwnProfileResponse(appLinkedPresentationProfile()))]])
         let composition = settingsComposition(transport, defaults: defaults, tokens: tokens,
             store: InMemorySessionStore(session: try appBackendTestSession()))
-        await composition.waitForRestoration(); productAuthorize(composition)
+        let flow = AccountFlowModel(composition: composition)
+        await flow.start(); productAuthorize(composition)
         try await tokens.save(EncounterSamples.batch())
         await tokens.setFailClearing(true)
         let deleted = try await composition.settingsSafetyAdapter.accountActions().deleteAccount()
         XCTAssertTrue(deleted); XCTAssertEqual(composition.account.state, .signedOut)
         XCTAssertTrue(defaults.bool(forKey: SessionCleanupMarker.key))
         XCTAssertTrue(composition.account.accountWasDeleted)
+        XCTAssertFalse(composition.deletionSuspended)
         await tokens.setFailClearing(false)
-        await composition.refresh()
+        await flow.refresh()
         XCTAssertFalse(defaults.bool(forKey: SessionCleanupMarker.key))
         let remaining = try await tokens.load(); XCTAssertNil(remaining)
         XCTAssertEqual(composition.account.state, .signedOut)
         let calls = await transport.count("delete_own_account"); XCTAssertEqual(calls, 1)
+    }
+
+    func testDestroyedAccountScreenKeepsFailedDeletionBlockedUntilVerifiedResumeAndRestartsRadio() async throws {
+        let transport = productTransport(["delete_own_account": [.held],
+            "get_own_profile": [.failure, .response(appOwnProfileResponse(appLinkedPresentationProfile()))],
+            "get_report_settings": [.response(settingsReport())]])
+        let tokens = InMemoryTokenBatchStore()
+        let clock = ManualEncounterClock()
+        var radios: [FakeBluetoothTransport] = []
+        let composition = settingsComposition(transport, defaults: appBackendDefaults(), tokens: tokens,
+            store: InMemorySessionStore(session: try appBackendTestSession()), transportFactory: {
+                let radio = await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)
+                radios.append(radio)
+                return radio
+            })
+        await composition.waitForRestoration(); productAuthorize(composition)
+        try await tokens.save(EncounterSamples.batch())
+        await composition.setParticipation(true)
+        XCTAssertTrue(composition.isParticipating)
+        let firstRadio = try XCTUnwrap(radios.first)
+        try await appBackendEventually { await firstRadio.commands().contains(.startDiscovery) }
+        var screen: AccountSettingsModel? = settingsAccountModel(composition)
+        weak let destroyedScreen = screen
+        let deletion = Task { await screen?.deleteAccount() }
+        try await appBackendEventually { await transport.isHeld("delete_own_account") }
+        XCTAssertTrue(composition.deletionSuspended)
+        XCTAssertFalse(composition.isParticipating)
+        let pendingCommands = await firstRadio.commands()
+        XCTAssertEqual(pendingCommands.last, .stopDiscovery)
+        await transport.release("delete_own_account", with: HTTPResponse(data: Data(), statusCode: 503))
+        await deletion.value
+        XCTAssertEqual(composition.deletionState, .failed)
+        screen = nil
+        XCTAssertNil(destroyedScreen)
+        await composition.checkAccountAndResume()
+        XCTAssertTrue(composition.account.state.isSignedIn)
+        XCTAssertTrue(composition.deletionSuspended)
+        XCTAssertEqual(composition.deletionError, .init(code: .unavailable))
+        XCTAssertEqual(composition.deletionState, .failed)
+        XCTAssertFalse(composition.isParticipating)
+        let failedCommands = await firstRadio.commands()
+        XCTAssertEqual(failedCommands.last, .stopDiscovery)
+        XCTAssertEqual(failedCommands.filter { $0 == .startDiscovery }.count,
+                       pendingCommands.filter { $0 == .startDiscovery }.count)
+        XCTAssertEqual(radios.count, 1)
+        await composition.checkAccountAndResume()
+        XCTAssertFalse(composition.deletionSuspended)
+        XCTAssertTrue(composition.isParticipating)
+        XCTAssertTrue(composition.account.state.isSignedIn)
+        let resumedRadio = try XCTUnwrap(radios.last)
+        XCTAssertEqual(radios.count, 2)
+        try await appBackendEventually { await resumedRadio.commands().contains(.startDiscovery) }
+        _ = try await composition.settingsSafetyAdapter.reportSettingsActions().load()
+        await composition.setParticipation(false)
+    }
+
+    func testLostDeletionAnswerThenExpiredAuthorizationOnCheckOrRetrySignsOutAndClearsSuspension() async throws {
+        for retryDeletion in [false, true] {
+            let expired = ControlledAppBackendTransport.Reply.response(productError("not_authenticated"))
+            let transport = productTransport(["delete_own_account": retryDeletion ? [.failure, expired, expired] : [.failure],
+                "get_own_profile": retryDeletion ? [] : [expired, expired],
+                "token": [.response(appBackendAuthResponse())]])
+            let composition = try productComposition(transport)
+            await composition.waitForRestoration(); productAuthorize(composition)
+            await composition.retryAccountDeletion()
+            XCTAssertEqual(composition.deletionState, .failed)
+            XCTAssertTrue(composition.account.state.isSignedIn)
+            if retryDeletion { await composition.retryAccountDeletion() }
+            else { await composition.checkAccountAndResume() }
+            XCTAssertEqual(composition.account.state, .signedOut)
+            XCTAssertFalse(composition.deletionSuspended)
+            XCTAssertEqual(composition.deletionState, .idle)
+            XCTAssertFalse(composition.isParticipating)
+            let before = await transport.recorded().count
+            let flow = AccountFlowModel(composition: composition)
+            await flow.start(); await flow.refresh()
+            XCTAssertEqual(flow.root, .welcome)
+            let after = await transport.recorded().count
+            XCTAssertEqual(before, after)
+        }
+    }
+
+    func testAccountCheckFindingGoneCompletesDeletionWithoutResuming() async throws {
+        let transport = productTransport(["delete_own_account": [.failure],
+            "get_own_profile": [.response(productError("not_found"))]])
+        let composition = try productComposition(transport)
+        await composition.waitForRestoration(); productAuthorize(composition)
+        await composition.retryAccountDeletion()
+        await composition.checkAccountAndResume()
+        XCTAssertEqual(composition.account.state, .signedOut)
+        XCTAssertTrue(composition.account.accountWasDeleted)
+        XCTAssertFalse(composition.deletionSuspended)
+        XCTAssertFalse(composition.isParticipating)
+    }
+
+    func testReportAndBlockLostAnswersThenNotFoundCompleteSafetyFlow() async throws {
+        for block in [false, true] {
+            let path = block ? "block_encounter_person" : "report_encounter_person"
+            let transport = productTransport([path: [.failure, .response(productError("not_found"))]])
+            let composition = try productComposition(transport)
+            await composition.waitForRestoration(); productAuthorize(composition)
+            var completed = 0
+            let model = SafetyReportModel(encounterID: productEncounterID,
+                actions: composition.settingsSafetyAdapter.reportActions(encounterID: productEncounterID),
+                navigation: .init(completed: { completed += 1 }, reopenEncounter: {}))
+            if block { await model.block() }
+            else { model.reason = .other; await model.submit() }
+            XCTAssertEqual(completed, 0)
+            XCTAssertNotNil(model.error)
+            await model.retry()
+            XCTAssertEqual(completed, 1)
+            XCTAssertNil(model.error)
+            let calls = await transport.count(path)
+            XCTAssertEqual(calls, 2)
+            XCTAssertTrue(composition.account.state.isSignedIn)
+        }
     }
 
     func testLegalConfigurationIncludesOnlyValidConfiguredDestinations() {
@@ -418,6 +565,9 @@ final class SettingsSafetyAdapterTests: XCTestCase {
             "ModerationContact": "support@example.org", "CFBundleShortVersionString": "1.0"])
         XCTAssertEqual(data.entries, [.terms, .support]); XCTAssertEqual(data.contact, "support@example.org")
         XCTAssertEqual(data.version, "1.0"); XCTAssertNil(data.privacy)
+        XCTAssertFalse(SettingsSafetyAdapter.hasSupport(info: ["SupportURL": "", "ModerationContact": ""]))
+        XCTAssertFalse(SettingsSafetyAdapter.hasSupport(info: ["SupportURL": "$(SupportURL)", "ModerationContact": "$(ModerationContact)"]))
+        XCTAssertTrue(SettingsSafetyAdapter.hasSupport(info: ["ModerationContact": "support@example.org"]))
     }
 }
 
@@ -443,12 +593,13 @@ func settingsComposition(_ transport: any HTTPTransport, defaults: UserDefaults,
                          queue: InMemoryReceiptQueue = InMemoryReceiptQueue(),
                          tokens: any TokenBatchStore = InMemoryTokenBatchStore(),
                          keychain: AppMemoryKeychain = AppMemoryKeychain(), store: any SessionStore,
-                         center: TestLocalNotificationCenter = TestLocalNotificationCenter()) -> AppComposition {
+                         center: TestLocalNotificationCenter = TestLocalNotificationCenter(),
+                         transportFactory: (@MainActor () async -> any BluetoothTransport)? = nil) -> AppComposition {
     let clock = ManualEncounterClock()
     return AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults, notificationCenter: center,
         trialLogURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("trial.json"),
         transport: transport, keychain: keychain, sessionStore: store, serverTokenStore: tokens,
-        signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { queue }, transportFactory: {
+        signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { queue }, transportFactory: transportFactory ?? {
             await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)
         }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(), now: { appBackendTestNow },
         sessionNetwork: SessionNetworkAvailability(monitorsSystemPath: false), timeZone: { "Asia/Tokyo" })

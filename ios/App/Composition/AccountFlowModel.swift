@@ -75,7 +75,7 @@ final class AccountFlowModel: ObservableObject {
     }
 
     func refresh() async {
-        guard started, !composition.account.deletionSuspended else { return }
+        guard started, !composition.deletionSuspended else { return }
         let previousProfileLoadVersion = profileLoadVersion
         await composition.refresh()
         guard composition.account.state.isSignedIn else { return }

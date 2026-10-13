@@ -83,9 +83,7 @@ struct ProductRootView: View {
         case .blockedUsers:
             ProductBlockedView(adapter: safetyAdapter, navigation: .init(back: { navigation.back(in: tab) }))
         case .account:
-            ProductAccountSettingsView(adapter: safetyAdapter, navigation: .init(back: { navigation.back(in: tab) },
-                signedOut: { if !composition.account.state.isSignedIn { navigation.reset() } }, discovery: { navigation.push(.discovery, in: tab) },
-                support: { navigation.push(.legal, in: tab) }))
+            ProductAccountSettingsView(composition: composition, navigation: accountNavigation(tab))
         case .legal:
             ProductLegalView(navigation: .init(back: { navigation.back(in: tab) }))
         case .profile: EditProfileView(model: settings, navigation: settingsNavigation(tab))
@@ -115,6 +113,13 @@ struct ProductRootView: View {
         case .unavailable: .unavailable
         case .notRequested: .checking
         }
+    }
+    private func accountNavigation(_ tab: ProductTab) -> AccountSettingsNavigationActions {
+        var actions = AccountSettingsNavigationActions(back: { navigation.back(in: tab) },
+            signedOut: { if !composition.account.state.isSignedIn { navigation.reset() } },
+            discovery: { navigation.push(.discovery, in: tab) })
+        if SettingsSafetyAdapter.hasSupport() { actions.support = { navigation.push(.legal, in: tab) } }
+        return actions
     }
     private func settingsDestinations() -> AccountSettingsListNavigationActions {
         var destinations = AccountSettingsListNavigationActions(
@@ -282,15 +287,6 @@ private struct ProductBlockedView: View {
         _model = StateObject(wrappedValue: SafetyBlockedModel(actions: adapter.blockedActions(), navigation: navigation))
     }
     var body: some View { SafetyBlockedUsersView(model: model) }
-}
-
-@MainActor
-private struct ProductAccountSettingsView: View {
-    @StateObject private var model: AccountSettingsModel
-    init(adapter: SettingsSafetyAdapter, navigation: AccountSettingsNavigationActions) {
-        _model = StateObject(wrappedValue: AccountSettingsModel(actions: adapter.accountActions(), navigation: navigation))
-    }
-    var body: some View { AccountSettingsView(model: model) }
 }
 
 @MainActor

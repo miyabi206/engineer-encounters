@@ -44,6 +44,14 @@ final class AppComposition: ObservableObject {
     private let uploadScheduler: any ReceiptUploadScheduler
     private var restorationTask: Task<Void, Never>?
     private var sessionChangeInProgress = false
+    @Published private(set) var deletionState = AccountSettingsDeletionState.idle
+    @Published private(set) var deletionError: ProfileActionError?
+    @Published private(set) var checkingDeletionAccount = false
+    @Published private(set) var deletionAccountCheckFailed = false
+    var deletionSuspended: Bool { deletionState == .pending || deletionState.canRetry }
+    private var deletionTask: (epoch: UUID, task: Task<Bool, any Error>)?
+    private var deletionCheckTask: (epoch: UUID, task: Task<AccountSettingsAccountState, any Error>)?
+
     private var storagePreparationTask: Task<Void, any Error>?
     static let serverTokenService = "EngineerEncounters.Backend.ServerTokens"
     static func serverTokenService(owner: BackendStorageOwner) -> String {
@@ -169,7 +177,15 @@ final class AppComposition: ObservableObject {
         #endif
         isParticipating = participation.isEnabled
         settingsSafetyAdapter.suspendParticipation = { [weak self] in self?.suspendForDeletion() }
-        settingsSafetyAdapter.resumeParticipation = { [weak self] in self?.resumeAfterDeletionFailure() }
+        account.isDeletionSuspended = { [weak self] in self?.deletionSuspended == true }
+        settingsSafetyAdapter.deleteAccount = { [weak self] epoch, fence in
+            guard let self else { throw ProfileActionError(code: .notAuthenticated) }
+            return try await self.deleteAccount(epoch: epoch, fence: fence)
+        }
+        settingsSafetyAdapter.checkAccount = { [weak self] epoch, fence in
+            guard let self else { throw ProfileActionError(code: .notAuthenticated) }
+            return try await self.checkDeletionAccount(epoch: epoch, fence: fence)
+        }
         account.protectedContentDidChange = { [weak discoverAdapter] in discoverAdapter?.protectedContentDidChange() }
         linkAdapter.protectedContentDidChange = { [weak discoverAdapter] in discoverAdapter?.protectedContentDidChange() }
         discoverAdapter.encounterWasDeleted = { [weak productNavigation] _ in
@@ -179,8 +195,9 @@ final class AppComposition: ObservableObject {
         #if DEVELOPMENT_BUILD || INTERNAL_BUILD
         demoReveal.allowsNotification = { [weak discoverAdapter] in discoverAdapter?.allowsNotification(for: $0) == true }
         discoverAdapter.beforeFeedRead = { [weak self] in
-            await self?.runtime?.uploadTask?.value
-            try await self?.revealDemo()
+            guard let self, self.demoSwitch.isEnabled else { return }
+            await self.runtime?.uploadTask?.value
+            try await self.revealDemo()
         }
         demoSwitch.$isEnabled.removeDuplicates().dropFirst().sink { [weak self] enabled in
             if enabled { Task { await self?.demoReveal.switchedOn() } }
@@ -201,7 +218,11 @@ final class AppComposition: ObservableObject {
         }
         account.discoveryWillChange = { [weak self] enabled in try await self?.sessionAdapter.discoveryWillChange(enabled: enabled) }
         account.discoveryDidChange = { [weak self] enabled in await self?.sessionAdapter.discoveryDidChange(enabled: enabled) }
-        account.sessionDidChange = { [weak self] force in await self?.recreateRuntime(force: force) }
+        account.sessionDidChange = { [weak self] force in
+            guard let self else { return }
+            if self.account.state == .signedOut { self.deletionState = .idle; self.deletionError = nil }
+            await self.recreateRuntime(force: force)
+        }
         account.canRefreshSession = { [weak self] in
             guard let self, self.storageReady, !self.keychainUnavailable else { return false }
             guard let binding = self.binding else { return true }
@@ -358,6 +379,8 @@ final class AppComposition: ObservableObject {
     }
 
     private func suspendForDeletion() {
+        guard !deletionSuspended else { return }
+        deletionState = .pending
         account.suspendForDeletion()
         isParticipating = false
         runtime?.suspendForAccountChange()
@@ -365,12 +388,82 @@ final class AppComposition: ObservableObject {
         qrAdapter.hidePresentation()
     }
 
-    private func resumeAfterDeletionFailure() {
-        guard !account.accountWasDeleted else { return }
-        account.resumeAfterDeletionFailure()
-        isParticipating = participation.isEnabled
-        discoverAdapter.invalidate()
-        Task { [weak self] in await self?.recreateRuntime(force: true) }
+    func retryAccountDeletion() async {
+        _ = try? await deleteAccount(epoch: account.sessionGeneration, fence: account.backendCallFence())
+    }
+
+    func checkAccountAndResume() async {
+        _ = try? await checkDeletionAccount(epoch: account.sessionGeneration, fence: account.backendCallFence())
+    }
+
+    private func deleteAccount(epoch: UUID, fence: BackendCallFence) async throws -> Bool {
+        guard fence.isCurrent(), account.sessionGeneration == epoch, account.state.isSignedIn else {
+            throw ProfileActionError(code: .notAuthenticated)
+        }
+        if let deletionTask {
+            guard deletionTask.epoch == epoch else { throw ProfileActionError(code: .notAuthenticated) }
+            return try await deletionTask.task.value
+        }
+        guard deletionCheckTask == nil else { throw CancellationError() }
+        suspendForDeletion()
+        deletionState = .pending; deletionError = nil; deletionAccountCheckFailed = false
+        // This task survives a view's cancellation or destruction.
+        let task = Task { @MainActor in
+            await self.runtime?.stop()
+            do {
+                let deleted = try await self.settingsSafetyAdapter.performDeletion(epoch, fence: fence)
+                guard deleted else { throw ProfileActionError(code: .unavailable) }
+                return true
+            } catch {
+                if fence.isCurrent(), self.account.state.isSignedIn {
+                    let failure = error as? ProfileActionError ?? AccountModel.presentationError(error)
+                    self.deletionError = failure
+                    self.deletionState = failure.code == .prerequisiteMissing && failure.fields.contains("deletion_safety_key")
+                        ? .configurationRequired : .failed
+                }
+                throw error
+            }
+        }
+        deletionTask = (epoch, task)
+        defer { deletionTask = nil }
+        return try await task.value
+    }
+
+    private func checkDeletionAccount(epoch: UUID, fence: BackendCallFence) async throws -> AccountSettingsAccountState {
+        guard fence.isCurrent(), account.sessionGeneration == epoch, account.state.isSignedIn else {
+            throw ProfileActionError(code: .notAuthenticated)
+        }
+        if let deletionCheckTask {
+            guard deletionCheckTask.epoch == epoch else { throw ProfileActionError(code: .notAuthenticated) }
+            return try await deletionCheckTask.task.value
+        }
+        guard deletionTask == nil, deletionState.canRetry else { throw CancellationError() }
+        checkingDeletionAccount = true; deletionError = nil; deletionAccountCheckFailed = false
+        let task = Task { @MainActor in
+            do {
+                let result = try await self.settingsSafetyAdapter.verifyAccount(epoch, fence: fence)
+                if case .present = result {
+                    guard fence.isCurrent(), self.account.state.isSignedIn else { throw ProfileActionError(code: .notAuthenticated) }
+                    self.deletionState = .idle
+                    self.account.resumeAfterDeletionFailure()
+                    self.settingsSafetyAdapter.publishVerifiedProfile()
+                    self.isParticipating = self.participation.isEnabled
+                    self.discoverAdapter.invalidate()
+                    await self.recreateRuntime(force: true)
+                }
+                return result
+            } catch {
+                if fence.isCurrent(), self.account.state.isSignedIn {
+                    self.deletionError = error as? ProfileActionError ?? AccountModel.presentationError(error)
+                    self.deletionAccountCheckFailed = true
+                    self.deletionState = .failed
+                }
+                throw error
+            }
+        }
+        deletionCheckTask = (epoch, task)
+        defer { deletionCheckTask = nil; checkingDeletionAccount = false }
+        return try await task.value
     }
 
     #if DEVELOPMENT_BUILD || INTERNAL_BUILD

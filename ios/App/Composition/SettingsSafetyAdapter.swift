@@ -21,7 +21,8 @@ final class SettingsSafetyAdapter: ObservableObject {
     private var backend: SessionBackendServices?
     private var verifiedProfile: OwnProfileState?
     var suspendParticipation: @MainActor () -> Void = {}
-    var resumeParticipation: @MainActor () -> Void = {}
+    var deleteAccount: @MainActor (UUID, BackendCallFence) async throws -> Bool = { _, _ in throw ProfileActionError(code: .unavailable) }
+    var checkAccount: @MainActor (UUID, BackendCallFence) async throws -> AccountSettingsAccountState = { _, _ in throw ProfileActionError(code: .unavailable) }
 
     init(account: AccountModel, links: LinkAdapter, discover: DiscoverAdapter) {
         self.account = account; self.links = links; self.discover = discover
@@ -87,14 +88,17 @@ final class SettingsSafetyAdapter: ObservableObject {
         return .init(report: { request in
             let id = try DiscoverAdapter.identifier(request.encounterID, field: "encounter_id")
             let link = try request.linkID.map { try DiscoverAdapter.identifier($0, field: "link_id") }
-            _ = try await self.call(epoch, fence: fence) {
-                try await $0.safety.reportEncounterPerson(encounterID: id,
-                    reason: EncounterReportReason(rawValue: request.reason.rawValue)!, linkID: link)
-            }
+            do {
+                _ = try await self.call(epoch, fence: fence) {
+                    try await $0.safety.reportEncounterPerson(encounterID: id,
+                        reason: EncounterReportReason(rawValue: request.reason.rawValue)!, linkID: link)
+                }
+            } catch let error as ProfileActionError where error.code == .notFound { }
             self.discover.protectedContentDidChange()
         }, block: { value in
             let id = try DiscoverAdapter.identifier(value, field: "encounter_id")
-            _ = try await self.call(epoch, fence: fence) { try await $0.safety.blockEncounterPerson(encounterID: id) }
+            do { _ = try await self.call(epoch, fence: fence) { try await $0.safety.blockEncounterPerson(encounterID: id) } }
+            catch let error as ProfileActionError where error.code == .notFound { }
             self.discover.protectedContentDidChange()
         }, conceal: {
             guard fence.isCurrent(), self.account.sessionGeneration == epoch else { return }
@@ -143,30 +147,45 @@ final class SettingsSafetyAdapter: ObservableObject {
             catch { throw AccountModel.presentationError(error) }
         }, deleteAccount: {
             try self.require(epoch, fence: fence, allowingDeletion: true)
-            if !self.account.deletionSuspended { self.suspendParticipation() }
-            let result = try await self.call(epoch, fence: fence, allowingDeletion: true) { try await $0.deletion.deleteOwnAccount() }
-            await self.account.completeAccountDeletion(generation: epoch)
-            return result.deleted
+            return try await self.deleteAccount(epoch, fence)
         }, reloadAccount: {
-            if self.account.accountWasDeleted { return .deleted }
-            guard fence.isCurrent(), epoch == self.account.sessionGeneration, self.account.state.isSignedIn else {
-                return .authenticationExpired
+            // Stale actions must fail before even consulting a cached deletion answer.
+            guard fence.isCurrent(), epoch == self.account.sessionGeneration else {
+                throw ProfileActionError(code: .notAuthenticated)
             }
-            let fresh = try await self.account.ownAccountOperation(allowingDeletion: true) { try await $0.getOwnProfile() }
-            try self.require(epoch, fence: fence, allowingDeletion: true)
-            let profile = AccountModel.present(fresh)
-            self.verifiedProfile = profile
-            return .present(self.accountData(profile: profile, ownLinks: self.links.links ?? []))
+            return try await self.checkAccount(epoch, fence)
         }, resumeParticipation: {
-            guard fence.isCurrent(), epoch == self.account.sessionGeneration, !self.account.accountWasDeleted else { return }
-            self.account.resumeAfterDeletionFailure()
-            if let profile = self.verifiedProfile { self.account.publishProfile(profile, stale: false) }
-            self.verifiedProfile = nil
-            self.resumeParticipation()
+            // Verification and resumption belong to the composition, independent of this screen.
         }, suspendParticipation: {
             guard fence.isCurrent(), epoch == self.account.sessionGeneration else { return }
             self.suspendParticipation()
         })
+    }
+
+    func performDeletion(_ epoch: UUID, fence: BackendCallFence) async throws -> Bool {
+        let result = try await call(epoch, fence: fence, allowingDeletion: true) { try await $0.deletion.deleteOwnAccount() }
+        if result.deleted { await account.completeAccountDeletion(generation: epoch) }
+        return result.deleted
+    }
+
+    func verifyAccount(_ epoch: UUID, fence: BackendCallFence) async throws -> AccountSettingsAccountState {
+        try require(epoch, fence: fence, allowingDeletion: true)
+        do {
+            let fresh = try await account.ownAccountOperation(allowingDeletion: true) { try await $0.getOwnProfile() }
+            try require(epoch, fence: fence, allowingDeletion: true)
+            let profile = AccountModel.present(fresh)
+            verifiedProfile = profile
+            return .present(accountData(profile: profile, ownLinks: links.links ?? []))
+        } catch let error as ProfileActionError where error.code == .notFound {
+            try require(epoch, fence: fence, allowingDeletion: true)
+            await account.completeAccountDeletion(generation: epoch)
+            return .deleted
+        }
+    }
+
+    func publishVerifiedProfile() {
+        if let profile = verifiedProfile { account.publishProfile(profile, stale: false) }
+        verifiedProfile = nil
     }
 
     private func loadAccount(_ epoch: UUID, fence: BackendCallFence) async throws -> AccountSettingsData {
@@ -225,12 +244,17 @@ final class SettingsSafetyAdapter: ObservableObject {
     }
     static func legalData(info: [String: Any] = Bundle.main.infoDictionary ?? [:]) -> LegalData {
         func address(_ key: String) -> URL? {
-            guard let text = info[key] as? String, let url = URL(string: text), url.scheme == "https",
+            guard let text = info[key] as? String, !text.contains("$("), let url = URL(string: text), url.scheme == "https",
                   url.host != nil, url.user == nil, url.password == nil else { return nil }
             return url
         }
+        let contact = (info["ModerationContact"] as? String).flatMap { $0.contains("$(") ? nil : $0 }
         return .init(terms: address("TermsURL"), privacy: address("PrivacyURL"), support: address("SupportURL"),
-            moderationContact: info["ModerationContact"] as? String, version: info["CFBundleShortVersionString"] as? String)
+            moderationContact: contact, version: info["CFBundleShortVersionString"] as? String)
+    }
+    static func hasSupport(info: [String: Any] = Bundle.main.infoDictionary ?? [:]) -> Bool {
+        let data = legalData(info: info)
+        return data.support != nil || data.contact != nil
     }
     static func legalActions() -> LegalActions {
         .init(open: open, contact: { contact in
