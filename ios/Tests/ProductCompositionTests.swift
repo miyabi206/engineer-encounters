@@ -382,15 +382,18 @@ func productAuthorize(_ composition: AppComposition) {
 }
 @MainActor
 func productComposition(_ transport: any HTTPTransport, defaults: UserDefaults? = nil, store: (any SessionStore)? = nil,
-                        clock: ManualEncounterClock = ManualEncounterClock()) throws -> AppComposition {
+                        clock: ManualEncounterClock = ManualEncounterClock(),
+                        confirmationScheduler: (any ReceiptUploadScheduler)? = nil,
+                        lifecycle: ProductSceneLifecycle? = nil, queue: (any ReceiptQueue)? = nil) throws -> AppComposition {
     AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults ?? appBackendDefaults(),
         notificationCenter: TestLocalNotificationCenter(),
         trialLogURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("trial.json"),
         transport: transport, keychain: AppMemoryKeychain(),
         sessionStore: try store ?? InMemorySessionStore(session: appBackendTestSession()),
         serverTokenStore: InMemoryTokenBatchStore(), signedOutTokenStore: InMemoryTokenBatchStore(),
-        queueOpener: { InMemoryReceiptQueue() }, transportFactory: {
+        queueOpener: { queue ?? InMemoryReceiptQueue() }, transportFactory: {
             await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)
-        }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(), now: { appBackendTestNow },
+        }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(),
+        confirmationScheduler: confirmationScheduler, productLifecycle: lifecycle, now: { appBackendTestNow },
         sessionNetwork: SessionNetworkAvailability(monitorsSystemPath: false), timeZone: { "Asia/Tokyo" })
 }

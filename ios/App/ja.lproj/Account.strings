@@ -14,7 +14,7 @@
 
 "githubSyncPending" = "GitHubは連携済みです。同期を再試行してください。";
 "connectError" = "GitHubの連携または同期に失敗しました。再試行してください。";
-"discoverTab" = "発見";
+"discoverTab" = "見つける";
 "profileTab" = "プロフィール";
 "settingsTab" = "設定";
 
@@ -46,3 +46,8 @@
 "back" = "戻る";
 "cancel" = "キャンセル";
 "cleanupError" = "端末のアカウントデータを削除できませんでした。サインインする前に再試行してください。";
+
+"bluetoothUnavailable" = "Bluetoothを利用できません";
+"bluetoothCheckGuidance" = "近くでの発見に使うBluetoothの状態を確認してください。";
+"checkBluetooth" = "Bluetoothを確認";
+"qrExchange" = "QR交換";

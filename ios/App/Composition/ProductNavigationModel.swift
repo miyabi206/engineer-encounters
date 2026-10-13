@@ -13,6 +13,7 @@ enum ProductRoute: Hashable {
 @MainActor
 final class ProductNavigationModel: ObservableObject {
     @Published private(set) var selection: ProductTab = .discover
+    private var bluetoothSessionOrigins: Set<ProductTab> = []
     @Published var discover: [ProductRoute] = []
     @Published var profile: [ProductRoute] = []
     @Published var settings: [ProductRoute] = []
@@ -40,7 +41,16 @@ final class ProductNavigationModel: ObservableObject {
         setPath(path + [.encounter(id)], for: tab)
     }
     func showDiscoveryOff(in tab: ProductTab) { setPath([], for: tab); selection = .discover }
-    func reset() { discover = []; profile = []; settings = []; selection = .discover }
+    func showBluetooth(forSession: Bool, in tab: ProductTab) {
+        if forSession { bluetoothSessionOrigins.insert(tab) } else { bluetoothSessionOrigins.remove(tab) }
+        if path(for: tab).last != .bluetooth { push(.bluetooth, in: tab) }
+    }
+    func bluetoothRecovered(in tab: ProductTab) {
+        guard path(for: tab).last == .bluetooth else { return }
+        back(in: tab)
+        if bluetoothSessionOrigins.remove(tab) != nil { push(.session, in: tab) }
+    }
+    func reset() { bluetoothSessionOrigins = []; discover = []; profile = []; settings = []; selection = .discover }
     func path(for tab: ProductTab) -> [ProductRoute] {
         switch tab { case .discover: discover; case .profile: profile; case .settings: settings }
     }

@@ -57,9 +57,12 @@ final class QRAdapter: ObservableObject {
             }
         }, cancelCode: { code in
             try await self.cancel(code, epoch: epoch, fence: fence)
-        }, redeemCode: { payload in
+        }, redeemCode: { [self] payload in
             let result = try await self.call(epoch: epoch, fence: fence) { try await $0.qr.redeemQRCode(code: payload.token) }
-            await self.didRedeem()
+            Task { [weak self] in
+                guard let self, fence.isCurrent(), epoch == self.account.sessionGeneration, self.backend?.isCurrent == true else { return }
+                await self.didRedeem()
+            }
             guard fence.isCurrent(), epoch == self.account.sessionGeneration, self.backend?.isCurrent == true else { throw CancellationError() }
             return result.encounterID.uuidString.lowercased()
         })
@@ -72,6 +75,13 @@ final class QRAdapter: ObservableObject {
             _ = try await self.call(epoch: epoch, fence: fence, outgoing: outgoing) { try await $0.qr.cancelQRCode() }
             if self.outstanding == code { self.outstanding = nil }
         }
+    }
+
+    func receiveConfirmedEncounter(_ id: String, model: QRModel) {
+        guard presentation === model, backend?.isCurrent == true else { return }
+        outstanding = nil
+        model.disappear()
+        model.receiveConfirmedEncounter(id)
     }
 
     func hidePresentation() { presentation?.disappear() }

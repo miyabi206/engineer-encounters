@@ -40,7 +40,7 @@ private final class SessionStopCompletion {
 
 /// Retains precise adapter failures without expanding the package's S08 error API.
 enum SessionAdapterFailure: Equatable {
-    case prerequisiteMissing([String]), accountNotReady, rateLimited, offline, transport, unavailable
+    case prerequisiteMissing([String]), accountNotReady, declarationRequired, rateLimited, offline, transport, unavailable
     var actionError: SessionActionError {
         switch self {
         case .prerequisiteMissing(let details): .prerequisiteMissing(details: details)
@@ -365,6 +365,7 @@ final class SessionAdapter: ObservableObject {
         switch error as? BackendError {
         case .prerequisiteMissing(let details): return .prerequisiteMissing(details)
         case .accountNotReady: return .accountNotReady
+        case .declarationRequired: return .declarationRequired
         case .rateLimited: return .rateLimited
         case .transportFailure, .httpFailure: return .transport
         default: return .unavailable

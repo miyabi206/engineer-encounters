@@ -21,11 +21,28 @@ final class DiscoverAdapter: ObservableObject {
     var beforeFeedRead: @MainActor () async throws -> Void = {}
     var encounterWasDeleted: @MainActor (String) -> Void = { _ in }
     private var pendingHiddenIDs: Set<String> = []
-    var interests: [InterestOption] = []
+    @Published private(set) var needsAuthorizationRetry = false
+    var interests: [InterestOption] = [] {
+        didSet {
+            guard interests != oldValue, !interests.isEmpty, let model, backend?.isCurrent == true else { return }
+            let reloadFeed = model.feedState == .loaded
+            let reloadFavorites = model.favoritesState == .loaded
+            let cardID = model.card?.card.id
+            // Re-authorize requested resources with the catalogue's labels. No wire/card cache is persisted.
+            Task { [weak self, weak model] in
+                guard let self, let model, self.model === model, self.backend?.isCurrent == true else { return }
+                if reloadFeed { await model.loadFeed() }
+                if reloadFavorites { await model.loadFavorites() }
+                if let id = cardID { await model.loadCard(id) }
+            }
+        }
+    }
+    private var catalogueLoad: (id: UUID, task: Task<[InterestOption], any Error>)?
     private let account: AccountModel
     private var backend: SessionBackendServices?
     private var epoch: UUID?
     private var lastProfile: OwnProfileState?
+    private var modelSubscription: AnyCancellable?
     private var subscriptions: Set<AnyCancellable> = []
 
     init(account: AccountModel) {
@@ -47,13 +64,58 @@ final class DiscoverAdapter: ObservableObject {
     }
 
     func invalidate() {
+        catalogueLoad?.task.cancel(); catalogueLoad = nil
         clearAuthorization()
+        needsAuthorizationRetry = false
         pendingHiddenIDs = []
+        modelSubscription = nil
         model = nil; backend = nil; epoch = nil; lastProfile = nil; interests = []; failure = nil
     }
 
     func clearAuthorization() {
         if let model { model.receiveAccess(discoveryOn: model.discoveryOn, isAuthorized: false) }
+    }
+
+    func rejectAuthorization() {
+        clearAuthorization()
+        needsAuthorizationRetry = true
+    }
+
+    func retryAuthorization() async {
+        guard needsAuthorizationRetry, backend?.isCurrent == true, !account.deletionSuspended else { return }
+        let epoch = account.sessionGeneration, fence = account.backendCallFence()
+        let backend = self.backend
+        do {
+            _ = try await account.loadOwnProfile()
+            guard fence.isCurrent(), epoch == account.sessionGeneration, self.backend === backend, backend?.isCurrent == true else { return }
+            needsAuthorizationRetry = false
+            receive(profile: account.profile)
+        } catch {
+            guard fence.isCurrent(), epoch == account.sessionGeneration, self.backend === backend else { return }
+            failure = error as? ProfileActionError ?? .init(code: .unavailable)
+        }
+    }
+
+    private func loadCatalogue(epoch: UUID, fence: BackendCallFence) async throws {
+        try require(epoch: epoch, fence: fence)
+        guard interests.isEmpty else { return }
+        if let catalogueLoad {
+            _ = try? await catalogueLoad.task.value
+            try require(epoch: epoch, fence: fence)
+            return
+        }
+        let id = UUID()
+        let task = Task {
+            try self.require(epoch: epoch, fence: fence)
+            let result = try await self.account.ownAccountOperation { try await $0.listInterests() }
+            try self.require(epoch: epoch, fence: fence)
+            return result.map { InterestOption(id: $0.interestID, labelJapanese: $0.labelJA, labelEnglish: $0.labelEN) }
+        }
+        catalogueLoad = (id, task)
+        defer { if catalogueLoad?.id == id { catalogueLoad = nil } }
+        let loaded = try? await task.value
+        try require(epoch: epoch, fence: fence)
+        if let loaded { interests = loaded }
     }
 
     private func receive(profile: OwnProfileState?) {
@@ -63,6 +125,7 @@ final class DiscoverAdapter: ObservableObject {
             // task could otherwise reread a screen requested before that task runs.
             model = DiscoverModel(actions: actions(), discoveryOn: profile.discoveryOn,
                                   isAuthorized: backend?.isCurrent == true && !account.deletionSuspended && profile.moderationState == "active")
+            modelSubscription = model?.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
             lastProfile = profile
             return
         }
@@ -109,6 +172,7 @@ final class DiscoverAdapter: ObservableObject {
         let fence = account.backendCallFence()
         return DiscoverActions(loadFeed: {
             try self.require(epoch: epoch, fence: fence)
+            try await self.loadCatalogue(epoch: epoch, fence: fence)
             try await self.beforeFeedRead()
             let result = try await self.call(epoch: epoch, fence: fence) { try await $0.encounter.getEncounterFeed() }
             return try self.present(result)
@@ -117,6 +181,7 @@ final class DiscoverAdapter: ObservableObject {
             // A local pending hide is not a server deletion. Preserve the requested
             // detail so cancelling the report can recheck its authorization.
             if self.pendingHiddenIDs.contains(id) { throw CancellationError() }
+            try await self.loadCatalogue(epoch: epoch, fence: fence)
             let id = try Self.identifier(id, field: "encounter_id")
             let result = try await self.call(epoch: epoch, fence: fence) { try await $0.encounter.getEncounterCard(encounterID: id) }
             return EncounterDetail(card: try self.present(result.card), favorite: result.favorite,
@@ -141,13 +206,15 @@ final class DiscoverAdapter: ObservableObject {
                 self.protectedContentDidChange()
             }
         }, loadFavorites: {
+            try await self.loadCatalogue(epoch: epoch, fence: fence)
             let result = try await self.call(epoch: epoch, fence: fence) { try await $0.encounter.listEncounterFavorites() }
             return try self.present(result)
         }, loadSavedLinks: {
             let result = try await self.call(epoch: epoch, fence: fence) { try await $0.encounter.listSavedLinks() }
-            return EncounterSavedLinkList(links: try result.links.filter { !self.pendingHiddenIDs.contains($0.encounterID.uuidString.lowercased()) }.map {
-                EncounterSavedLink(encounterID: $0.encounterID.uuidString.lowercased(), day: Self.day($0.day),
-                    kind: EncounterUI.EncounterKind(rawValue: $0.kind.rawValue)!, link: try Self.present($0.link))
+            return EncounterSavedLinkList(links: result.links.filter { !self.pendingHiddenIDs.contains($0.encounterID.uuidString.lowercased()) }.compactMap { value in
+                guard let link = Self.present(value.link) else { return nil }
+                return EncounterSavedLink(encounterID: value.encounterID.uuidString.lowercased(), day: Self.day(value.day),
+                    kind: EncounterUI.EncounterKind(rawValue: value.kind.rawValue)!, link: link)
             }, truncated: result.truncated)
         })
     }
@@ -204,10 +271,8 @@ final class DiscoverAdapter: ObservableObject {
     func present(_ value: CardTransfer) throws -> EncounterCard {
         EncounterCard(id: value.encounterID.uuidString.lowercased(), kind: EncounterUI.EncounterKind(rawValue: value.kind.rawValue)!,
             day: Self.day(value.day), displayName: value.displayName, introduction: value.introduction,
-            interests: (value.interests ?? []).map { id in
-                interests.first { $0.id == id } ?? InterestOption(id: id, labelJapanese: id, labelEnglish: id)
-            }, purposes: Set((value.purposes ?? []).compactMap { EncounterUI.ProfilePurpose(rawValue: $0.rawValue) }),
-            contactDetail: value.contactDetail, links: try (value.links ?? []).map(Self.present), isShell: value.shell == true)
+            interests: (value.interests ?? []).compactMap { id in interests.first { $0.id == id } }, purposes: Set((value.purposes ?? []).compactMap { EncounterUI.ProfilePurpose(rawValue: $0.rawValue) }),
+            contactDetail: value.contactDetail, links: (value.links ?? []).compactMap(Self.present), isShell: value.shell == true)
     }
 
     static func day(_ value: WireDay) -> EncounterDay {
@@ -215,9 +280,9 @@ final class DiscoverAdapter: ObservableObject {
         return EncounterDay(year: fields[0], month: fields[1], day: fields[2])
     }
 
-    private static func present(_ value: VisibleLinkTransfer) throws -> EncounterLinkCard {
+    private static func present(_ value: VisibleLinkTransfer) -> EncounterLinkCard? {
         guard let url = URL(string: value.url), url.scheme?.lowercased() == "https", url.host != nil,
-              url.user == nil, url.password == nil else { throw ProfileActionError(code: .unavailable) }
+              url.user == nil, url.password == nil else { return nil }
         return EncounterLinkCard(id: value.linkID.uuidString.lowercased(), source: value.source,
             title: value.title, description: value.description, tags: value.tags, mainLanguage: value.mainLanguage,
             openingText: value.openingText, url: url, verified: value.verificationState == .verified)

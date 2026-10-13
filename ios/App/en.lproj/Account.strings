@@ -46,3 +46,8 @@
 "back" = "Back";
 "cancel" = "Cancel";
 "cleanupError" = "Local account data could not be cleared. Retry before signing in.";
+
+"bluetoothUnavailable" = "Bluetooth is unavailable";
+"bluetoothCheckGuidance" = "Check Bluetooth to use nearby discovery.";
+"checkBluetooth" = "Check Bluetooth";
+"qrExchange" = "QR exchange";

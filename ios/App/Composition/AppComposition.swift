@@ -19,7 +19,11 @@ final class AppComposition: ObservableObject {
     let qrAdapter: QRAdapter
     let settingsSafetyAdapter: SettingsSafetyAdapter
     let productNavigation = ProductNavigationModel()
-    let sampleEncounter: SampleEncounterModel
+    @Published private(set) var sampleEncounter: SampleEncounterModel
+    private let sampleDismissal: InstallationSampleDismissalStore
+    private var sampleAccount: UUID?
+    let productLifecycle: ProductSceneLifecycle
+    let confirmationPoller: EncounterConfirmationPoller
     private var productSubscriptions: Set<AnyCancellable> = []
     private(set) var sessionServices: SessionBackendServices?
     private let sessionNetwork: SessionNetworkAvailability
@@ -92,6 +96,8 @@ final class AppComposition: ObservableObject {
          transportFactory: @escaping @MainActor () async -> any BluetoothTransport = { CoreBluetoothTransport() },
          clock: any EncounterClock = SystemEncounterClock(),
          uploadScheduler: (any ReceiptUploadScheduler)? = nil,
+         confirmationScheduler: (any ReceiptUploadScheduler)? = nil,
+         productLifecycle: ProductSceneLifecycle? = nil,
          now: @escaping @Sendable () -> Date = { Date() },
          webAuthenticationRunner: (any GitHubWebAuthenticationRunning)? = nil,
          sessionIsOnline: (@MainActor () -> Bool)? = nil,
@@ -155,7 +161,17 @@ final class AppComposition: ObservableObject {
         }
         discoverAdapter = DiscoverAdapter(account: account)
         qrAdapter = QRAdapter(account: account, clock: clock)
-        sampleEncounter = SampleEncounterModel(store: InstallationSampleDismissalStore(defaults: defaults), isNewUser: true)
+        let sampleDismissal = InstallationSampleDismissalStore(defaults: defaults)
+        self.sampleDismissal = sampleDismissal
+        sampleEncounter = SampleEncounterModel(store: sampleDismissal, isNewUser: false)
+        self.productLifecycle = productLifecycle ?? ProductSceneLifecycle()
+        confirmationPoller = EncounterConfirmationPoller(clock: clock,
+            scheduler: confirmationScheduler ?? ClockReceiptUploadScheduler(clock: clock),
+            load: { [weak discoverAdapter] in
+                guard let adapter = discoverAdapter, !adapter.needsAuthorizationRetry, let model = adapter.model else { return nil }
+                await model.loadFeed()
+                return model.feedState == .loaded ? model.feed : nil
+            }, confirm: { [weak qrAdapter] model, id in qrAdapter?.receiveConfirmedEncounter(id, model: model) })
         linkAdapter = LinkAdapter(account: account, runner: webAuthenticationRunner ?? SystemGitHubWebAuthenticationRunner())
         settingsSafetyAdapter = SettingsSafetyAdapter(account: account, links: linkAdapter, discover: discoverAdapter)
         sessionHolder = SessionHolder(clock: clock, stops: PendingSessionStopStore(defaults: defaults))
@@ -175,6 +191,13 @@ final class AppComposition: ObservableObject {
         trialRecorder = TrialRecorder(log: trialLog)
         presenceApproach = approachSetting.value
         #endif
+        self.productLifecycle.$phase.removeDuplicates().sink { [weak confirmationPoller] phase in
+            confirmationPoller?.receive(foreground: phase == .active)
+        }.store(in: &productSubscriptions)
+        account.$state.removeDuplicates().sink { [weak confirmationPoller] state in
+            if case .signedIn = state { confirmationPoller?.receive(authorized: true) }
+            else { confirmationPoller?.receive(authorized: false) }
+        }.store(in: &productSubscriptions)
         isParticipating = participation.isEnabled
         settingsSafetyAdapter.suspendParticipation = { [weak self] in self?.suspendForDeletion() }
         account.isDeletionSuspended = { [weak self] in self?.deletionSuspended == true }
@@ -206,12 +229,14 @@ final class AppComposition: ObservableObject {
         #endif
         account.prepareForSessionChange = { [weak self] in try await self?.prepareForSessionChange() }
         account.prepareToDiscardSession = { [weak self] in
+            self?.confirmationPoller.receive(authorized: false)
             self?.discoverAdapter.clearAuthorization()
             self?.qrAdapter.hidePresentation()
             await self?.sessionAdapter.prepareToDiscardSession()
             await self?.qrAdapter.prepareToDiscardSession()
         }
         account.authorizationWillBeDiscarded = { [weak self] in
+            self?.confirmationPoller.receive(authorized: false)
             self?.discoverAdapter.clearAuthorization()
             self?.qrAdapter.invalidate()
             await self?.sessionAdapter.authorizationWillBeDiscarded()
@@ -236,14 +261,14 @@ final class AppComposition: ObservableObject {
             Task { await discoverAdapter?.foreground() }
         }.store(in: &productSubscriptions)
         sessionAdapter.$failure.sink { [weak discoverAdapter] failure in
-            if failure == .accountNotReady { discoverAdapter?.clearAuthorization() }
+            if failure == .accountNotReady || failure == .declarationRequired { discoverAdapter?.rejectAuthorization() }
             if case .prerequisiteMissing(let fields) = failure, fields.contains("discovery") {
                 discoverAdapter?.model?.receiveAccess(discoveryOn: false, isAuthorized: true)
             }
         }.store(in: &productSubscriptions)
         qrAdapter.$failure.sink { [weak discoverAdapter] failure in
             if let failure, [.notAuthenticated, .accountNotReady, .declarationRequired].contains(failure.code) {
-                discoverAdapter?.clearAuthorization()
+                discoverAdapter?.rejectAuthorization()
             }
             if failure?.code == .prerequisiteMissing, failure?.fields.contains("discovery") == true {
                 discoverAdapter?.model?.receiveAccess(discoveryOn: false, isAuthorized: true)
@@ -258,6 +283,7 @@ final class AppComposition: ObservableObject {
             let sessionAdapter = self?.sessionAdapter
             let storagePreparation = self?.storagePreparationTask
             self?.settingsSafetyAdapter.invalidate()
+            self?.confirmationPoller.receive(authorized: false)
             self?.discoverAdapter.invalidate()
             self?.qrAdapter.invalidate()
             self?.productNavigation.reset()
@@ -282,6 +308,13 @@ final class AppComposition: ObservableObject {
             await binding?.predecessorDrain?.value
             await self?.account.restore()
         }
+    }
+
+    /// Capture onboarding history before this visit completes S05. A deferred first visit remains new.
+    func configureSample(for accountID: UUID, completedOnboarding: Bool) {
+        guard sampleAccount != accountID else { return }
+        sampleAccount = accountID
+        sampleEncounter = SampleEncounterModel(store: sampleDismissal, isNewUser: !completedOnboarding)
     }
 
     func waitForRestoration() async { await restorationTask?.value }
@@ -382,6 +415,7 @@ final class AppComposition: ObservableObject {
         guard !deletionSuspended else { return }
         deletionState = .pending
         account.suspendForDeletion()
+        confirmationPoller.receive(authorized: false)
         isParticipating = false
         runtime?.suspendForAccountChange()
         discoverAdapter.clearAuthorization()
@@ -483,6 +517,7 @@ final class AppComposition: ObservableObject {
     #endif
 
     private func prepareForSessionChange() async throws {
+        confirmationPoller.receive(authorized: false)
         // Stop recording/radio before storage cleanup; later callbacks cannot recreate account data.
         let discardingAccount = account.discardingSession || account.state.isSignedIn || account.accountWasDeleted
         if discardingAccount {
@@ -719,8 +754,14 @@ final class AppComposition: ObservableObject {
         #if DEVELOPMENT_BUILD || INTERNAL_BUILD
         let recorder = trialRecorder
         runtime.observeEvents { event in recorder.record(event) }
-        runtime.receiptsDidResolve = { [weak self] in try? await self?.revealDemo() }
         #endif
+        runtime.receiptsDidResolve = { [weak self] in
+            #if DEVELOPMENT_BUILD || INTERNAL_BUILD
+            try? await self?.revealDemo()
+            #endif
+            // The read hook may await uploadTask; start after this upload callback returns.
+            self?.confirmationPoller.requestReload()
+        }
         self.runtime = runtime
         runtimeOwner = binding?.preparedOwner
         runtimeStatusSubscription = runtime.objectWillChange.sink { [weak self] _ in

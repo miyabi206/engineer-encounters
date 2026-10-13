@@ -168,6 +168,7 @@ final class AccountFlowModel: ObservableObject {
         guard let id = accountID else { return }
         let epoch = composition.account.sessionGeneration
         let completed = completion.contains(id)
+        composition.configureSample(for: id, completedOnboarding: completed)
         let actions = profileActions()
         let linkActions = composition.linkAdapter.actions()
         links = LinksModel(actions: linkActions, discoveryOn: profile.discoveryOn)
