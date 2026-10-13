@@ -259,7 +259,7 @@ select extensions.is((select pg_catalog.count(*) from private.account_limit_even
     1::bigint, b.bucket || ' cleanup removes events beyond the hourly boundary')
 from (values ('start_session'), ('issue_qr_code'), ('redeem_qr_code')) as b(bucket);
 
--- Only report delivery-key retention is added by the daily-report migration.
+-- The hourly retained-data job now owns report delivery-key retention.
 -- Thirty days are viewer-local calendar days, not 720 elapsed hours.
 insert into private.notification_preferences (user_id,time_zone)
 values ('dddddddd-0000-0000-0000-000000000001','Asia/Tokyo')
@@ -269,19 +269,19 @@ insert into private.report_deliveries (user_id,report_day,status) values
     ('dddddddd-0000-0000-0000-000000000001',date '2026-09-12','closed'),
     ('dddddddd-0000-0000-0000-000000000001',date '2026-09-13','closed'),
     ('dddddddd-0000-0000-0000-000000000001',date '2026-09-10','open');
-select private.cleanup_expired_data(timestamptz '2026-10-11 14:59:59.999999+00');
+select private.cleanup_retained_data(timestamptz '2026-10-11 14:59:59.999999+00');
 select extensions.ok(exists (select 1 from private.report_deliveries where report_day=date '2026-09-12'
     and user_id='dddddddd-0000-0000-0000-000000000001'), 'delivery key survives before its thirtieth local midnight');
 select extensions.ok(not exists (select 1 from private.report_deliveries where report_day=date '2026-09-11'
     and user_id='dddddddd-0000-0000-0000-000000000001'), 'older closed key is removed');
-select private.cleanup_expired_data(timestamptz '2026-10-11 15:00:00+00');
+select private.cleanup_retained_data(timestamptz '2026-10-11 15:00:00+00');
 select extensions.ok(not exists (select 1 from private.report_deliveries where report_day=date '2026-09-12'
     and user_id='dddddddd-0000-0000-0000-000000000001'), 'closed delivery key removed at exactly thirty local days');
 select extensions.ok(exists (select 1 from private.report_deliveries where report_day=date '2026-09-13'
     and user_id='dddddddd-0000-0000-0000-000000000001'), 'younger delivery survives');
 select extensions.ok(exists (select 1 from private.report_deliveries where report_day=date '2026-09-10' and status='open'
     and user_id='dddddddd-0000-0000-0000-000000000001'), 'delivery-key cleanup does not remove open key');
-select private.cleanup_expired_data(timestamptz '2026-10-11 15:00:00+00');
+select private.cleanup_retained_data(timestamptz '2026-10-11 15:00:00+00');
 select extensions.is((select pg_catalog.count(*) from private.report_deliveries
     where user_id='dddddddd-0000-0000-0000-000000000001'), 2::bigint, 'delivery cleanup replay is idempotent');
 

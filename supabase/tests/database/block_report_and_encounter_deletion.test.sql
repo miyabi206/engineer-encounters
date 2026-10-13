@@ -221,7 +221,7 @@ from (values ('reports'), ('iana_time_zones')) as t(name);
 select extensions.is((select pg_catalog.array_agg(c.confdeltype::text order by c.conname) from pg_catalog.pg_constraint as c
     where c.conrelid = 'private.reports'::regclass and c.contype = 'f'), array['n','n','c','c'], 'report references SET NULL, accounts cascade');
 select extensions.is((select pg_catalog.count(*) from pg_catalog.pg_index where indrelid = 'private.reports'::regclass),
-    6::bigint, 'report uniqueness, queue and all FK lookups indexed');
+    7::bigint, 'report uniqueness, queue and all FK lookups indexed');
 select extensions.ok((select not attnotnull from pg_catalog.pg_attribute
     where attrelid = 'private.profiles'::regclass and attname = 'operator_outcome'), 'operator outcome is nullable');
 
