@@ -70,6 +70,7 @@ struct AccountRootView: View {
             .accessibilityHidden(composition.deletionSuspended)
             if composition.deletionSuspended { AccountDeletionRecoveryView(composition: composition) }
         }
+        .background(ScenePrivacyAttachment(cover: composition.productLifecycle.privacyCover))
         .task { await flow.start() }
         .onOpenURL { url in
             guard url.scheme == "engineer-encounters", url.host == "session" else { return }

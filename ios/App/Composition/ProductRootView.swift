@@ -1,3 +1,4 @@
+import Combine
 import EncounterUI
 import SwiftUI
 import UIKit
@@ -151,7 +152,7 @@ private struct ProductSessionView: View {
     }
     var body: some View {
         Group {
-            if let failure = adapter.controlStartFailure {
+            if let failure = adapter.controlStartFailure, adapter.state != .stopping, adapter.state != .starting {
                 VStack(spacing: 16) {
                     Text(SessionSurfaceStrings.text(failure == .offline ? "startOffline" : "startFailed"))
                     Button(AccountStrings.text("retry")) { Task { await retryStart() } }
@@ -189,16 +190,24 @@ private struct ProductSessionView: View {
 }
 
 @MainActor
-private final class ProductSessionPresentation: ObservableObject {
+final class ProductSessionPresentation: ObservableObject {
     @Published private(set) var model: SessionModel?
+    private var subscription: AnyCancellable?
     func reload(adapter: SessionAdapter, navigation: SessionNavigationActions) async {
+        subscription = nil
         model = nil
         await open(adapter: adapter, navigation: navigation)
     }
     func open(adapter: SessionAdapter, navigation: SessionNavigationActions) async {
         guard model == nil else { return }
-        let state = await adapter.presentationState()
-        model = SessionModel(state: state, actions: adapter.actions(), navigation: navigation)
+        _ = await adapter.presentationState()
+        guard subscription == nil else { return }
+        // The shared adapter publishes holder snapshots. Every scene follows those
+        // snapshots rather than keeping the acknowledgement from its first visit.
+        subscription = adapter.$state.removeDuplicates().sink { [weak self, weak adapter] state in
+            guard let self, let adapter else { return }
+            self.model = SessionModel(state: state, actions: adapter.actions(), navigation: navigation)
+        }
     }
 }
 

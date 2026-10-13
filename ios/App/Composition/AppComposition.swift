@@ -56,6 +56,7 @@ final class AppComposition: ObservableObject {
     @Published private(set) var checkingDeletionAccount = false
     @Published private(set) var deletionAccountCheckFailed = false
     var deletionSuspended: Bool { deletionState == .pending || deletionState.canRetry }
+    private let pendingDeletion: PendingAccountDeletionStore
     private var deletionTask: (epoch: UUID, task: Task<Bool, any Error>)?
     private var deletionCheckTask: (epoch: UUID, task: Task<AccountSettingsAccountState, any Error>)?
 
@@ -105,9 +106,11 @@ final class AppComposition: ObservableObject {
          webAuthenticationRunner: (any GitHubWebAuthenticationRunning)? = nil,
          sessionIsOnline: (@MainActor () -> Bool)? = nil,
          sessionNetwork: SessionNetworkAvailability? = nil,
+         sessionCancellationScheduler: (any SessionCancellationScheduling)? = nil,
          activityController: (any SessionActivityControlling)? = nil,
          timeZone: @escaping @MainActor () -> String = { TimeZone.current.identifier }) {
         participation = ParticipationFlag(defaults: defaults)
+        pendingDeletion = PendingAccountDeletionStore(defaults: defaults)
         self.keychain = keychain
         suppliedServerTokenStore = serverTokenStore
         suppliedQueueOpener = queueOpener
@@ -187,7 +190,8 @@ final class AppComposition: ObservableObject {
         let sessionNetwork = sessionNetwork ?? SessionNetworkAvailability()
         self.sessionNetwork = sessionNetwork
         sessionAdapter = SessionAdapter(account: account, holder: sessionHolder, clock: clock,
-            isOnline: sessionIsOnline ?? { sessionNetwork.isOnline }, activities: sessionActivity)
+            isOnline: sessionIsOnline ?? { sessionNetwork.isOnline }, activities: sessionActivity,
+            cancellationScheduler: sessionCancellationScheduler)
         if sessionIsOnline == nil {
             sessionNetwork.onOnline = { [weak sessionAdapter] in
                 Task { await sessionAdapter?.foreground() }
@@ -483,6 +487,9 @@ final class AppComposition: ObservableObject {
         guard account.canRefreshSession(), sessionServices?.isCurrent == true else {
             throw ProfileActionError(code: .unavailable)
         }
+        guard let owner = sessionServices?.owner else { throw ProfileActionError(code: .unavailable) }
+        // Persist before the task can send any deletion request.
+        try pendingDeletion.save(owner: owner)
         // This task survives a view's cancellation or destruction.
         let task = Task { @MainActor in
             defer {
@@ -525,6 +532,8 @@ final class AppComposition: ObservableObject {
                 let result = try await self.settingsSafetyAdapter.verifyAccount(epoch, fence: fence)
                 if case .present = result {
                     guard fence.isCurrent(), self.account.state.isSignedIn else { throw ProfileActionError(code: .notAuthenticated) }
+                    guard let owner = self.sessionServices?.owner else { throw BackendError.storageFailure }
+                    try self.pendingDeletion.remove(owner: owner)
                     self.deletionState = .idle
                     self.account.resumeAfterDeletionFailure()
                     self.settingsSafetyAdapter.publishVerifiedProfile()
@@ -589,6 +598,7 @@ final class AppComposition: ObservableObject {
         #if DEVELOPMENT_BUILD || INTERNAL_BUILD
         if !trialCleared { throw BackendError.storageFailure }
         #endif
+        try pendingDeletion.clear()
     }
 
     private func clearStorageForSessionChange() async throws {
@@ -629,7 +639,21 @@ final class AppComposition: ObservableObject {
     }
 
     private func recreatePreparedRuntime(force: Bool) async {
-        guard binding?.isCurrent != false, !account.deletionSuspended || account.state == .signedOut else { return }
+        guard binding?.isCurrent != false else { return }
+        // Account.restore invokes this after reading credentials, before its first
+        // protected refresh or runtime preparation. Unknown marker storage fails closed.
+        if let binding, case .signedInPending(.some(let id)) = account.state {
+            do {
+                if try pendingDeletion.contains(owner: binding.storageOwner(account: id)) {
+                    suspendForDeletion()
+                    deletionState = .failed
+                }
+            } catch {
+                suspendForDeletion()
+                deletionState = .failed
+                deletionError = .init(code: .unavailable)
+            }
+        }
         let force = force || keychainUnavailable || (runtime != nil && (!storageReady || runtimeOwner != binding?.preparedOwner))
         sessionChangeInProgress = true
         if let sessions = account.sessions {
@@ -660,7 +684,7 @@ final class AppComposition: ObservableObject {
         demoReveal.configure(sessionServices)
         #endif
         sessionChangeInProgress = false
-        guard binding?.isCurrent != false else { return }
+        guard binding?.isCurrent != false, !account.deletionSuspended else { return }
         guard force || participation.isEnabled || account.state.isSignedIn else { return }
         let runtime = makeRuntime()
         if participation.isEnabled {

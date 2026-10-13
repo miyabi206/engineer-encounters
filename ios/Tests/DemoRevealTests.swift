@@ -54,7 +54,7 @@ final class DemoRevealTests: XCTestCase {
         await other.demoReveal.switchedOn(); XCTAssertEqual(allowed.requests, 0)
     }
 
-    func testNewOnlyNotificationsReauthorizeAndUseOnlyAuthorizedNames() async throws {
+    func testNewOnlyNotificationsReauthorizeAndAlwaysUseNeutralBody() async throws {
         var shell = productCard(detail: true)
         shell.removeValue(forKey: "display_name"); shell.removeValue(forKey: "introduction")
         let transport = productTransport(["reveal_ambient_now": [.response(demoFeed(cards: [productCard()])), .response(demoFeed()),
@@ -71,8 +71,25 @@ final class DemoRevealTests: XCTestCase {
         try await composition.demoReveal.reveal()
         XCTAssertEqual(center.bodies.last, DemoRevealController.notificationBody(displayName: nil))
         try await composition.demoReveal.reveal(); XCTAssertEqual(center.bodies.count, 2)
+        XCTAssertFalse(center.bodies.joined().contains("Person"))
+        XCTAssertEqual(DemoRevealController.notificationBody(displayName: "Person"), DemoRevealController.notificationBody(displayName: nil))
         XCTAssertFalse(center.bodies.joined().contains(productEncounterID))
         XCTAssertFalse(center.bodies.joined().contains("Contact")); XCTAssertFalse(center.bodies.joined().contains("Work"))
+    }
+
+    func testLaunchAndSwitchOffRemovePreviouslyDeliveredNamedNotifications() async throws {
+        let center = TestLocalNotificationCenter(); center.authorization = .allowed
+        _ = try await center.post(body: "Earlier named demo notification")
+        let composition = settingsComposition(productTransport([:]), defaults: appBackendDefaults(),
+            store: InMemorySessionStore(session: try appBackendTestSession()), center: center)
+        XCTAssertTrue(center.bodies.isEmpty)
+        XCTAssertEqual(center.clears, 1)
+        await composition.waitForRestoration()
+        composition.demoSwitch.isEnabled = true
+        _ = try await center.post(body: "Earlier named demo notification")
+        composition.demoSwitch.isEnabled = false
+        XCTAssertTrue(center.bodies.isEmpty)
+        XCTAssertEqual(center.clears, 2)
     }
 
     func testTruncatedRevealProducesOneNeutralNotificationAndNoInventedCount() async throws {
@@ -209,7 +226,7 @@ final class DemoRevealTests: XCTestCase {
             await reveal.value
             XCTAssertTrue(center.bodies.isEmpty)
             let reads = await transport.count("get_encounter_card"); XCTAssertEqual(reads, 0)
-            if signOut { XCTAssertEqual(center.clears, 1) }
+            XCTAssertEqual(center.clears, signOut ? 3 : 2) // Launch, switch-off, and explicit sign-out cleanup.
         }
     }
 }

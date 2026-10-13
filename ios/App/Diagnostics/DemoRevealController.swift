@@ -52,6 +52,7 @@ final class DemoRevealController: ObservableObject {
 
     init(setting: DemoSwitchSetting, center: any LocalNotificationCenter, account: AccountModel) {
         self.setting = setting; self.center = center; self.account = account
+        center.clear()
     }
     func configure(_ backend: SessionBackendServices?) {
         if self.backend?.epoch != backend?.epoch || self.backend?.owner != backend?.owner { invalidate() }
@@ -61,7 +62,7 @@ final class DemoRevealController: ObservableObject {
         generation = UUID(); running?.task.cancel(); running = nil; backend = nil; unavailable = false
     }
     func clear() { invalidate(); center.clear() }
-    func switchedOff() { generation = UUID(); running?.task.cancel(); running = nil; unavailable = false }
+    func switchedOff() { generation = UUID(); running?.task.cancel(); running = nil; unavailable = false; center.clear() }
     func switchedOn() async {
         guard setting.isEnabled, !requestedPermission else { return }
         requestedPermission = true
@@ -127,10 +128,7 @@ final class DemoRevealController: ObservableObject {
         account.state.isSignedIn && !account.deletionSuspended
     }
     static func notificationBody(displayName: String?) -> String {
-        guard let displayName, !ProfileValidation.trimmed(displayName).isEmpty else {
-            return DiagnosticsStrings.text("demoNotificationReady")
-        }
-        return DiagnosticsStrings.text("demoNotificationName").replacingOccurrences(of: "{name}", with: displayName)
+        DiagnosticsStrings.text("demoNotificationReady")
     }
 }
 #endif

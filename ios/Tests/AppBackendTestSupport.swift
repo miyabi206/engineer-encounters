@@ -232,6 +232,10 @@ actor ControlledAppBackendTransport: HTTPTransport {
         guard let index = held.firstIndex(where: { $0.0 == path }) else { return }
         held.remove(at: index).1.resume(returning: response)
     }
+    func releaseFailure(_ path: String) {
+        guard let index = held.firstIndex(where: { $0.0 == path }) else { return }
+        held.remove(at: index).1.resume(throwing: BackendError.transportFailure)
+    }
 }
 
 actor FailingAppSessionStore: SessionStore {

@@ -640,6 +640,51 @@ final class SettingsSafetyAdapterTests: XCTestCase {
         XCTAssertEqual(deletes, 0)
     }
 
+    func testLostDeletionMarkerRestoresSuspensionBeforeRuntimeOrProtectedReads() async throws {
+        let defaults = appBackendDefaults(defaults: AppInMemoryDefaults())
+        let firstTransport = productTransport(["delete_own_account": [.held]])
+        let store = InMemorySessionStore(session: try appBackendTestSession())
+        let first = try productComposition(firstTransport, defaults: defaults, store: store)
+        await first.waitForRestoration()
+        let deleting = Task { await first.retryAccountDeletion() }
+        try await appBackendEventually { await firstTransport.isHeld("delete_own_account") }
+        let keys = defaults.dictionaryRepresentation().keys.filter { $0.hasPrefix(PendingAccountDeletionStore.prefix) }
+        XCTAssertEqual(keys.count, 1)
+        XCTAssertTrue(defaults.bool(forKey: try XCTUnwrap(keys.first)))
+        XCTAssertFalse(keys.joined().contains(appBackendTestUser.uuidString.lowercased()))
+        await firstTransport.release("delete_own_account", with: productError("prerequisite_missing", details: "deletion_safety_key"))
+        await deleting.value
+        let transport = productTransport(["get_own_profile": [.response(appOwnProfileResponse(appLinkedPresentationProfile()))]])
+        let next = try productComposition(transport, defaults: defaults, store: store)
+        await next.waitForRestoration()
+        XCTAssertTrue(next.deletionSuspended)
+        XCTAssertEqual(next.deletionState, .failed)
+        XCTAssertNil(next.runtime)
+        XCTAssertFalse(next.isParticipating)
+        await next.refresh()
+        let requests = await transport.recorded()
+        XCTAssertTrue(requests.isEmpty)
+        await next.checkAccountAndResume()
+        XCTAssertFalse(next.deletionSuspended)
+        XCTAssertNotNil(next.runtime)
+        XCTAssertNil(defaults.object(forKey: try XCTUnwrap(keys.first)))
+    }
+
+    func testDeletionMarkerIsRetainedAfterUnverifiedCheckAndClearedBySignOut() async throws {
+        let defaults = appBackendDefaults(defaults: AppInMemoryDefaults())
+        let transport = productTransport(["delete_own_account": [.failure], "get_own_profile": [.failure]])
+        let composition = try productComposition(transport, defaults: defaults)
+        await composition.waitForRestoration()
+        let owner = try XCTUnwrap(composition.sessionServices?.owner)
+        await composition.retryAccountDeletion()
+        XCTAssertTrue(try PendingAccountDeletionStore(defaults: defaults).contains(owner: owner))
+        await composition.checkAccountAndResume()
+        XCTAssertTrue(composition.deletionSuspended)
+        XCTAssertTrue(try PendingAccountDeletionStore(defaults: defaults).contains(owner: owner))
+        try await composition.account.signOut()
+        XCTAssertFalse(try PendingAccountDeletionStore(defaults: defaults).contains(owner: owner))
+    }
+
     func testLegalConfigurationIncludesOnlyValidConfiguredDestinations() {
         let data = SettingsSafetyAdapter.legalData(info: ["TermsURL": "https://example.org/terms",
             "PrivacyURL": "http://example.org/privacy", "SupportURL": "https://example.org/support",

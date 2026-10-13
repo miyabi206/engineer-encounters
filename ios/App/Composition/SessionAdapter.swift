@@ -64,24 +64,29 @@ final class SessionAdapter: ObservableObject {
     private let account: AccountModel
     private let isOnline: @MainActor () -> Bool
     private let clock: any EncounterClock
+    private let cancellationScheduler: any SessionCancellationScheduling
+    private var cancellationPoll: (id: UUID, job: any ReceiptUploadCancellation)?
     private var backend: SessionBackendServices?
     private var configuredEpoch: UUID?
     private var configuredOwner: BackendStorageOwner?
     private var configuredFence: BackendCallFence?
     private var version: UInt64 = 0
-    private var read: (id: UUID, task: Task<SessionTransfer?, any Error>)?
+    private var read: (id: UUID, task: Task<SessionState, any Error>)?
     private var upload: (id: UUID, task: Task<Void, any Error>)?
     private var discoveryStop: SessionHolder.Stop?
     private var retry: (id: UUID, task: Task<Void, Never>)?
 
     init(account: AccountModel, holder: SessionHolder, clock: any EncounterClock,
-         isOnline: @escaping @MainActor () -> Bool, activities: SessionActivityCoordinator? = nil) {
+         isOnline: @escaping @MainActor () -> Bool, activities: SessionActivityCoordinator? = nil,
+         cancellationScheduler: (any SessionCancellationScheduling)? = nil) {
         self.account = account; self.holder = holder; self.clock = clock; self.isOnline = isOnline
         self.activities = activities ?? SessionActivityCoordinator(controller: NoSessionActivityController())
+        self.cancellationScheduler = cancellationScheduler ?? ClockSessionCancellationScheduler(clock: clock)
     }
 
     func configure(_ backend: SessionBackendServices?) async {
         if self.backend !== backend {
+            cancellationPoll?.job.cancel(); cancellationPoll = nil
             retry?.task.cancel(); retry = nil
             read?.task.cancel(); read = nil
             upload?.task.cancel(); upload = nil
@@ -104,6 +109,7 @@ final class SessionAdapter: ObservableObject {
     }
 
     func invalidate() async {
+        cancellationPoll?.job.cancel(); cancellationPoll = nil
         retry?.task.cancel(); retry = nil
         read?.task.cancel(); read = nil
         upload?.task.cancel(); upload = nil
@@ -209,6 +215,7 @@ final class SessionAdapter: ObservableObject {
     /// Runs before the credential tombstone and runtime/storage cleanup. It does not retain
     /// outgoing credentials or wait for an outstanding start/get to drain.
     func prepareToDiscardSession() async {
+        cancellationPoll?.job.cancel(); cancellationPoll = nil
         guard account.hasCurrentSessionContext else { await invalidate(); return }
         guard let backend, backend.isCurrent else {
             await holder.discardPendingStops()
@@ -230,9 +237,13 @@ final class SessionAdapter: ObservableObject {
                         if await self.holder.needsStopCheck(owner: backend.owner) {
                             _ = try await self.fetch(backend, starting: false, outgoing: true)
                         }
-                        if try await self.holder.pendingStop(owner: backend.owner) != nil {
-                            try Task.checkCancellation()
-                            _ = try await backend.call(outgoing: true) { try await $0.session.stopSession() }
+                        if let pending = try await self.holder.pendingStop(owner: backend.owner) {
+                            let quarantined = await self.holder.needsCancellationPoll(owner: backend.owner)
+                            let authorized = await self.holder.canUploadStop(pending)
+                            if !quarantined || authorized {
+                                try Task.checkCancellation()
+                                _ = try await backend.call(outgoing: true) { try await $0.session.stopSession() }
+                            }
                         }
                     } catch { /* The bounded outgoing attempt never owns a later retry. */ }
                     completion.finish()
@@ -253,8 +264,11 @@ final class SessionAdapter: ObservableObject {
     func authorizationWillBeDiscarded() async {
         guard account.hasCurrentSessionContext,
               configuredEpoch == nil || account.sessionGeneration == configuredEpoch else { return }
+        cancellationPoll?.job.cancel(); cancellationPoll = nil
         retry?.task.cancel(); retry = nil
-        read?.task.cancel(); read = nil
+        // Keep the read alive until its caller observes the rejected credential
+        // refresh. Cancelling the start race here would replace notAuthenticated
+        // with CancellationError before that caller can sign out every adapter.
         upload?.task.cancel(); upload = nil
         await holder.discardPendingStops()
         await update()
@@ -289,7 +303,6 @@ final class SessionAdapter: ObservableObject {
         let backend = try context(epoch: epoch)
         do {
             if await holder.needsStopCheck(owner: backend.owner) {
-                _ = try await fetch(backend, starting: false)
                 try await flushStop(backend)
                 let state = await presentationState()
                 guard backend.isCurrent else { throw SessionActionError.unavailable }
@@ -337,49 +350,103 @@ final class SessionAdapter: ObservableObject {
         let request = try await holder.begin(owner: backend.owner, starting: starting)
         let id = UUID()
         let task = Task {
-            guard await self.holder.isCurrent(request) else { throw SessionActionError.unavailable }
-            return try await backend.call(outgoing: outgoing) { services -> SessionTransfer? in
-                guard await self.holder.markSent(request) else { throw SessionActionError.unavailable }
-                if starting { return try await services.session.startSession() }
-                return try await services.session.getOwnSession()
+            do {
+                guard await self.holder.isCurrent(request) else { throw SessionActionError.unavailable }
+                let operation: @MainActor () async throws -> SessionTransfer? = {
+                    try await backend.call(outgoing: outgoing) { services in
+                        try Task.checkCancellation()
+                        guard await self.holder.markSent(request) else { throw SessionActionError.unavailable }
+                        if starting { return try await services.session.startSession() }
+                        return try await services.session.getOwnSession()
+                    }
+                }
+                let response: SessionTransfer?
+                if starting { response = try await self.startWithTimeout(operation) }
+                else { response = try await operation() }
+                guard backend.isCurrent else { throw SessionActionError.unavailable }
+                guard try await self.holder.receive(response, for: request, acceptingActive: !outgoing) else {
+                    throw SessionActionError.unavailable
+                }
+                return await self.holder.snapshot().state
+            } catch {
+                await self.holder.fail(request, offline: starting && !self.isOnline(),
+                    definiteStartFailure: starting && Self.isDefiniteStartFailure(error))
+                throw error
             }
         }
         read = (id, task)
         defer { if read?.id == id { read = nil } }
         await update()
         do {
-            let response = try await task.value
+            let state = try await task.value
             guard backend.isCurrent else { throw SessionActionError.unavailable }
-            guard try await holder.receive(response, for: request, acceptingActive: !outgoing) else { throw SessionActionError.unavailable }
             failure = nil
-            let snapshot = await holder.snapshot()
-            publish(snapshot)
-            return snapshot.state
+            await update()
+            return state
         } catch {
-            await holder.fail(request, offline: starting && !isOnline())
             await update()
             throw error
         }
     }
 
+    private func startWithTimeout(_ operation: @escaping @MainActor () async throws -> SessionTransfer?) async throws -> SessionTransfer? {
+        let deadline = await clock.now().monotonic + SessionCancellationPolicy.startRequestTimeout
+        let completion = SessionStartCompletion()
+        var network: Task<Void, Never>?
+        var timer: Task<Void, Never>?
+        defer { network?.cancel(); timer?.cancel() }
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                completion.install(continuation)
+                network = Task {
+                    do { completion.finish(.success(try await operation())) }
+                    catch { completion.finish(.failure(error)) }
+                }
+                timer = Task {
+                    do {
+                        try await self.clock.wait(until: deadline)
+                        try Task.checkCancellation()
+                        completion.finish(.failure(BackendError.transportFailure))
+                    } catch { /* A completed or cancelled request stops its timer. */ }
+                }
+            }
+        } onCancel: {
+            Task { @MainActor in completion.finish(.failure(CancellationError())) }
+        }
+    }
+
+    private static func isDefiniteStartFailure(_ error: any Error) -> Bool {
+        switch error as? BackendError {
+        case .notAuthenticated, .accountNotReady, .declarationRequired, .invalidInput,
+             .prerequisiteMissing, .rateLimited, .notFound: true
+        default: false
+        }
+    }
+
     private func flushStop(_ backend: SessionBackendServices) async throws {
-        if await holder.needsStopCheck(owner: backend.owner) {
+        if read == nil, await holder.needsStopCheck(owner: backend.owner) {
             _ = try await fetch(backend, starting: false)
         }
         guard let stop = try await holder.pendingStop(owner: backend.owner) else { return }
+        if read == nil, !(await holder.canUploadStop(stop)) { return }
         if let upload {
             try await upload.task.value
             if self.upload?.id == upload.id { self.upload = nil }
             try await flushStop(backend)
             return
         }
-        let read = read?.task
+        let priorRead = read
         let id = UUID()
         let task = Task {
             // A stop after an in-flight start must reach the server after that start finishes.
-            _ = await read?.result
+            _ = await priorRead?.task.result
+            if self.read?.id == priorRead?.id { self.read = nil }
             try Task.checkCancellation()
-            guard backend.isCurrent, try await self.holder.pendingStop(owner: backend.owner) == stop else { return }
+            if await self.holder.needsStopCheck(owner: backend.owner) {
+                _ = try await self.fetch(backend, starting: false)
+            }
+            guard backend.isCurrent, try await self.holder.pendingStop(owner: backend.owner) == stop,
+                  await self.holder.canUploadStop(stop) else { return }
             if await self.holder.needsDiscoveryOff(stop) {
                 try await backend.call { try await $0.ownAccount.setDiscovery(enabled: false) }
                 if var profile = self.account.profile {
@@ -398,7 +465,8 @@ final class SessionAdapter: ObservableObject {
         await update()
         guard backend.isCurrent else { throw SessionActionError.unavailable }
         // A second stop/discovery-off request may have arrived during the upload.
-        if try await holder.pendingStop(owner: backend.owner) != nil {
+        if try await holder.pendingStop(owner: backend.owner) != nil,
+           !(await holder.needsCancellationPoll(owner: backend.owner)) {
             if upload?.id == id { upload = nil }
             try await flushStop(backend)
         } else if self.backend === backend { failure = nil }
@@ -431,7 +499,26 @@ final class SessionAdapter: ObservableObject {
     private func update() async {
         publish(await holder.snapshot())
         await activities.flush()
+        await scheduleCancellationPoll()
     }
+
+    private func scheduleCancellationPoll() async {
+        guard let backend, backend.isCurrent, !account.sessionChangeInProgress, !account.deletionSuspended,
+              await holder.needsCancellationPoll(owner: backend.owner) else {
+            cancellationPoll?.job.cancel(); cancellationPoll = nil
+            return
+        }
+        guard cancellationPoll == nil else { return }
+        let id = UUID()
+        let job = cancellationScheduler.schedule(after: SessionCancellationPolicy.pollInterval) { [weak self] in
+            guard let self, self.cancellationPoll?.id == id, self.backend === backend, backend.isCurrent else { return }
+            self.cancellationPoll = nil
+            await self.foreground()
+            await self.retry?.task.value
+        }
+        cancellationPoll = (id, job)
+    }
+
     private func publish(_ snapshot: SessionHolder.Snapshot, allowSameVersion: Bool = true) {
         guard snapshot.version > version || (allowSameVersion && snapshot.version == version) else { return }
         version = snapshot.version

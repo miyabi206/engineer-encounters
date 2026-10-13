@@ -23,10 +23,16 @@ final class QRAdapterTests: XCTestCase {
         try await actions.cancelCode(code)
         let id = try await actions.redeemCode(QRPayload(token: String(repeating: "b", count: 32))!)
         XCTAssertEqual(id, productEncounterID)
+        try await appBackendEventually { await transport.count("get_encounter_feed") == 2 }
         let requests = await transport.recorded()
-        XCTAssertEqual(requests.compactMap { $0.url?.lastPathComponent }, ["register_time_zone", "get_encounter_feed",
-            "issue_qr_code", "cancel_qr_code", "redeem_qr_code", "get_encounter_feed"])
-        let parameters = try XCTUnwrap(try JSONSerialization.jsonObject(with: XCTUnwrap(requests[4].httpBody)) as? [String: String])
+        let paths = requests.compactMap { $0.url?.lastPathComponent }
+        XCTAssertEqual(paths.filter { $0 == "get_encounter_feed" }.count, 2)
+        XCTAssertEqual(paths.sorted(), ["register_time_zone", "list_interests", "get_encounter_feed",
+            "issue_qr_code", "cancel_qr_code", "redeem_qr_code", "get_encounter_feed"].sorted())
+        XCTAssertEqual(paths.filter { ["issue_qr_code", "cancel_qr_code", "redeem_qr_code"].contains($0) },
+            ["issue_qr_code", "cancel_qr_code", "redeem_qr_code"])
+        let redeem = try XCTUnwrap(requests.first { $0.url?.lastPathComponent == "redeem_qr_code" })
+        let parameters = try XCTUnwrap(try JSONSerialization.jsonObject(with: XCTUnwrap(redeem.httpBody)) as? [String: String])
         XCTAssertEqual(Set(parameters.keys), ["code"])
         XCTAssertEqual(parameters["code"]?.count, 32)
         XCTAssertFalse(parameters["code"]?.hasPrefix("EEQR1:") ?? true)
