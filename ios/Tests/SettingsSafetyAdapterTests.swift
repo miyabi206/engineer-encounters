@@ -104,7 +104,7 @@ final class SettingsSafetyAdapterTests: XCTestCase {
                                                   "token": [.response(appBackendAuthResponse())]])
                 let composition = try productComposition(transport)
                 await composition.waitForRestoration(); productAuthorize(composition)
-                let alreadyDeleted = ["delete_encounter", "report_encounter_person", "block_encounter_person"].contains(path) && code == "not_found"
+                let alreadyDeleted = path == "delete_encounter" && code == "not_found"
                 do { try await operation(composition); if !alreadyDeleted { XCTFail("Expected failure: \(path)") } }
                 catch {
                     XCTAssertFalse(alreadyDeleted)
@@ -523,16 +523,18 @@ final class SettingsSafetyAdapterTests: XCTestCase {
         }
     }
 
-    func testAccountCheckFindingGoneCompletesDeletionWithoutResuming() async throws {
+    func testAccountCheckNotFoundKeepsRecoveryWithRetry() async throws {
         let transport = productTransport(["delete_own_account": [.failure],
             "get_own_profile": [.response(productError("not_found"))]])
         let composition = try productComposition(transport)
         await composition.waitForRestoration(); productAuthorize(composition)
         await composition.retryAccountDeletion()
         await composition.checkAccountAndResume()
-        XCTAssertEqual(composition.account.state, .signedOut)
-        XCTAssertTrue(composition.account.accountWasDeleted)
-        XCTAssertFalse(composition.deletionSuspended)
+        XCTAssertTrue(composition.account.state.isSignedIn)
+        XCTAssertFalse(composition.account.accountWasDeleted)
+        XCTAssertTrue(composition.deletionSuspended)
+        XCTAssertEqual(composition.deletionState, .failed)
+        XCTAssertEqual(composition.deletionError, .init(code: .notFound))
         XCTAssertFalse(composition.isParticipating)
     }
 
@@ -557,6 +559,85 @@ final class SettingsSafetyAdapterTests: XCTestCase {
             XCTAssertEqual(calls, 2)
             XCTAssertTrue(composition.account.state.isSignedIn)
         }
+    }
+
+    func testFirstNotFoundForReportAndBlockNeverClaimsAcceptanceAndReloadsLists() async throws {
+        for block in [false, true] {
+            let path = block ? "block_encounter_person" : "report_encounter_person"
+            let transport = productTransport([path: [.response(productError("not_found")), .response(productError("not_found"))],
+                "get_encounter_feed": [.response(productFeed()), .response(productFeed()), .response(productFeed())],
+                "list_encounter_favorites": [.response(productFeed()), .response(productFeed()), .response(productFeed())]])
+            let composition = try productComposition(transport, defaults: appBackendDefaults(defaults: AppInMemoryDefaults()))
+            await composition.waitForRestoration(); productAuthorize(composition)
+            let discover = try XCTUnwrap(composition.discoverAdapter.model)
+            await discover.loadFeed(); await discover.loadFavorites()
+            var completed = 0
+            let model = SafetyReportModel(encounterID: productEncounterID,
+                actions: composition.settingsSafetyAdapter.reportActions(encounterID: productEncounterID),
+                navigation: .init(completed: { completed += 1 }, reopenEncounter: {}))
+            if block { await model.block() } else { model.reason = .spam; await model.submit() }
+            XCTAssertEqual(completed, 0)
+            XCTAssertEqual(model.error, .init(code: .notFound))
+            XCTAssertNotNil(model.state.retry)
+            try await appBackendEventually {
+                let feeds = await transport.count("get_encounter_feed")
+                let favorites = await transport.count("list_encounter_favorites")
+                return feeds >= 2 && favorites >= 2
+            }
+            await model.retry() // A known rejection is not a lost answer.
+            XCTAssertEqual(completed, 0)
+            XCTAssertEqual(model.error, .init(code: .notFound))
+        }
+    }
+
+    func testLostDeletionThenRejectedRefreshOnRetryOrCheckPurgesLocalDataWithoutPendingSpinner() async throws {
+        for retry in [false, true] {
+            let transport = productTransport([
+                "delete_own_account": retry ? [.failure, .response(productError("not_authenticated"))] : [.failure],
+                "get_own_profile": retry ? [] : [.response(productError("not_authenticated"))],
+                "token": [.response(productRejectedRefresh())]])
+            let defaults = appBackendDefaults(defaults: AppInMemoryDefaults())
+            let queue = InMemoryReceiptQueue()
+            let tokens = InMemoryTokenBatchStore()
+            let store = InMemorySessionStore(session: try appBackendTestSession())
+            let composition = settingsComposition(transport, defaults: defaults, queue: queue, tokens: tokens, store: store)
+            await composition.waitForRestoration(); productAuthorize(composition)
+            try await queue.enqueue(appBackendFinalReceipt())
+            try await tokens.save(EncounterSamples.batch())
+            composition.sampleEncounter.dismiss()
+            await composition.retryAccountDeletion()
+            XCTAssertEqual(composition.deletionState, .failed)
+            let fence = composition.account.backendCallFence()
+            if retry { await composition.retryAccountDeletion() } else { await composition.checkAccountAndResume() }
+            XCTAssertFalse(fence.isCurrent())
+            XCTAssertEqual(composition.account.state, .signedOut)
+            XCTAssertEqual(composition.deletionState, .idle)
+            XCTAssertFalse(composition.checkingDeletionAccount)
+            XCTAssertFalse(composition.deletionSuspended)
+            XCTAssertTrue(composition.account.accountWasDeleted)
+            XCTAssertNil(composition.account.profile)
+            XCTAssertNil(composition.discoverAdapter.model)
+            let stored = try await store.load()
+            let batch = try await tokens.load()
+            let receipts = try await queue.pending()
+            XCTAssertNil(stored); XCTAssertNil(batch); XCTAssertTrue(receipts.isEmpty)
+            XCTAssertTrue(defaults.bool(forKey: InstallationSampleDismissalStore.key))
+            XCTAssertNotNil(defaults.data(forKey: InstallationStorageSalt.key))
+        }
+    }
+
+    func testDeletionRefusalBeforeSuspensionIsPresentedAndHasNoPendingState() async throws {
+        let transport = productTransport([:])
+        let composition = try productComposition(transport, defaults: appBackendDefaults(defaults: AppInMemoryDefaults()))
+        await composition.waitForRestoration(); productAuthorize(composition)
+        let replacement = UUID()
+        composition.account.bindingGeneration = { replacement }
+        await composition.retryAccountDeletion()
+        XCTAssertEqual(composition.deletionError, .init(code: .unavailable))
+        XCTAssertEqual(composition.deletionState, .idle)
+        XCTAssertFalse(composition.deletionSuspended)
+        let deletes = await transport.count("delete_own_account")
+        XCTAssertEqual(deletes, 0)
     }
 
     func testLegalConfigurationIncludesOnlyValidConfiguredDestinations() {

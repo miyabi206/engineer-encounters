@@ -77,8 +77,16 @@ extension AccountModel {
             },
             requestBluetooth: {
                 try requireSession()
+                var rejected = false
                 do {
-                    let bluetooth = try await fence.call { try await requestBluetooth() }
+                    let bluetooth = try await fence.call {
+                        do { return try await requestBluetooth() }
+                        catch {
+                            rejected = error as? BackendError == .notAuthenticated ||
+                                (error as? ProfileActionError)?.code == .notAuthenticated
+                            throw error
+                        }
+                    }
                     guard self.sessionGeneration == epoch else { return bluetooth }
                     _ = try? await self.loadOwnProfile()
                     guard self.sessionGeneration == epoch else { return bluetooth }
@@ -87,7 +95,7 @@ extension AccountModel {
                 catch is CancellationError { throw CancellationError() }
                 catch {
                     let failure = error as? ProfileActionError ?? Self.presentationError(error)
-                    if failure.code == .notAuthenticated { await self.rejectDeadSession(generation: epoch) }
+                    if rejected, failure.code == .notAuthenticated { await self.rejectDeadSession(generation: epoch) }
                     throw failure
                 }
             },
@@ -131,10 +139,20 @@ extension AccountModel {
         guard case .signedIn(let user) = state else { throw ProfileActionError(code: .notAuthenticated) }
         let epoch = sessionGeneration
         let fence = backendCallFence()
+        var rejected = false
+        func call() async throws -> Value {
+            try await fence.call {
+                do { return try await operation(service) }
+                catch {
+                    rejected = error as? BackendError == .notAuthenticated
+                    throw error
+                }
+            }
+        }
         do {
             let result: Value
-            if allowingDeletion { result = try await fence.call { try await operation(service) } }
-            else { result = try await protectedOperation { try await fence.call { try await operation(service) } } }
+            if allowingDeletion { result = try await call() }
+            else { result = try await protectedOperation { try await call() } }
             guard hasCurrentSessionContext, !sessionCleanupPending, sessionGeneration == epoch, state == .signedIn(user) else {
                 throw ProfileActionError(code: .notAuthenticated)
             }
@@ -142,7 +160,12 @@ extension AccountModel {
         } catch is CancellationError { throw CancellationError() }
         catch {
             let failure = error as? ProfileActionError ?? Self.presentationError(error)
-            if failure.code == .notAuthenticated, fence.isCurrent() { await rejectDeadSession(generation: epoch) }
+            // A rejected refresh clears credentials and advances the binding fence first.
+            // Only an actual service rejection, for this account generation, discards Auth.
+            if rejected, failure.code == .notAuthenticated {
+                if allowingDeletion { await completeAccountDeletion(generation: epoch) }
+                else { await rejectDeadSession(generation: epoch) }
+            }
             throw failure
         }
     }

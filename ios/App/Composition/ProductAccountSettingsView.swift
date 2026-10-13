@@ -41,6 +41,10 @@ struct ProductAccountSettingsView: View {
                     Text(AccountStrings.text("profileError"))
                     Button(AccountStrings.text("retry")) { Task { await model.retry() } }
                 }
+                if composition.deletionError != nil, !composition.deletionSuspended {
+                    Text(AccountStrings.text("profileError"))
+                    Button(AccountStrings.text("deletionRetry")) { Task { await composition.retryAccountDeletion() } }
+                }
                 if let support = model.navigation.support { Button(AccountStrings.text("support"), action: support) }
             }.padding().disabled(model.isBusy)
         }
@@ -62,7 +66,7 @@ struct ProductAccountSettingsView: View {
                             Task {
                                 switch operation {
                                 case .delete:
-                                    _ = try? await composition.settingsSafetyAdapter.accountActions().deleteAccount()
+                                    await composition.retryAccountDeletion()
                                 case .disconnect: await model.disconnect()
                                 case .signOut: await model.signOut()
                                 default: break

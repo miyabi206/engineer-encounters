@@ -85,20 +85,35 @@ final class SettingsSafetyAdapter: ObservableObject {
 
     func reportActions(encounterID: String) -> SafetyReportActions {
         let epoch = account.sessionGeneration, fence = account.backendCallFence()
+        var lostReports: [SafetyReportRequest] = []
+        var lostBlocks: Set<String> = []
         return .init(report: { request in
             let id = try DiscoverAdapter.identifier(request.encounterID, field: "encounter_id")
             let link = try request.linkID.map { try DiscoverAdapter.identifier($0, field: "link_id") }
             do {
-                _ = try await self.call(epoch, fence: fence) {
+                _ = try await self.call(epoch, fence: fence, lostAnswer: {
+                    if !lostReports.contains(request) { lostReports.append(request) }
+                }) {
                     try await $0.safety.reportEncounterPerson(encounterID: id,
                         reason: EncounterReportReason(rawValue: request.reason.rawValue)!, linkID: link)
                 }
-            } catch let error as ProfileActionError where error.code == .notFound { }
+            } catch let error as ProfileActionError where error.code == .notFound {
+                self.discover.protectedContentDidChange()
+                guard lostReports.contains(request) else { throw error }
+            }
+            lostReports.removeAll { $0 == request }
             self.discover.protectedContentDidChange()
         }, block: { value in
             let id = try DiscoverAdapter.identifier(value, field: "encounter_id")
-            do { _ = try await self.call(epoch, fence: fence) { try await $0.safety.blockEncounterPerson(encounterID: id) } }
-            catch let error as ProfileActionError where error.code == .notFound { }
+            do {
+                _ = try await self.call(epoch, fence: fence, lostAnswer: { lostBlocks.insert(value) }) {
+                    try await $0.safety.blockEncounterPerson(encounterID: id)
+                }
+            } catch let error as ProfileActionError where error.code == .notFound {
+                self.discover.protectedContentDidChange()
+                guard lostBlocks.contains(value) else { throw error }
+            }
+            lostBlocks.remove(value)
             self.discover.protectedContentDidChange()
         }, conceal: {
             guard fence.isCurrent(), self.account.sessionGeneration == epoch else { return }
@@ -176,9 +191,7 @@ final class SettingsSafetyAdapter: ObservableObject {
             let profile = AccountModel.present(fresh)
             verifiedProfile = profile
             return .present(accountData(profile: profile, ownLinks: links.links ?? []))
-        } catch let error as ProfileActionError where error.code == .notFound {
-            try require(epoch, fence: fence, allowingDeletion: true)
-            await account.completeAccountDeletion(generation: epoch)
+        } catch let error as ProfileActionError where error.code == .notAuthenticated && account.state == .signedOut {
             return .deleted
         }
     }
@@ -214,15 +227,30 @@ final class SettingsSafetyAdapter: ObservableObject {
         guard allowingDeletion || !account.deletionSuspended else { throw CancellationError() }
     }
     private func call<Value>(_ epoch: UUID, fence: BackendCallFence, allowingDeletion: Bool = false,
+                             lostAnswer: @MainActor () -> Void = {},
                              _ operation: @MainActor (SessionBackendServices.Services) async throws -> Value) async throws -> Value {
         try require(epoch, fence: fence, allowingDeletion: allowingDeletion)
         guard let backend else { throw ProfileActionError(code: .unavailable) }
-        do { return try await backend.call(outgoing: allowingDeletion, operation) }
+        var rejected = false
+        do {
+            return try await backend.call(outgoing: allowingDeletion) {
+                do { return try await operation($0) }
+                catch {
+                    rejected = error as? BackendError == .notAuthenticated
+                    switch error as? BackendError {
+                    case .transportFailure, .httpFailure, .invalidResponse: lostAnswer()
+                    default: break
+                    }
+                    throw error
+                }
+            }
+        }
         catch is CancellationError { throw CancellationError() }
         catch {
             let failure = error as? ProfileActionError ?? AccountModel.presentationError(error)
-            if failure.code == .notAuthenticated, fence.isCurrent(), backend.isCurrent {
-                await account.rejectDeadSession(generation: epoch)
+            if rejected, failure.code == .notAuthenticated {
+                if allowingDeletion { await account.completeAccountDeletion(generation: epoch) }
+                else { await account.rejectDeadSession(generation: epoch) }
             }
             throw failure
         }

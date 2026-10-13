@@ -8,6 +8,47 @@ import XCTest
 
 @MainActor
 final class SessionHolderTests: XCTestCase {
+    func testDiscoveryOffWithUnresolvedStopStillSynchronizesThenAllowsAnotherStart() async throws {
+        for markedStillActive in [false, true] {
+            let defaults = appBackendDefaults(defaults: AppInMemoryDefaults())
+            var profile = appPresentationProfile()
+            profile.discoveryOn = true
+            let transport = sessionTransport([
+                "get_own_session": [.response(markedStillActive ? sessionResponse() : sessionNull)],
+                "set_discovery": [.failure, .response(appAccountOK()), .response(appAccountOK())],
+                "get_own_profile": [.response(appOwnProfileResponse(profile))],
+                "start_session": [.response(sessionResponse(id: "00000000-0000-0000-0000-000000000445"))]])
+            let composition = try sessionComposition(transport, defaults: defaults)
+            await composition.waitForRestoration()
+            let owner = try XCTUnwrap(composition.sessionServices?.owner)
+            await composition.sessionHolder.bind(nil)
+            try PendingSessionStopStore(defaults: defaults).save(.init(
+                sessionID: UUID(uuidString: "00000000-0000-0000-0000-000000000444")!,
+                expiresAt: appBackendTestNow.addingTimeInterval(100)), owner: owner)
+            await composition.sessionHolder.bind(owner)
+            let actions = composition.account.profileActions { .available }
+            do { _ = try await actions.setDiscovery(false); XCTFail("Offline disable must queue synchronization") } catch { }
+            let pending = await composition.sessionHolder.snapshot()
+            XCTAssertTrue(pending.stopPending); XCTAssertTrue(pending.discoveryOffPending)
+            await composition.sessionAdapter.foreground()
+            try await appBackendEventually { !composition.sessionAdapter.stopPending }
+            let resolved = await composition.sessionHolder.snapshot()
+            XCTAssertFalse(resolved.discoveryOffPending)
+            XCTAssertTrue(pendingStopKeys(defaults).isEmpty)
+            await assertFlag(composition, false)
+            _ = try await actions.setDiscovery(true)
+            _ = try await composition.sessionAdapter.actions().startSession()
+            await assertFlag(composition, true)
+            let requests = await transport.recorded()
+            let discoveries = try requests.filter { $0.url?.lastPathComponent == "set_discovery" }.map {
+                try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap($0.httpBody)) as? [String: Bool])["enabled"]
+            }
+            XCTAssertEqual(discoveries, [false, false, true])
+            let getIndex = try XCTUnwrap(requests.firstIndex { $0.url?.lastPathComponent == "get_own_session" })
+            XCTAssertEqual(requests[getIndex + 1].url?.lastPathComponent, "set_discovery")
+        }
+    }
+
     func testRelaunchClaimsNothingUntilFreshGetAndNullGetClearsActivity() async throws {
         let transport = sessionTransport(["get_own_session": [.held, .response(sessionNull)]])
         let composition = try sessionComposition(transport)

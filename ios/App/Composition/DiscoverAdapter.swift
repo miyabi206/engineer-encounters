@@ -241,13 +241,18 @@ final class DiscoverAdapter: ObservableObject {
     private func call<Value>(epoch: UUID, fence: BackendCallFence, _ operation: @MainActor (SessionBackendServices.Services) async throws -> Value) async throws -> Value {
         try require(epoch: epoch, fence: fence)
         guard let backend else { throw ProfileActionError(code: .notAuthenticated) }
+        var rejected = false
         do {
-            let result = try await backend.call(operation)
+            let result = try await backend.call {
+                do { return try await operation($0) }
+                catch { rejected = error as? BackendError == .notAuthenticated; throw error }
+            }
             failure = nil
             return result
         } catch is CancellationError { throw CancellationError() }
         catch {
             let value = AccountModel.presentationError(error)
+            if rejected, value.code == .notAuthenticated { await account.rejectDeadSession(generation: epoch) }
             if self.backend === backend, account.sessionGeneration == epoch, backend.isCurrent {
                 failure = value
                 // DiscoverModel consumes authorization errors, clearing its cache and
@@ -255,7 +260,6 @@ final class DiscoverAdapter: ObservableObject {
                 if value.code == .prerequisiteMissing, value.fields.contains("discovery") {
                     model?.receiveAccess(discoveryOn: false, isAuthorized: true)
                 }
-                if value.code == .notAuthenticated { await account.rejectDeadSession(generation: epoch) }
             }
             throw value
         }

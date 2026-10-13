@@ -203,14 +203,15 @@ private final class ProductSessionPresentation: ObservableObject {
 }
 
 @MainActor
-private struct ProductQRView: View {
+struct ProductQRView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var model: QRModel
     @StateObject private var presentation = ProductQRPresentation()
+    private let adapter: QRAdapter
     private let poller: EncounterConfirmationPoller
     let navigation: QRNavigationActions
     init(adapter: QRAdapter, poller: EncounterConfirmationPoller, navigation: QRNavigationActions) {
-        self.navigation = navigation; self.poller = poller
+        self.navigation = navigation; self.poller = poller; self.adapter = adapter
         _model = StateObject(wrappedValue: adapter.makeModel(navigation: navigation))
     }
     var body: some View {
@@ -219,12 +220,23 @@ private struct ProductQRView: View {
             else { ProgressView() }
         }
         .task(id: scenePhase) {
-            guard scenePhase == .active, !presentation.ready else { return }
+            guard scenePhase == .active else { return }
+            adapter.showPresentation(model)
             await poller.openQR(model)
             guard !Task.isCancelled else { return }
             presentation.ready = true
         }
-        .onDisappear { poller.closeQR(model) }
+        .onDisappear {
+            presentation.ready = false
+            poller.closeQR(model)
+            model.disappear()
+        }
+        .onChange(of: model.segment) { _, segment in
+            if segment == .scan {
+                model.disappear()
+                Task { await model.appear() }
+            }
+        }
     }
 }
 

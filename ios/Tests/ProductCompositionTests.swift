@@ -9,6 +9,50 @@ import XCTest
 
 @MainActor
 final class ProductCompositionTests: XCTestCase {
+    func testRejectedRefreshSignsOutEveryAdapterDespiteClearingItsBindingFence() async throws {
+        let baseOperations: [(String, @MainActor (AppComposition) async throws -> Void)] = [
+            ("get_own_profile", { _ = try await $0.account.loadOwnProfile() }),
+            ("list_own_links", { _ = try await $0.linkAdapter.actions().loadLinks() }),
+            ("start_session", { _ = try await $0.sessionAdapter.actions().startSession() }),
+            ("issue_qr_code", { _ = try await $0.qrAdapter.actions().issueCode() }),
+            ("get_encounter_feed", { _ = try await $0.discoverAdapter.actions().loadFeed() }),
+            ("get_report_settings", { _ = try await $0.settingsSafetyAdapter.reportSettingsActions().load() }),
+            ("list_blocks", { _ = try await $0.settingsSafetyAdapter.blockedActions().load() }),
+            ("block_encounter_person", { try await $0.settingsSafetyAdapter.reportActions(encounterID: productEncounterID).block(productEncounterID) }),
+            ("report_encounter_person", {
+                try await $0.settingsSafetyAdapter.reportActions(encounterID: productEncounterID).report(
+                    XCTUnwrap(SafetyReportRequest(encounterID: productEncounterID, reason: .spam, link: nil)))
+            })
+        ]
+        #if DEVELOPMENT_BUILD || INTERNAL_BUILD
+        let operations = baseOperations + [("reveal_ambient_now", { composition in
+            composition.demoSwitch.isEnabled = true
+            try await composition.demoReveal.reveal()
+        })]
+        #else
+        let operations = baseOperations
+        #endif
+        for (path, operation) in operations {
+            let store = InMemorySessionStore(session: try appBackendTestSession())
+            let transport = productTransport([path: [.response(productError("not_authenticated"))],
+                "token": [.response(productRejectedRefresh())]])
+            let composition = try productComposition(transport, defaults: appBackendDefaults(defaults: AppInMemoryDefaults()), store: store)
+            await composition.waitForRestoration(); productAuthorize(composition)
+            composition.discoverAdapter.interests = [.init(id: "swift", labelJapanese: "Swift", labelEnglish: "Swift")]
+            let epoch = composition.account.sessionGeneration
+            let fence = composition.account.backendCallFence()
+            do { try await operation(composition); XCTFail("Rejected refresh must fail") } catch { }
+            XCTAssertFalse(fence.isCurrent(), path)
+            XCTAssertNotEqual(composition.account.sessionGeneration, epoch, path)
+            XCTAssertEqual(composition.account.state, .signedOut, path)
+            XCTAssertFalse(composition.deletionSuspended, path)
+            let stored = try await store.load()
+            XCTAssertNil(stored, path)
+            let requests = await transport.recorded().compactMap { $0.url?.lastPathComponent }
+            XCTAssertEqual(requests, ["register_time_zone", path, "token"], path)
+        }
+    }
+
     func testTabHistoriesAreIndependentAndReselectReturnsOnlyThatTabToRoot() {
         let navigation = ProductNavigationModel()
         navigation.push(.favorites, in: .discover)
@@ -353,6 +397,9 @@ func productResponse(_ value: Any, status: Int = 200) -> HTTPResponse {
 }
 func productError(_ code: String, details: String = "") -> HTTPResponse {
     productResponse(["message": code, "details": details], status: 400)
+}
+func productRejectedRefresh() -> HTTPResponse {
+    productResponse(["code": 400, "error_code": "refresh_token_not_found"], status: 400)
 }
 func productLink() -> [String: Any] {
     ["link_id": productLinkID, "source": "github", "url": "https://github.com/person/work", "title": "Work",

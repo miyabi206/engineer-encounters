@@ -74,7 +74,7 @@ final class DemoRevealController: ObservableObject {
         let id = UUID(), revision = generation
         let task = Task {
             do {
-                let result = try await backend.call { try await $0.report.revealAmbientNow() }
+                let result = try await self.call(backend) { try await $0.report.revealAmbientNow() }
                 guard self.current(revision, backend: backend) else { return }
                 guard await self.center.permission() == .allowed else { return }
                 guard self.current(revision, backend: backend) else { return }
@@ -85,7 +85,7 @@ final class DemoRevealController: ObservableObject {
                         guard self.current(revision, backend: backend) else { return }
                         // Recheck at handoff; discard the response immediately after posting.
                         let detail: EncounterCardTransfer
-                        do { detail = try await backend.call { try await $0.encounter.getEncounterCard(encounterID: item.card.encounterID) } }
+                        do { detail = try await self.call(backend) { try await $0.encounter.getEncounterCard(encounterID: item.card.encounterID) } }
                         catch BackendError.notAuthenticated { throw BackendError.notAuthenticated }
                         catch is CancellationError { throw CancellationError() }
                         catch { continue }
@@ -101,6 +101,21 @@ final class DemoRevealController: ObservableObject {
         running = (id, task)
         defer { if running?.id == id { running = nil } }
         try await task.value
+    }
+    private func call<Value>(_ backend: SessionBackendServices,
+                             _ operation: @MainActor (SessionBackendServices.Services) async throws -> Value) async throws -> Value {
+        var rejected = false
+        do {
+            return try await backend.call {
+                do { return try await operation($0) }
+                catch { rejected = error as? BackendError == .notAuthenticated; throw error }
+            }
+        } catch {
+            if rejected, error as? BackendError == .notAuthenticated {
+                await account.rejectDeadSession(generation: backend.epoch)
+            }
+            throw error
+        }
     }
     private func notify(displayName: String?, revision: UUID, backend: SessionBackendServices) async {
         guard current(revision, backend: backend) else { return }

@@ -195,15 +195,19 @@ final class ProductReviewTests: XCTestCase {
     }
 
     func testShowingPhoneAdapterOpensNewQRAndClearsTheOutstandingCode() async throws {
+        let clock = ManualEncounterClock()
         let scheduler = ManualReceiptUploadScheduler()
         var old = productCard(); old["kind"] = "qr"
+        old["day"] = reviewToday()
         old["encounter_id"] = "00000000-0000-0000-0000-000000000123"
         var new = productCard(); new["kind"] = "qr"
+        new["day"] = reviewToday()
         let transport = productTransport([
             "get_encounter_feed": [.response(productResponse(["cards": [old], "truncated": false])),
                 .response(productResponse(["cards": [new, old], "truncated": false]))],
-            "issue_qr_code": [.response(productResponse(["code": String(repeating: "a", count: 32), "expires_at": 1120]))]])
-        let composition = try productComposition(transport, confirmationScheduler: scheduler,
+            "issue_qr_code": [.response(productResponse(["code": String(repeating: "a", count: 32), "expires_at": 1120]))],
+            "cancel_qr_code": [.response(productResponse(["cancelled": true]))]])
+        let composition = try productComposition(transport, clock: clock, confirmationScheduler: scheduler,
             lifecycle: ProductSceneLifecycle(phase: .active, notifications: NotificationCenter()))
         await composition.waitForRestoration(); productAuthorize(composition)
         composition.discoverAdapter.interests = reviewInterests
@@ -213,12 +217,12 @@ final class ProductReviewTests: XCTestCase {
         await composition.confirmationPoller.openQR(model)
         await model.appear()
         try await appBackendEventually { scheduler.jobs.count == 1 }
+        await clock.advance(by: 5)
         await scheduler.jobs[0].operation()
         XCTAssertEqual(composition.productNavigation.discover, [.encounter(productEncounterID)])
         XCTAssertTrue(model.hasConfirmed)
         XCTAssertNil(model.code)
-        let cancellations = await transport.count("cancel_qr_code")
-        XCTAssertEqual(cancellations, 0)
+        try await appBackendEventually { await transport.count("cancel_qr_code") == 1 }
         composition.confirmationPoller.closeQR(model)
     }
 
@@ -262,6 +266,7 @@ final class ProductReviewTests: XCTestCase {
     }
 
     func testCompositionPollsSessionCardsAndReloadsAfterResolvedReceipts() async throws {
+        let clock = ManualEncounterClock()
         let scheduler = ManualReceiptUploadScheduler()
         let lifecycle = ProductSceneLifecycle(phase: .active, notifications: NotificationCenter())
         let empty = productResponse(["cards": [], "truncated": false])
@@ -270,23 +275,124 @@ final class ProductReviewTests: XCTestCase {
         let resolved = HTTPResponse(data: try JSONEncoder().encode([ReceiptStatusTransfer(id: receipt.id, status: .resolved)]), statusCode: 200)
         let transport = productTransport(["get_encounter_feed": [.response(empty), .response(productFeed()), .response(productFeed())],
             "submit_receipts": [.response(resolved)]])
-        let composition = try productComposition(transport, confirmationScheduler: scheduler, lifecycle: lifecycle, queue: queue)
+        let composition = try productComposition(transport, clock: clock, confirmationScheduler: scheduler, lifecycle: lifecycle, queue: queue)
         await composition.waitForRestoration(); productAuthorize(composition)
         composition.discoverAdapter.interests = reviewInterests
         let model = try XCTUnwrap(composition.discoverAdapter.model)
+        composition.confirmationPoller.receive(sessionActive: true)
         await composition.confirmationPoller.openSession()
         XCTAssertTrue(model.feed.isEmpty)
         try await appBackendEventually { scheduler.jobs.count == 1 }
+        await clock.advance(by: 5)
         await scheduler.jobs[0].operation()
         XCTAssertEqual(model.feed.first?.card.kind, .session)
         try await queue.enqueue(receipt)
         await composition.runtime?.refresh()
         await composition.runtime?.uploadTask?.value
+        try await appBackendEventually { scheduler.jobs.count >= 2 }
+        await clock.advance(by: 5)
+        try await appBackendEventually { scheduler.jobs.last?.cancelled == false }
+        await scheduler.jobs.last?.operation()
         try await appBackendEventually { await transport.count("get_encounter_feed") == 3 }
         composition.confirmationPoller.closeSession()
         await composition.runtime?.receiptsDidResolve()
         let count = await transport.count("get_encounter_feed")
         XCTAssertEqual(count, 3)
+    }
+
+    func testQRScreenTabRoundTripRegistersPollingAndCancelsBothCodesOnLeaving() async throws {
+        let clock = ManualEncounterClock()
+        let scheduler = ManualReceiptUploadScheduler()
+        let empty = productResponse(["cards": [], "truncated": false])
+        var card = productCard(); card["kind"] = "qr"; card["day"] = reviewToday()
+        let transport = productTransport([
+            "get_encounter_feed": [.response(empty), .response(empty),
+                .response(productResponse(["cards": [card], "truncated": false]))],
+            "issue_qr_code": [.response(productResponse(["code": String(repeating: "a", count: 32), "expires_at": 1120])),
+                .response(productResponse(["code": String(repeating: "b", count: 32), "expires_at": 1125]))],
+            "cancel_qr_code": [.response(productResponse(["cancelled": true])), .response(productResponse(["cancelled": true]))]])
+        let lifecycle = ProductSceneLifecycle(phase: .active, notifications: NotificationCenter())
+        let composition = try productComposition(transport, defaults: appBackendDefaults(defaults: AppInMemoryDefaults()),
+            clock: clock, confirmationScheduler: scheduler, lifecycle: lifecycle)
+        await composition.waitForRestoration(); productAuthorize(composition)
+        composition.discoverAdapter.interests = reviewInterests
+        let navigation = ProductNavigationModel()
+        var opened: [String] = []
+        let qrNavigation = QRNavigationActions(openEncounter: { opened.append($0) }, openIOSSettings: {}, close: {}, openDiscoveryOff: {})
+        let container = ProductTabContainer(navigation: navigation, lifecycle: lifecycle,
+            discover: ProductQRView(adapter: composition.qrAdapter, poller: composition.confirmationPoller, navigation: qrNavigation),
+            profile: Text("Profile"), settings: Text("Settings"))
+        let host = UIHostingController(rootView: container)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil }
+        try await appBackendEventually {
+            reviewPump(window)
+            return await transport.count("issue_qr_code") == 1 && scheduler.jobs.count == 1
+        }
+        navigation.select(.profile)
+        try await appBackendEventually {
+            reviewPump(window)
+            return await transport.count("cancel_qr_code") == 1 && scheduler.jobs[0].cancelled
+        }
+        await clock.advance(by: 5)
+        navigation.select(.discover)
+        try await appBackendEventually {
+            reviewPump(window)
+            return await transport.count("issue_qr_code") == 2 && scheduler.jobs.count == 2
+        }
+        await clock.advance(by: 5)
+        await scheduler.jobs[1].operation()
+        XCTAssertEqual(opened, [productEncounterID])
+        try await appBackendEventually { await transport.count("cancel_qr_code") == 2 }
+    }
+
+    func testResumedDeletionReauthorizesSessionAndQRLoadsAndPolling() async throws {
+        for qr in [false, true] {
+            let clock = ManualEncounterClock()
+            let scheduler = ManualReceiptUploadScheduler()
+            let empty = productResponse(["cards": [], "truncated": false])
+            let transport = productTransport([
+                "delete_own_account": [.failure],
+                "get_own_profile": [.response(appOwnProfileResponse(reviewEnabledProfile()))],
+                "get_encounter_feed": [.response(empty), .response(empty)],
+                "start_session": [.response(productResponse(["session_id": UUID().uuidString.lowercased(),
+                    "starts_at": 1000, "expires_at": 8200, "server_time": 1000]))],
+                "issue_qr_code": [.response(productResponse(["code": String(repeating: "a", count: 32), "expires_at": 1120]))],
+                "cancel_qr_code": [.response(productResponse(["cancelled": true]))]])
+            let composition = try productComposition(transport, defaults: appBackendDefaults(defaults: AppInMemoryDefaults()),
+                clock: clock, confirmationScheduler: scheduler,
+                lifecycle: ProductSceneLifecycle(phase: .active, notifications: NotificationCenter()))
+            await composition.waitForRestoration(); productAuthorize(composition)
+            await composition.retryAccountDeletion()
+            XCTAssertTrue(composition.deletionSuspended)
+            await composition.checkAccountAndResume()
+            XCTAssertFalse(composition.deletionSuspended)
+            XCTAssertTrue(composition.account.state.isSignedIn)
+            composition.discoverAdapter.interests = reviewInterests
+            var qrModel: QRModel?
+            if qr {
+                let model = composition.qrAdapter.makeModel(navigation: .init(openEncounter: { _ in },
+                    openIOSSettings: {}, close: {}, openDiscoveryOff: {}))
+                qrModel = model
+                await composition.confirmationPoller.openQR(model); await model.appear()
+                XCTAssertNotNil(model.code)
+            } else {
+                _ = try await composition.sessionAdapter.actions().startSession()
+                await Task.yield()
+                await composition.confirmationPoller.openSession()
+            }
+            let loaded = await transport.count("get_encounter_feed")
+            XCTAssertEqual(loaded, 1)
+            try await appBackendEventually { scheduler.jobs.count == 1 }
+            await clock.advance(by: 5)
+            await scheduler.jobs[0].operation()
+            let polled = await transport.count("get_encounter_feed")
+            XCTAssertEqual(polled, 2)
+            if let qrModel { composition.confirmationPoller.closeQR(qrModel); qrModel.disappear() }
+            else { composition.confirmationPoller.closeSession() }
+        }
     }
 
     func testLifecycleTransitionsReachScreensInAllTabHostingControllers() async throws {
@@ -331,6 +437,12 @@ final class ProductReviewTests: XCTestCase {
 }
 
 private let reviewInterests = [InterestOption(id: "swift", labelJapanese: "Swift開発", labelEnglish: "Swift development")]
+private func reviewToday() -> String {
+    let formatter = DateFormatter()
+    formatter.calendar = Calendar(identifier: .gregorian); formatter.timeZone = TimeZone(identifier: "Asia/Tokyo")
+    formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.dateFormat = "yyyy-MM-dd"
+    return formatter.string(from: EncounterSamples.observationTime)
+}
 private func reviewCatalogue() -> HTTPResponse {
     productResponse([["interest_id": "swift", "label_ja": "Swift開発", "label_en": "Swift development", "display_order": 0]])
 }

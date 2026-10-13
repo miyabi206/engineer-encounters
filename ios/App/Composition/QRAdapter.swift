@@ -79,12 +79,14 @@ final class QRAdapter: ObservableObject {
 
     func receiveConfirmedEncounter(_ id: String, model: QRModel) {
         guard presentation === model, backend?.isCurrent == true else { return }
-        outstanding = nil
+        // Feed confirmation is an inference; cancel the displayed code best-effort too.
         model.disappear()
         model.receiveConfirmedEncounter(id)
     }
 
     func hidePresentation() { presentation?.disappear() }
+
+    func showPresentation(_ model: QRModel) { presentation = model }
 
     /// Called before the credential tombstone, with a bounded, injected-clock best effort.
     func prepareToDiscardSession() async {
@@ -124,17 +126,22 @@ final class QRAdapter: ObservableObject {
                              _ operation: @MainActor (SessionBackendServices.Services) async throws -> Value) async throws -> Value {
         guard fence.isCurrent(), epoch == account.sessionGeneration, outgoing || !account.sessionChangeInProgress,
               let backend, backend.isCurrent else { throw CancellationError() }
+        var rejected = false
         do {
-            let result = try await backend.call(outgoing: outgoing, operation)
+            let result = try await backend.call(outgoing: outgoing) {
+                do { return try await operation($0) }
+                catch { rejected = error as? BackendError == .notAuthenticated; throw error }
+            }
             failure = nil
             return result
         } catch is CancellationError { throw CancellationError() }
         catch {
+            if rejected, error as? BackendError == .notAuthenticated, !outgoing {
+                await account.rejectDeadSession(generation: epoch)
+                throw Self.presentationError(error)
+            }
             guard self.backend === backend, epoch == account.sessionGeneration, backend.isCurrent else { throw CancellationError() }
             failure = AccountModel.presentationError(error)
-            if error as? BackendError == .notAuthenticated, !outgoing {
-                await account.rejectDeadSession(generation: epoch)
-            }
             throw Self.presentationError(error)
         }
     }

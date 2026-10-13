@@ -96,7 +96,9 @@ actor SessionHolder {
         guard !loadingStop, pending == nil || (!starting && needsStopCheck(owner: owner)) else {
             throw BackendError.transportFailure
         }
-        guard !discoveryOff else { throw BackendError.prerequisiteMissing(fields: ["discovery"]) }
+        guard !discoveryOff || (!starting && needsStopCheck(owner: owner)) else {
+            throw BackendError.prerequisiteMissing(fields: ["discovery"])
+        }
         let request = Request(owner: owner, id: UUID(), sentAt: time)
         self.request = request
         if starting, acknowledgement == nil { state = .starting; changed() }
@@ -125,9 +127,14 @@ actor SessionHolder {
                 return true
             }
             suppressed = nil; markerNeedsSaving = false; suppressionDeadline = 0
-            pending = nil
+            if !discoveryOffPending { pending = nil }
             await stops.remove(marker, owner: request.owner)
-            guard isCurrent(request) else { return false }
+            guard owner == request.owner, self.request?.id == request.id else { return false }
+            if discoveryOffPending {
+                // The marker was resolved, but the queued discovery-off still must be sent.
+                self.request = nil; clear(); state = .stopping; changed()
+                return true
+            }
         }
         self.request = nil
         clear()
@@ -170,7 +177,8 @@ actor SessionHolder {
 
     func isCurrent(_ request: Request) -> Bool {
         owner == request.owner && self.request?.id == request.id &&
-            (pending == nil || needsStopCheck(owner: request.owner)) && !discoveryOff
+            (pending == nil || needsStopCheck(owner: request.owner)) &&
+            (!discoveryOff || needsStopCheck(owner: request.owner))
     }
 
     func markSent(_ request: Request) async -> Bool {
