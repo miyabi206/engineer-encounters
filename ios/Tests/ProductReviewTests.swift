@@ -323,7 +323,7 @@ final class ProductReviewTests: XCTestCase {
             discover: ProductQRView(adapter: composition.qrAdapter, poller: composition.confirmationPoller, navigation: qrNavigation),
             profile: Text("Profile"), settings: Text("Settings"))
         let host = UIHostingController(rootView: container)
-        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let scene = try appBackendWindowScene()
         let window = UIWindow(windowScene: scene)
         window.rootViewController = host; window.makeKeyAndVisible()
         defer { window.isHidden = true; window.rootViewController = nil }
@@ -404,7 +404,7 @@ final class ProductReviewTests: XCTestCase {
             discover: ReviewPhaseProbe { phases[.discover] = $0 }, profile: ReviewPhaseProbe { phases[.profile] = $0 },
             settings: ReviewPhaseProbe { phases[.settings] = $0 })
         let host = UIHostingController(rootView: container)
-        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let scene = try appBackendWindowScene()
         let window = UIWindow(windowScene: scene)
         window.rootViewController = host; window.makeKeyAndVisible()
         defer { window.isHidden = true; window.rootViewController = nil }

@@ -43,6 +43,7 @@ final class AppComposition: ObservableObject {
     private var queueOpener: @MainActor () async throws -> any ReceiptQueue
     private let suppliedQueueOpener: (@MainActor () async throws -> any ReceiptQueue)?
     private var storageReady = false
+    private var deletionMarkerUnavailable = false
     @Published private var keychainUnavailable = false
     private var storageWasCleared = false
     private var legacyStorageCleared = false
@@ -370,7 +371,8 @@ final class AppComposition: ObservableObject {
             return
         }
         await waitForRestoration()
-        guard participation.isEnabled, !sessionChangeInProgress, !account.deletionSuspended else { return }
+        guard participation.isEnabled, !sessionChangeInProgress, !account.deletionSuspended,
+              !deletionMarkerUnavailable else { return }
         let runtime = makeRuntime()
         #if DEVELOPMENT_BUILD || INTERNAL_BUILD
         trialRecorder.beginIfNeeded(metadata: trialMetadata)
@@ -380,9 +382,10 @@ final class AppComposition: ObservableObject {
 
     func requestBluetooth() async throws {
         await waitForRestoration()
-        guard !sessionChangeInProgress, !account.deletionSuspended, storageReady, !keychainUnavailable else {
+        guard !sessionChangeInProgress, !account.deletionSuspended else {
             throw ProfileActionError(code: .unavailable)
         }
+        guard storageReady, !keychainUnavailable else { throw BackendError.storageFailure }
         try await makeRuntime().requestBluetooth()
     }
 
@@ -412,7 +415,7 @@ final class AppComposition: ObservableObject {
     #if DEVELOPMENT_BUILD || INTERNAL_BUILD
     func resetTrial() async -> Bool {
         await waitForRestoration()
-        guard !sessionChangeInProgress, !account.deletionSuspended else { return false }
+        guard !sessionChangeInProgress, !account.deletionSuspended, !deletionMarkerUnavailable else { return false }
         var recorded = false
         let reset = await makeRuntime().resetTrial {
             recorded = self.trialRecorder.resetCompleted(success: true, metadata: self.trialMetadata)
@@ -442,7 +445,7 @@ final class AppComposition: ObservableObject {
 
     func refreshLocalSummary() async {
         await waitForRestoration()
-        guard !sessionChangeInProgress, !account.deletionSuspended else { return }
+        guard !sessionChangeInProgress, !account.deletionSuspended, !deletionMarkerUnavailable else { return }
         await makeRuntime().refreshLocalSummary()
     }
 
@@ -553,6 +556,9 @@ final class AppComposition: ObservableObject {
                     try self.pendingDeletion.remove(owner: owner)
                     self.deletionState = .idle
                     self.account.resumeAfterDeletionFailure()
+                    // Restored deletion recovery deliberately skipped account setup.
+                    await self.account.refresh()
+                    guard fence.isCurrent(), self.account.state.isSignedIn else { throw ProfileActionError(code: .notAuthenticated) }
                     self.settingsSafetyAdapter.publishVerifiedProfile()
                     self.isParticipating = self.participation.isEnabled
                     self.discoverAdapter.invalidate()
@@ -659,6 +665,7 @@ final class AppComposition: ObservableObject {
         guard binding?.isCurrent != false else { return }
         // Account.restore invokes this after reading credentials, before its first
         // protected refresh or runtime preparation. Unknown marker storage fails closed.
+        deletionMarkerUnavailable = false
         if let binding, case .signedInPending(.some(let id)) = account.state {
             do {
                 if try pendingDeletion.contains(owner: binding.storageOwner(account: id)) {
@@ -666,12 +673,12 @@ final class AppComposition: ObservableObject {
                     deletionState = .failed
                 }
             } catch {
-                suspendForDeletion()
-                deletionState = .failed
-                deletionError = .init(code: .unavailable)
+                // An unreadable marker is storage unavailability, not evidence of
+                // deletion intent. Refresh must read it again before preparing I/O.
+                deletionMarkerUnavailable = true
             }
         }
-        let force = force || keychainUnavailable || (runtime != nil && (!storageReady || runtimeOwner != binding?.preparedOwner))
+        let force = force || keychainUnavailable || deletionMarkerUnavailable || (runtime != nil && (!storageReady || runtimeOwner != binding?.preparedOwner))
         sessionChangeInProgress = true
         if let sessions = account.sessions {
             client = clientFactory?(sessions)
@@ -686,7 +693,8 @@ final class AppComposition: ObservableObject {
             runtimeStatusSubscription = nil
             serverIssuer = nil
         }
-        storageReady = await prepareStorageBinding()
+        if deletionMarkerUnavailable { storageReady = false }
+        else { storageReady = await prepareStorageBinding() }
         if storageReady, account.state.isSignedIn, let client, let owner = binding?.preparedOwner,
            owner.accountDigest != nil {
             sessionServices = SessionBackendServices(client: client, account: account, owner: owner)
@@ -701,7 +709,7 @@ final class AppComposition: ObservableObject {
         demoReveal.configure(sessionServices)
         #endif
         sessionChangeInProgress = false
-        guard binding?.isCurrent != false, !account.deletionSuspended else { return }
+        guard binding?.isCurrent != false, !account.deletionSuspended, !deletionMarkerUnavailable else { return }
         guard force || participation.isEnabled || account.state.isSignedIn else { return }
         let runtime = makeRuntime()
         if participation.isEnabled {

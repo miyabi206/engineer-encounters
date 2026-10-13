@@ -186,7 +186,9 @@ final class SettingsSafetyAdapter: ObservableObject {
     func verifyAccount(_ epoch: UUID, fence: BackendCallFence) async throws -> AccountSettingsAccountState {
         try require(epoch, fence: fence, allowingDeletion: true)
         do {
-            let fresh = try await account.ownAccountOperation(allowingDeletion: true) { try await $0.getOwnProfile() }
+            // Relaunch recovery has a bound credential but remains signedInPending
+            // until this explicit check lifts suspension and permits account setup.
+            let fresh = try await call(epoch, fence: fence, allowingDeletion: true) { try await $0.ownAccount.getOwnProfile() }
             try require(epoch, fence: fence, allowingDeletion: true)
             let profile = AccountModel.present(fresh)
             verifiedProfile = profile

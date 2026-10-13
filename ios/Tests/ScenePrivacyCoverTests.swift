@@ -6,10 +6,10 @@ import XCTest
 @MainActor
 final class ScenePrivacyCoverTests: XCTestCase {
     func testSceneDeactivationSynchronouslyCoversRootSheetsAndRecoveryUntilActivation() throws {
+        let scene = try appBackendWindowScene()
         let notifications = NotificationCenter()
         let lifecycle = ProductSceneLifecycle(phase: .active, notifications: notifications)
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        let scene = try XCTUnwrap(scenes.first)
         defer { for scene in scenes { lifecycle.privacyCover.show(scene) } }
         notifications.post(name: UIScene.willDeactivateNotification, object: scene)
         let cover = try XCTUnwrap(lifecycle.privacyCover.window(for: scene))
@@ -26,7 +26,8 @@ final class ScenePrivacyCoverTests: XCTestCase {
         XCTAssertTrue(cover.isHidden)
     }
 
-    func testApplicationResignationCoversEveryConnectedSceneSynchronously() {
+    func testApplicationResignationCoversEveryConnectedSceneSynchronously() throws {
+        _ = try appBackendWindowScene()
         let notifications = NotificationCenter()
         let lifecycle = ProductSceneLifecycle(phase: .active, notifications: notifications)
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }

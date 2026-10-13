@@ -77,6 +77,53 @@ final class BackendStorageReviewTests: XCTestCase {
         }
     }
 
+    func testUnreadableDeletionMarkerRetriesStorageBeforePreparingRuntimeOrRecovery() async throws {
+        for hasMarker in [false, true] {
+            let defaults = ReviewDefaults()
+            _ = appBackendDefaults(defaults: defaults)
+            let owner = BackendStorageOwner(backend: BackendStorageBinding.identity(appBackendTestConfiguration()),
+                account: appBackendTestUser, salt: try InstallationStorageSalt.load(defaults: defaults))
+            if hasMarker { try PendingAccountDeletionStore(defaults: defaults).save(owner: owner) }
+            let keychain = AppMemoryKeychain()
+            let store = KeychainSessionStore(backendIdentity: BackendStorageBinding.identity(appBackendTestConfiguration()), client: keychain)
+            try await store.save(appBackendTestSession())
+            defaults.setReadable(false)
+            let transport = ControlledAppBackendTransport(["register_time_zone": [.response(appAccountOK())]])
+            let composition = reviewComposition(defaults: defaults, keychain: keychain, transport: transport)
+            await composition.waitForRestoration()
+            XCTAssertEqual(composition.account.state, .signedInPending(appBackendTestUser))
+            XCTAssertTrue(composition.status.storageUnavailable)
+            XCTAssertNil(composition.runtime)
+            XCTAssertNil(composition.sessionServices)
+            XCTAssertFalse(composition.deletionSuspended)
+            XCTAssertEqual(composition.deletionState, .idle)
+            XCTAssertNil(composition.deletionError)
+            await composition.refreshLocalSummary()
+            await composition.refresh()
+            XCTAssertNil(composition.runtime)
+            do { try await composition.requestBluetooth(); XCTFail("Unreadable marker storage must refuse the radio") }
+            catch { XCTAssertEqual(error as? BackendError, .storageFailure) }
+            let before = await transport.recorded()
+            let deletes = await keychain.deletionAttempts
+            XCTAssertTrue(before.isEmpty)
+            XCTAssertEqual(deletes, 0)
+            defaults.setReadable(true)
+            await composition.refresh()
+            XCTAssertFalse(composition.status.storageUnavailable)
+            XCTAssertEqual(composition.deletionSuspended, hasMarker)
+            XCTAssertEqual(composition.deletionState, hasMarker ? .failed : .idle)
+            XCTAssertEqual(try PendingAccountDeletionStore(defaults: defaults).contains(owner: owner), hasMarker)
+            if hasMarker {
+                XCTAssertNil(composition.runtime)
+                let requests = await transport.recorded()
+                XCTAssertTrue(requests.isEmpty)
+            } else {
+                XCTAssertNotNil(composition.runtime)
+                XCTAssertEqual(composition.account.state, .signedIn(appBackendTestUser))
+            }
+        }
+    }
+
     func testStalePreferenceHintsCannotRejectMatchingKeychainEnvelope() async throws {
         let defaults = appBackendDefaults(userID: UUID())
         defaults.set("https://obsolete.example:443", forKey: BackendStorageBinding.sessionBackendKey)

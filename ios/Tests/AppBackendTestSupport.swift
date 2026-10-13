@@ -5,6 +5,7 @@ import EncounterStorage
 import EncounterUI
 import Foundation
 import Security
+import UIKit
 import XCTest
 @testable import EngineerEncounters
 
@@ -127,6 +128,27 @@ func appBackendEventually(_ condition: @MainActor () async throws -> Bool) async
 }
 
 enum AppBackendTestFailure: Error { case didNotSettle }
+
+/// Hosted suites can reach UI tests before UIKit reconnects the host's scene.
+@MainActor
+func appBackendWindowScene(timeout: TimeInterval = 5,
+                           file: StaticString = #filePath, line: UInt = #line) throws -> UIWindowScene {
+    let application = UIApplication.shared
+    let deadline = ProcessInfo.processInfo.systemUptime + timeout
+    var activationRequested = false
+    repeat {
+        let scenes = application.connectedScenes.compactMap { $0 as? UIWindowScene }
+        if let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first { return scene }
+        if !activationRequested, let session = application.openSessions.first(where: { $0.role == .windowApplication }) {
+            activationRequested = true
+            application.activateSceneSession(for: UISceneSessionActivationRequest(session: session), errorHandler: nil)
+        }
+        _ = RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+    } while ProcessInfo.processInfo.systemUptime < deadline
+    return try XCTUnwrap(application.connectedScenes.compactMap { $0 as? UIWindowScene }.first,
+        "No connected UIWindowScene appeared within \(timeout)s; open sessions: \(application.openSessions.count), activation requested: \(activationRequested).",
+        file: file, line: line)
+}
 
 @MainActor
 func appBackendDefaults(userID: UUID? = appBackendTestUser, bound: Bool = true,

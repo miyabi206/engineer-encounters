@@ -483,7 +483,9 @@ final class SessionAdapter: ObservableObject {
     }
 
     private func flushStop(_ backend: SessionBackendServices) async throws {
-        if read == nil, await holder.needsStopCheck(owner: backend.owner) {
+        if await holder.needsStopCheck(owner: backend.owner) {
+            // A held marker check cannot authorize a stop or be joined here.
+            // fetch's local read guard refuses it without touching authorization.
             _ = try await fetch(backend, starting: false)
         }
         guard let stop = try await holder.pendingStop(owner: backend.owner) else { return }

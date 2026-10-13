@@ -178,25 +178,46 @@ final class SettingsSafetyAdapterTests: XCTestCase {
     }
 
     func testFailedReportConcealsAllCachedCopiesRetainsReasonAndCanRetry() async throws {
+        let saved = productResponse(["links": [["encounter_id": productEncounterID,
+            "day": "2026-10-13", "kind": "session", "link": productLink()]], "truncated": false])
         let transport = productTransport(["get_encounter_feed": [.response(productFeed()), .response(productFeed()), .response(productFeed())],
             "get_encounter_card": [.response(productResponse(productCard(detail: true)))],
             "list_encounter_favorites": [.response(productFeed()), .response(productFeed()), .response(productFeed())],
+            "list_saved_links": [.response(saved), .response(saved), .response(saved)],
             "report_encounter_person": [.failure, .response(productResponse(["report_id": settingsBlockID, "status": "open"]))]])
         let composition = try productComposition(transport)
         await composition.waitForRestoration(); productAuthorize(composition)
         let discover = try XCTUnwrap(composition.discoverAdapter.model)
-        await discover.loadFeed(); await discover.loadFavorites(); await discover.loadCard(productEncounterID)
-        composition.settingsSafetyAdapter.presentReport(productEncounterID, linkID: productLinkID, completed: {})
+        await discover.loadFeed(); await discover.loadFavorites(); await discover.loadSavedLinks(); await discover.loadCard(productEncounterID)
+        XCTAssertFalse(discover.feed.isEmpty); XCTAssertFalse(discover.favorites.isEmpty)
+        XCTAssertFalse(discover.savedLinks.isEmpty); XCTAssertNotNil(discover.card)
+        var completed = 0
+        composition.settingsSafetyAdapter.presentReport(productEncounterID, linkID: productLinkID, completed: { completed += 1 })
         let model = try XCTUnwrap(composition.settingsSafetyAdapter.sheet?.model)
         await model.submit()
         XCTAssertEqual(model.error?.code, .unavailable)
         XCTAssertEqual(model.state.retry, .report(try XCTUnwrap(SafetyReportRequest(encounterID: productEncounterID,
             reason: .impersonation, link: .init(id: productLinkID)))))
         XCTAssertNil(discover.card); XCTAssertTrue(discover.feed.isEmpty); XCTAssertTrue(discover.favorites.isEmpty)
+        XCTAssertTrue(discover.savedLinks.isEmpty)
         await discover.loadFeed(); await discover.loadCard(productEncounterID)
         XCTAssertTrue(discover.feed.isEmpty); XCTAssertNil(discover.card)
         await model.retry()
+        let request = try XCTUnwrap(SafetyReportRequest(encounterID: productEncounterID,
+            reason: .impersonation, link: .init(id: productLinkID)))
+        XCTAssertEqual(model.acceptedReport, request)
+        XCTAssertEqual(model.state, .accepted(.report(request)))
+        XCTAssertTrue(model.canBlock)
+        XCTAssertNil(model.error)
+        XCTAssertNotNil(composition.settingsSafetyAdapter.sheet)
+        XCTAssertEqual(completed, 0)
+        // Accepted reports remain concealed while S26 still offers Block and Done.
+        await discover.loadFeed(); await discover.loadFavorites(); await discover.loadSavedLinks(); await discover.loadCard(productEncounterID)
+        XCTAssertNil(discover.card); XCTAssertTrue(discover.feed.isEmpty)
+        XCTAssertTrue(discover.favorites.isEmpty); XCTAssertTrue(discover.savedLinks.isEmpty)
+        model.done()
         XCTAssertNil(composition.settingsSafetyAdapter.sheet)
+        XCTAssertEqual(completed, 1)
         let reports = await transport.count("report_encounter_person")
         XCTAssertEqual(reports, 2)
     }
@@ -553,8 +574,19 @@ final class SettingsSafetyAdapterTests: XCTestCase {
             XCTAssertEqual(completed, 0)
             XCTAssertNotNil(model.error)
             await model.retry()
-            XCTAssertEqual(completed, 1)
             XCTAssertNil(model.error)
+            if block {
+                XCTAssertEqual(model.state, .accepted(.block(productEncounterID)))
+                XCTAssertEqual(completed, 1)
+            } else {
+                let request = try XCTUnwrap(SafetyReportRequest(encounterID: productEncounterID, reason: .other, link: nil))
+                XCTAssertEqual(model.acceptedReport, request)
+                XCTAssertEqual(model.state, .accepted(.report(request)))
+                XCTAssertTrue(model.canBlock)
+                XCTAssertEqual(completed, 0)
+                model.done()
+                XCTAssertEqual(completed, 1)
+            }
             let calls = await transport.count(path)
             XCTAssertEqual(calls, 2)
             XCTAssertTrue(composition.account.state.isSignedIn)
@@ -666,13 +698,19 @@ final class SettingsSafetyAdapterTests: XCTestCase {
         XCTAssertTrue(requests.isEmpty)
         await next.checkAccountAndResume()
         XCTAssertFalse(next.deletionSuspended)
+        XCTAssertEqual(next.account.state, .signedIn(appBackendTestUser))
+        XCTAssertEqual(next.account.profile, appLinkedPresentationProfile())
         XCTAssertNotNil(next.runtime)
         XCTAssertNil(defaults.object(forKey: try XCTUnwrap(keys.first)))
+        let checks = await transport.count("get_own_profile")
+        XCTAssertEqual(checks, 1)
     }
 
     func testDeletionMarkerIsRetainedAfterUnverifiedCheckAndClearedBySignOut() async throws {
         let defaults = appBackendDefaults(defaults: AppInMemoryDefaults())
-        let transport = productTransport(["delete_own_account": [.failure], "get_own_profile": [.failure]])
+        let transport = productTransport(["delete_own_account": [.failure],
+            "get_own_profile": [.failure, .response(productError("not_authenticated"))],
+            "token": [.response(productRejectedRefresh())]])
         let composition = try productComposition(transport, defaults: defaults)
         await composition.waitForRestoration()
         let owner = try XCTUnwrap(composition.sessionServices?.owner)
@@ -681,8 +719,21 @@ final class SettingsSafetyAdapterTests: XCTestCase {
         await composition.checkAccountAndResume()
         XCTAssertTrue(composition.deletionSuspended)
         XCTAssertTrue(try PendingAccountDeletionStore(defaults: defaults).contains(owner: owner))
-        try await composition.account.signOut()
+        // User sign-out is refused during suspension; a rejected credential
+        // refresh from Check account owns the reachable sign-out sequence.
+        let before = await transport.recorded().count
+        do { try await composition.account.signOut(); XCTFail("Suspension must refuse user sign-out") }
+        catch { XCTAssertEqual(error as? BackendError, .invalidRequest) }
+        let after = await transport.recorded().count
+        XCTAssertEqual(after, before)
+        XCTAssertTrue(try PendingAccountDeletionStore(defaults: defaults).contains(owner: owner))
+        await composition.checkAccountAndResume()
+        XCTAssertEqual(composition.account.state, .signedOut)
+        XCTAssertEqual(composition.deletionState, .idle)
+        XCTAssertFalse(composition.deletionSuspended)
         XCTAssertFalse(try PendingAccountDeletionStore(defaults: defaults).contains(owner: owner))
+        let paths = await transport.recorded().compactMap { $0.url?.lastPathComponent }
+        XCTAssertEqual(paths.suffix(2), ["get_own_profile", "token"])
     }
 
     func testLegalConfigurationIncludesOnlyValidConfiguredDestinations() {

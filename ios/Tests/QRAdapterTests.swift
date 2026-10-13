@@ -9,6 +9,8 @@ import XCTest
 final class QRAdapterTests: XCTestCase {
     func testIssueCancelAndRedeemMappingAndFeedRefresh() async throws {
         let transport = productTransport([
+            "list_interests": [.response(productResponse([["interest_id": "swift", "label_ja": "Swift",
+                "label_en": "Swift", "display_order": 0]]))],
             "issue_qr_code": [.response(qrIssued())], "cancel_qr_code": [.response(qrCancelled())],
             "redeem_qr_code": [.response(productResponse(["encounter_id": productEncounterID]))],
             "get_encounter_feed": [.response(productFeed()), .response(productFeed())]
