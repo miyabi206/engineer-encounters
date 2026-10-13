@@ -13,12 +13,14 @@ enum AccountStrings {
 struct AccountRootView: View {
     @ObservedObject private var composition: AppComposition
     @ObservedObject private var account: AccountModel
-    @StateObject private var flow: AccountFlowModel
+    @ObservedObject private var sessionAdapter: SessionAdapter
+    @ObservedObject private var flow: AccountFlowModel
 
     init(composition: AppComposition) {
         self.composition = composition
         account = composition.account
-        _flow = StateObject(wrappedValue: AccountFlowModel(composition: composition))
+        sessionAdapter = composition.sessionAdapter
+        flow = composition.accountFlow
     }
 
     var body: some View {
@@ -47,10 +49,16 @@ struct AccountRootView: View {
                 case .profileUnavailable:
                     NavigationStack {
                         VStack(spacing: 16) {
-                            Text(AccountStrings.text("profileError"))
-                            Button(AccountStrings.text("retry")) { Task { await flow.refresh() } }
+                            if sessionAdapter.controlStartFailure != nil {
+                                Text(SessionSurfaceStrings.text("startFailed"))
+                                Button(AccountStrings.text("retry")) { Task { await composition.startSessionFromControl() } }
+                            } else {
+                                Text(AccountStrings.text("profileError"))
+                                Button(AccountStrings.text("retry")) { Task { await flow.refresh() } }
+                            }
                             diagnosticsLink
                         }.padding()
+                        .navigationTitle(sessionAdapter.controlStartFailure == nil ? "" : SessionSurfaceStrings.text("session"))
                     }
                 case .onboarding:
                     if let model = flow.onboarding { OnboardingView(model: model) }
@@ -63,6 +71,10 @@ struct AccountRootView: View {
             if composition.deletionSuspended { AccountDeletionRecoveryView(composition: composition) }
         }
         .task { await flow.start() }
+        .onOpenURL { url in
+            guard url.scheme == "engineer-encounters", url.host == "session" else { return }
+            Task { await composition.openSessionFromActivity() }
+        }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
             Task {
                 await flow.refresh()

@@ -9,11 +9,14 @@ import Foundation
 /// One composition root survives scene creation and keeps one runtime per process.
 @MainActor
 final class AppComposition: ObservableObject {
-    static let shared = AppComposition()
+    static let shared = AppComposition(activityController: SystemSessionActivityController())
     private let participation: ParticipationFlag
     let account: AccountModel
     let linkAdapter: LinkAdapter
     let sessionHolder: SessionHolder
+    let sessionActivity: SessionActivityCoordinator
+    lazy var accountFlow = AccountFlowModel(composition: self)
+    var sessionControlInProgress = false
     let sessionAdapter: SessionAdapter
     let discoverAdapter: DiscoverAdapter
     let qrAdapter: QRAdapter
@@ -102,6 +105,7 @@ final class AppComposition: ObservableObject {
          webAuthenticationRunner: (any GitHubWebAuthenticationRunning)? = nil,
          sessionIsOnline: (@MainActor () -> Bool)? = nil,
          sessionNetwork: SessionNetworkAvailability? = nil,
+         activityController: (any SessionActivityControlling)? = nil,
          timeZone: @escaping @MainActor () -> String = { TimeZone.current.identifier }) {
         participation = ParticipationFlag(defaults: defaults)
         self.keychain = keychain
@@ -175,10 +179,11 @@ final class AppComposition: ObservableObject {
         linkAdapter = LinkAdapter(account: account, runner: webAuthenticationRunner ?? SystemGitHubWebAuthenticationRunner())
         settingsSafetyAdapter = SettingsSafetyAdapter(account: account, links: linkAdapter, discover: discoverAdapter)
         sessionHolder = SessionHolder(clock: clock, stops: PendingSessionStopStore(defaults: defaults))
+        sessionActivity = SessionActivityCoordinator(controller: activityController ?? NoSessionActivityController())
         let sessionNetwork = sessionNetwork ?? SessionNetworkAvailability()
         self.sessionNetwork = sessionNetwork
         sessionAdapter = SessionAdapter(account: account, holder: sessionHolder, clock: clock,
-            isOnline: sessionIsOnline ?? { sessionNetwork.isOnline })
+            isOnline: sessionIsOnline ?? { sessionNetwork.isOnline }, activities: sessionActivity)
         if sessionIsOnline == nil {
             sessionNetwork.onOnline = { [weak sessionAdapter] in
                 Task { await sessionAdapter?.foreground() }
@@ -197,6 +202,12 @@ final class AppComposition: ObservableObject {
         account.$state.removeDuplicates().sink { [weak confirmationPoller] state in
             if case .signedIn = state { confirmationPoller?.receive(authorized: true) }
             else { confirmationPoller?.receive(authorized: false) }
+        }.store(in: &productSubscriptions)
+        account.$profile.dropFirst().sink { [weak sessionAdapter] _ in
+            Task { await sessionAdapter?.refreshActivity() }
+        }.store(in: &productSubscriptions)
+        self.productLifecycle.$phase.removeDuplicates().sink { [weak sessionAdapter] phase in
+            if phase == .active { Task { await sessionAdapter?.refreshActivity() } }
         }.store(in: &productSubscriptions)
         isParticipating = participation.isEnabled
         settingsSafetyAdapter.suspendParticipation = { [weak self] in self?.suspendForDeletion() }

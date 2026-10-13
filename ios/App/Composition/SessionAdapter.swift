@@ -57,11 +57,17 @@ final class SessionAdapter: ObservableObject {
     @Published private(set) var remainingSeconds = 0
     @Published private(set) var stopPending = false
     @Published private(set) var failure: SessionAdapterFailure?
+    @Published private(set) var controlStartFailure: SessionAdapterFailure?
+    @Published private(set) var controlStartInProgress = false
+    private(set) var controlNeedsAccountRefresh = false
+    private let activities: SessionActivityCoordinator
     private let account: AccountModel
     private let isOnline: @MainActor () -> Bool
     private let clock: any EncounterClock
     private var backend: SessionBackendServices?
     private var configuredEpoch: UUID?
+    private var configuredOwner: BackendStorageOwner?
+    private var configuredFence: BackendCallFence?
     private var version: UInt64 = 0
     private var read: (id: UUID, task: Task<SessionTransfer?, any Error>)?
     private var upload: (id: UUID, task: Task<Void, any Error>)?
@@ -69,8 +75,9 @@ final class SessionAdapter: ObservableObject {
     private var retry: (id: UUID, task: Task<Void, Never>)?
 
     init(account: AccountModel, holder: SessionHolder, clock: any EncounterClock,
-         isOnline: @escaping @MainActor () -> Bool) {
+         isOnline: @escaping @MainActor () -> Bool, activities: SessionActivityCoordinator? = nil) {
         self.account = account; self.holder = holder; self.clock = clock; self.isOnline = isOnline
+        self.activities = activities ?? SessionActivityCoordinator(controller: NoSessionActivityController())
     }
 
     func configure(_ backend: SessionBackendServices?) async {
@@ -84,9 +91,11 @@ final class SessionAdapter: ObservableObject {
         await holder.observe { [weak self] in self?.publish($0, allowSameVersion: false) }
         if let backend {
             configuredEpoch = backend.epoch
+            configuredOwner = backend.owner
+            configuredFence = account.backendCallFence()
             await holder.bind(backend.owner)
         } else if !account.state.isSignedIn || !account.hasCurrentSessionContext || configuredEpoch != account.sessionGeneration {
-            configuredEpoch = nil
+            configuredEpoch = nil; configuredOwner = nil; configuredFence = nil
             await holder.bind(nil)
         }
         // Temporary storage/Keychain unavailability does not discard a same-account stop.
@@ -98,8 +107,41 @@ final class SessionAdapter: ObservableObject {
         retry?.task.cancel(); retry = nil
         read?.task.cancel(); read = nil
         upload?.task.cancel(); upload = nil
-        backend = nil; configuredEpoch = nil; discoveryStop = nil; failure = nil
+        backend = nil; configuredEpoch = nil; configuredOwner = nil; configuredFence = nil; discoveryStop = nil; failure = nil; controlStartFailure = nil; controlNeedsAccountRefresh = false
         await holder.bind(nil)
+        await update()
+    }
+
+    func refuseControlStart() { controlStartFailure = .unavailable; controlNeedsAccountRefresh = true }
+
+    func startFromControl() async {
+        guard !controlStartInProgress, !account.deletionSuspended else { return }
+        controlStartInProgress = true
+        controlNeedsAccountRefresh = false
+        defer { controlStartInProgress = false }
+        let epoch = account.sessionGeneration, fence = account.backendCallFence()
+        let state = await presentationState()
+        guard fence.isCurrent(), epoch == account.sessionGeneration, !account.deletionSuspended else { return }
+        if case .active = state { controlStartFailure = nil; return }
+        do {
+            let actions = actions()
+            if isOnline() {
+                let current = try await actions.refreshSession()
+                if case .active = current {
+                    if fence.isCurrent(), epoch == account.sessionGeneration { controlStartFailure = nil }
+                    return
+                }
+            }
+            _ = try await actions.startSession()
+            if fence.isCurrent(), epoch == account.sessionGeneration { controlStartFailure = nil }
+        } catch {
+            if fence.isCurrent(), epoch == account.sessionGeneration, !account.deletionSuspended {
+                controlStartFailure = Self.presentationFailure(error, offline: !isOnline())
+            }
+        }
+    }
+
+    func refreshActivity() async {
         await update()
     }
 
@@ -119,6 +161,7 @@ final class SessionAdapter: ObservableObject {
     }
 
     func foreground() async {
+        await update()
         // Foreground retries pending writes without claiming a restored session or changing
         // account restoration's existing request order. S08 explicitly loads get_own_session.
         guard let backend, backend.isCurrent, !account.sessionChangeInProgress, retry == nil else { return }
@@ -262,6 +305,19 @@ final class SessionAdapter: ObservableObject {
     }
 
     private func stop(epoch: UUID) async throws {
+        if backend == nil {
+            // A temporary service/Keychain outage cannot keep a known local session
+            // active. Retain only the bound non-secret stop marker for later recovery.
+            guard epoch == account.sessionGeneration, configuredEpoch == epoch,
+                  !account.sessionChangeInProgress, !account.deletionSuspended,
+                  configuredFence?.isCurrent() == true, let owner = configuredOwner else {
+                throw SessionActionError.unavailable
+            }
+            do { try await holder.stop(owner: owner) }
+            catch { await update(); throw SessionActionError.unavailable }
+            await update()
+            throw SessionActionError.unavailable // Local stop succeeded; upload is queued.
+        }
         let backend = try context(epoch: epoch)
         do {
             try await holder.stop(owner: backend.owner)
@@ -372,10 +428,17 @@ final class SessionAdapter: ObservableObject {
         }
     }
 
-    private func update() async { publish(await holder.snapshot()) }
+    private func update() async {
+        publish(await holder.snapshot())
+        await activities.flush()
+    }
     private func publish(_ snapshot: SessionHolder.Snapshot, allowSameVersion: Bool = true) {
         guard snapshot.version > version || (allowSameVersion && snapshot.version == version) else { return }
         version = snapshot.version
         state = snapshot.state; remainingSeconds = snapshot.remainingSeconds; stopPending = snapshot.stopPending
+        if case .active = snapshot.state { controlStartFailure = nil; controlNeedsAccountRefresh = false }
+        activities.receive(snapshot, displayName: account.profile?.displayName ?? "",
+            isCurrent: account.hasCurrentSessionContext && account.state.isSignedIn &&
+                configuredEpoch == account.sessionGeneration && configuredFence?.isCurrent() == true)
     }
 }

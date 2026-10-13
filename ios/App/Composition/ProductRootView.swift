@@ -96,7 +96,7 @@ struct ProductRootView: View {
         case .sample: SampleEncounterDetailView(sample: composition.sampleEncounter, navigation: presentation.discoverNavigation(tab))
         case .session:
             if let discover = discoverAdapter.model {
-                ProductSessionView(adapter: sessionAdapter, discover: discover, poller: composition.confirmationPoller, navigation: presentation.sessionNavigation(tab))
+                ProductSessionView(adapter: sessionAdapter, discover: discover, poller: composition.confirmationPoller, navigation: presentation.sessionNavigation(tab), retryStart: { await composition.startSessionFromControl() })
             }
         case .qr: ProductQRView(adapter: composition.qrAdapter, poller: composition.confirmationPoller, navigation: presentation.qrNavigation(tab))
         case .dailyReport:
@@ -141,15 +141,26 @@ private struct ProductSessionView: View {
     @StateObject private var presentation = ProductSessionPresentation()
     @ObservedObject var discover: DiscoverModel
     let navigation: SessionNavigationActions
-    private let adapter: SessionAdapter
+    @ObservedObject private var adapter: SessionAdapter
     private let poller: EncounterConfirmationPoller
+    private let retryStart: @MainActor () async -> Void
 
-    init(adapter: SessionAdapter, discover: DiscoverModel, poller: EncounterConfirmationPoller, navigation: SessionNavigationActions) {
+    init(adapter: SessionAdapter, discover: DiscoverModel, poller: EncounterConfirmationPoller, navigation: SessionNavigationActions, retryStart: @escaping @MainActor () async -> Void) {
         self.adapter = adapter; self.discover = discover; self.poller = poller; self.navigation = navigation
+        self.retryStart = retryStart
     }
     var body: some View {
         Group {
-            if let model = presentation.model {
+            if let failure = adapter.controlStartFailure {
+                VStack(spacing: 16) {
+                    Text(SessionSurfaceStrings.text(failure == .offline ? "startOffline" : "startFailed"))
+                    Button(AccountStrings.text("retry")) { Task { await retryStart() } }
+                        .disabled(adapter.controlStartInProgress)
+                    Button(AccountStrings.text("back"), action: navigation.close)
+                }
+                .padding()
+                .navigationTitle(SessionSurfaceStrings.text("session"))
+            } else if let model = presentation.model {
                 SessionView(model: model, navigation: navigation, hasRevealedEncounters: !cards.isEmpty) {
                     ForEach(cards) { item in
                         Button { navigation.openEncounter(item.id) } label: {
@@ -169,6 +180,9 @@ private struct ProductSessionView: View {
             guard !Task.isCancelled else { return }
             await poller.openSession()
         }
+        .onChange(of: adapter.controlStartFailure) { _, failure in
+            if failure == nil { Task { await presentation.reload(adapter: adapter, navigation: navigation) } }
+        }
         .onDisappear { poller.closeSession() }
     }
     private var cards: [EncounterFeedCard] { discover.feed.filter { $0.card.kind == .session } }
@@ -177,6 +191,10 @@ private struct ProductSessionView: View {
 @MainActor
 private final class ProductSessionPresentation: ObservableObject {
     @Published private(set) var model: SessionModel?
+    func reload(adapter: SessionAdapter, navigation: SessionNavigationActions) async {
+        model = nil
+        await open(adapter: adapter, navigation: navigation)
+    }
     func open(adapter: SessionAdapter, navigation: SessionNavigationActions) async {
         guard model == nil else { return }
         let state = await adapter.presentationState()

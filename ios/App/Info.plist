@@ -8,6 +8,8 @@
     <string>近くにいるほかの利用者とのすれちがいを記録するためにBluetoothを使用します。</string>
     <key>NSCameraUsageDescription</key>
     <string>QRコードを読み取るためにカメラを使用します。</string>
+    <key>NSSupportsLiveActivities</key>
+    <true/>
     <key>UIBackgroundModes</key>
     <array>
         <string>bluetooth-central</string>

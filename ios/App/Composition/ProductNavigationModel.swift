@@ -40,6 +40,16 @@ final class ProductNavigationModel: ObservableObject {
         if path.last == .qr { path.removeLast() }
         setPath(path + [.encounter(id)], for: tab)
     }
+    func showSessionFromSurface() {
+        bluetoothSessionOrigins.remove(.discover)
+        setPath([.session], for: .discover)
+        selection = .discover
+    }
+    func showBluetoothFromSurface() {
+        setPath([], for: .discover)
+        selection = .discover
+        showBluetooth(forSession: true, in: .discover)
+    }
     func showDiscoveryOff(in tab: ProductTab) { setPath([], for: tab); selection = .discover }
     func showBluetooth(forSession: Bool, in tab: ProductTab) {
         if forSession { bluetoothSessionOrigins.insert(tab) } else { bluetoothSessionOrigins.remove(tab) }

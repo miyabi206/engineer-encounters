@@ -21,6 +21,53 @@ for configuration in Development Internal Release; do
         echo "$configuration: missing app binary: $app/EngineerEncounters" >&2
         exit 1
     fi
+    extension="$app/PlugIns/SessionActivity.appex"
+    if [ ! -f "$extension/SessionActivity" ]; then
+        echo "$configuration: missing embedded SessionActivity extension" >&2
+        exit 1
+    fi
+    if [ "$(plutil -extract NSSupportsLiveActivities raw "$app/Info.plist")" != true ]; then
+        echo "$configuration: app does not declare Live Activity support" >&2
+        failed=1
+    fi
+    if [ "$(plutil -extract BuildConfiguration raw "$extension/Info.plist")" != "$configuration" ]; then
+        echo "$configuration: extension configuration mismatch" >&2
+        failed=1
+    fi
+    if [ "$(plutil -extract NSExtension.NSExtensionPointIdentifier raw "$extension/Info.plist")" != com.apple.widgetkit-extension ]; then
+        echo "$configuration: extension is not a WidgetKit extension" >&2
+        failed=1
+    fi
+    extension_report="$derived/$configuration-extension.txt"
+    strings -a "$extension/SessionActivity" > "$extension_report"
+    find "$extension" -type f -name '*.debug.dylib' > "$derived/$configuration-extension-dylibs.txt"
+    while IFS= read -r dylib; do
+        strings -a "$dylib" >> "$extension_report"
+    done < "$derived/$configuration-extension-dylibs.txt"
+    for marker in SessionLiveActivity StartSessionControl StartSessionIntent StopSessionIntent; do
+        if ! grep -F -q "$marker" "$extension_report"; then
+            echo "$configuration: missing extension marker: $marker" >&2
+            failed=1
+        fi
+    done
+    for marker in AppComposition SessionHolder SessionAdapter KeychainSessionStore EncounterBackend BackendURL BackendPublicKey; do
+        if grep -F -q "$marker" "$extension_report"; then
+            echo "$configuration: forbidden app infrastructure in extension: $marker" >&2
+            failed=1
+        fi
+    done
+    for key in BackendURL BackendPublicKey; do
+        if plutil -extract "$key" raw "$extension/Info.plist" >/dev/null 2>&1; then
+            echo "$configuration: forbidden extension Info.plist key: $key" >&2
+            failed=1
+        fi
+    done
+    for language in ja en; do
+        if [ ! -f "$extension/$language.lproj/SessionActivity.strings" ]; then
+            echo "$configuration: missing extension $language session strings" >&2
+            failed=1
+        fi
+    done
     strings -a "$app/EngineerEncounters" > "$binary_report"
     find "$app" -type f -name '*.debug.dylib' > "$derived/$configuration-dylibs.txt"
     while IFS= read -r dylib; do

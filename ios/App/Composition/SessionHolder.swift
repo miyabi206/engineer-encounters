@@ -10,6 +10,7 @@ actor SessionHolder {
         let version: UInt64
         let state: SessionState
         let remainingSeconds: Int
+        let activityEndsAt: Date?
         let stopPending: Bool
         let discoveryOffPending: Bool
     }
@@ -38,6 +39,7 @@ actor SessionHolder {
     private var acknowledgement: SessionAcknowledgement?
     private var acknowledgedAt: TimeInterval = 0
     private var deadline: TimeInterval = 0
+    private var activityEndsAt: Date?
     private var state: SessionState = .none
     private var pending: Stop?
     private var discoveryOffPending = false
@@ -138,6 +140,7 @@ actor SessionHolder {
                 startsAt: value.startsAt.date, expiresAt: value.expiresAt.date, serverTime: value.serverTime.date)
             acknowledgedAt = sentAt.monotonic
             deadline = sentAt.monotonic + value.expiresAt.date.timeIntervalSince(value.serverTime.date)
+            activityEndsAt = time.wall.addingTimeInterval(deadline - time.monotonic)
             state = .active(acknowledgement!)
             let clock = clock
             let deadline = deadline
@@ -306,6 +309,7 @@ actor SessionHolder {
 
     private func clear() {
         acknowledgement = nil
+        activityEndsAt = nil
         expiry?.cancel(); expiry = nil
     }
 
@@ -318,7 +322,7 @@ actor SessionHolder {
                 startsAt: acknowledgement.startsAt, expiresAt: acknowledgement.expiresAt, serverTime: serverTime))
             remaining = SessionCountdown.seconds(until: acknowledgement.expiresAt, now: serverTime)
         }
-        return Snapshot(version: version, state: state, remainingSeconds: remaining,
+        return Snapshot(version: version, state: state, remainingSeconds: remaining, activityEndsAt: activityEndsAt,
                         stopPending: pending != nil, discoveryOffPending: discoveryOffPending)
     }
 
