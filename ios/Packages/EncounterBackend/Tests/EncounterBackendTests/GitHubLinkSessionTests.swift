@@ -59,7 +59,7 @@ final class GitHubLinkSessionTests: XCTestCase {
             .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
         XCTAssertEqual(query.first { $0.name == "code_challenge" }?.value, challenge)
         let refusesRedirects = await transport.redirectRefusalCount()
-        XCTAssertEqual(refusesRedirects, 1)
+        XCTAssertEqual(refusesRedirects, 2)
         do { _ = try await manager.completeGitHubLink(from: validCallback); XCTFail("Attempt must be consumed") }
         catch { XCTAssertEqual(error as? BackendError, .invalidRequest) }
         let after = await transport.recorded()

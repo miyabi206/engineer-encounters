@@ -8,6 +8,7 @@ actor StubTransport: HTTPTransport {
     enum Step: Sendable {
         case response(HTTPResponse)
         case held(HTTPResponse)
+        case redirect(HTTPResponse, location: URL)
         case failure
     }
     private var nonRedirectingRequests = 0
@@ -20,11 +21,15 @@ actor StubTransport: HTTPTransport {
 
     func sendWithoutRedirects(_ request: URLRequest) async throws -> HTTPResponse {
         nonRedirectingRequests += 1
-        return try await send(request)
+        return try await send(request, followsRedirects: false)
     }
     func redirectRefusalCount() -> Int { nonRedirectingRequests }
 
     func send(_ request: URLRequest) async throws -> HTTPResponse {
+        try await send(request, followsRedirects: true)
+    }
+
+    private func send(_ request: URLRequest, followsRedirects: Bool) async throws -> HTTPResponse {
         requests.append(request)
         for (count, observer) in observers where requests.count >= count { observer.resume() }
         observers.removeAll { requests.count >= $0.0 }
@@ -32,6 +37,11 @@ actor StubTransport: HTTPTransport {
         let step = steps.removeFirst()
         switch step {
         case .response(let response): return response
+        case let .redirect(response, location):
+            guard followsRedirects else { return response }
+            var redirected = request
+            redirected.url = location
+            return try await send(redirected, followsRedirects: true)
         case .held(let response):
             await withCheckedContinuation { hold = $0 }
             return response

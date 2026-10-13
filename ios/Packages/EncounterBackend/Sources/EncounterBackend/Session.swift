@@ -171,7 +171,7 @@ public actor SessionManager: CustomStringConvertible, CustomDebugStringConvertib
                 URLQueryItem(name: "skip_http_redirect", value: "true")
             ])
             let response = try await Self.send(auth, configuration: configuration, transport: transport,
-                                               bearer: authorization.session.accessCredential, followsRedirects: false)
+                                               bearer: authorization.session.accessCredential)
             try Task.checkCancellation()
             try validate(authorization)
             guard identityLinkOperation == id else { throw BackendError.invalidRequest }
@@ -344,7 +344,7 @@ public actor SessionManager: CustomStringConvertible, CustomDebugStringConvertib
         try validate(authorization)
         let session = cached ?? authorization.session
         let response = try await Self.send(auth, configuration: configuration, transport: transport,
-                                           bearer: session.accessCredential, followsRedirects: false)
+                                           bearer: session.accessCredential)
         try validate(authorization)
         guard response.statusCode != 401 else { throw BackendError.notAuthenticated }
         return response
@@ -480,7 +480,7 @@ public actor SessionManager: CustomStringConvertible, CustomDebugStringConvertib
     }
 
     private static func send(_ auth: AuthRequest, configuration: BackendConfiguration,
-                             transport: any HTTPTransport, bearer: String?, followsRedirects: Bool = true) async throws -> HTTPResponse {
+                             transport: any HTTPTransport, bearer: String?) async throws -> HTTPResponse {
         var components = URLComponents(url: configuration.endpoint("auth/v1/" + auth.path), resolvingAgainstBaseURL: false)!
         if !auth.queryItems.isEmpty { components.queryItems = auth.queryItems }
         guard let url = components.url else { throw BackendError.invalidRequest }
@@ -493,8 +493,7 @@ public actor SessionManager: CustomStringConvertible, CustomDebugStringConvertib
         if let bearer { request.setValue("Bearer " + bearer, forHTTPHeaderField: "Authorization") }
         let response: HTTPResponse
         do {
-            if followsRedirects { response = try await transport.send(request) }
-            else { response = try await transport.sendWithoutRedirects(request) }
+            response = try await transport.sendCredentialRequest(request)
         }
         catch is CancellationError { throw CancellationError() }
         catch { throw BackendError.transportFailure }

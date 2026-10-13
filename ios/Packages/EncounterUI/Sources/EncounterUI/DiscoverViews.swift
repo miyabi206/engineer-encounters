@@ -70,6 +70,9 @@ public struct DiscoverFeedView: View {
                     DiscoverDayGroups(groups: model.dayGroups, navigation: navigation)
                 }
                 if model.feedTruncated { Text(DiscoverStrings.text(.truncated)).foregroundStyle(.secondary) }
+                if !model.failedCardReloadIDs.isEmpty {
+                    DiscoverFailure { await model.retryCardReloads() }
+                }
                 Text(DiscoverStrings.text(.pace)).font(.callout).foregroundStyle(.secondary)
             }
         }
@@ -286,6 +289,9 @@ public struct DiscoverFavoritesView: View {
                         if model.savedLinksTruncated { Text(DiscoverStrings.text(.truncated)).foregroundStyle(.secondary) }
                     }
                     DiscoverWriteFailure(model: model)
+                }
+                if !model.failedCardReloadIDs.isEmpty {
+                    DiscoverFailure { await model.retryCardReloads() }
                 }
             }
         }
@@ -684,6 +690,7 @@ struct EncounterLinkView: View {
             EncounterVerification(verified: link.verified)
             if !link.verified { Text(DiscoverStrings.text(.unverifiedExplanation)).font(.caption).foregroundStyle(.secondary) }
             Link(DiscoverStrings.text(.openOriginal), destination: link.url)
+                .disabled(disabled)
             if let viewEncounter { Button(DiscoverStrings.text(.viewEncounter), action: viewEncounter) }
             if !isSample {
                 Button(DiscoverStrings.text(saved ? .unsaveLink : .saveLink), action: toggleSaved)

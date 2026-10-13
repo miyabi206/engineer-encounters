@@ -114,7 +114,10 @@ final class DiscoverModelTests: XCTestCase {
         gate.resolve(.failure(DiscoverActionError.unavailable))
         await task.value
         XCTAssertEqual(model.savedLinks.map { $0.link.id }, ["link"])
-        driver.saveHook = { id, linkID, value in .init(encounterID: id, linkID: linkID, saved: value) }
+        driver.saveHook = { id, linkID, value in
+            driver.cards[0].savedLinkIDs = value ? [linkID] : []
+            return .init(encounterID: id, linkID: linkID, saved: value)
+        }
         let retried = await model.retryOperation()
         XCTAssertTrue(retried)
         XCTAssertTrue(model.savedLinks.isEmpty)

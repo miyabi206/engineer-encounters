@@ -17,8 +17,17 @@ public struct HTTPResponse: Sendable, CustomStringConvertible, CustomDebugString
 /// Injected HTTP seam for Auth and remote procedures.
 public protocol HTTPTransport: Sendable {
     func send(_ request: URLRequest) async throws -> HTTPResponse
-    /// Auth authorization requests must return redirects without following them.
+    /// Credential-bearing requests must return redirects without following them.
     func sendWithoutRedirects(_ request: URLRequest) async throws -> HTTPResponse
+}
+
+extension HTTPTransport {
+    /// Reject redirects before interpreting any untrusted application error or credential body.
+    func sendCredentialRequest(_ request: URLRequest) async throws -> HTTPResponse {
+        let response = try await sendWithoutRedirects(request)
+        guard !(300..<400).contains(response.statusCode) else { throw BackendError.transportFailure }
+        return response
+    }
 }
 
 /// Foundation transport with no provider SDK dependency.
@@ -31,7 +40,7 @@ public struct URLSessionHTTPTransport: HTTPTransport {
     }
 
     public func send(_ request: URLRequest) async throws -> HTTPResponse {
-        try await send(request, delegate: nil)
+        try await sendCredentialRequest(request)
     }
 
     private func send(_ request: URLRequest, delegate: (any URLSessionTaskDelegate)?) async throws -> HTTPResponse {

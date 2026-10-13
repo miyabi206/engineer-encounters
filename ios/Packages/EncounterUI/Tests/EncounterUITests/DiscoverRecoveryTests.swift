@@ -349,12 +349,18 @@ final class DiscoverRecoveryTests: XCTestCase {
         await model.loadFavorites()
         await model.loadSavedLinks()
         await model.loadCard("card")
-        driver.favoriteHook = { id, _ in .init(encounterID: id, favorite: false) }
+        driver.favoriteHook = { id, _ in
+            driver.cards[0].favorite = false
+            return .init(encounterID: id, favorite: false)
+        }
         await model.setFavorite("card", favorite: true)
         XCTAssertEqual(model.card?.favorite, false)
         XCTAssertEqual(model.feed.first?.favorite, false)
         XCTAssertTrue(model.favorites.isEmpty)
-        driver.saveHook = { id, linkID, _ in .init(encounterID: id, linkID: linkID, saved: false) }
+        driver.saveHook = { id, linkID, _ in
+            driver.cards[0].savedLinkIDs.remove(linkID)
+            return .init(encounterID: id, linkID: linkID, saved: false)
+        }
         await model.setSaved("card", linkID: "link", saved: true)
         XCTAssertEqual(model.card?.savedLinkIDs, [])
         XCTAssertTrue(model.savedLinks.isEmpty)

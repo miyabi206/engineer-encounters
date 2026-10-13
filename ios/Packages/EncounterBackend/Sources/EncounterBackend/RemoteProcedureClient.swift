@@ -48,7 +48,7 @@ public actor RemoteProcedureClient: CustomStringConvertible, CustomDebugStringCo
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue("application/json", forHTTPHeaderField: "Accept")
             let response: HTTPResponse
-            do { response = try await transport.send(request) }
+            do { response = try await transport.sendCredentialRequest(request) }
             catch is CancellationError { throw CancellationError() }
             catch { throw BackendError.transportFailure }
             try await sessions.validate(authorization)

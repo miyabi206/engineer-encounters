@@ -33,6 +33,7 @@ public final class DiscoverModel: ObservableObject {
     @Published public private(set) var isWriting = false
     @Published public private(set) var deletion: DiscoverDeletionState = .none
     @Published public private(set) var failedOperation: DiscoverOperation?
+    @Published public private(set) var failedCardReloadIDs: Set<String> = []
     public let actions: DiscoverActions
     private var epoch: UInt = 0
     private var feedEpoch: UInt = 0
@@ -50,6 +51,14 @@ public final class DiscoverModel: ObservableObject {
     private var requestedFavorites = false
     private var requestedSavedLinks = false
     private var requestedCardID: String?
+    // Keep positions only, never a previously authorized card, while access is rechecked.
+    private struct ConcealedCard {
+        let feedIndex: Int?
+        let favoritesIndex: Int?
+        let savedIndex: Int?
+        var request = UUID()
+    }
+    private var concealedCards: [String: ConcealedCard] = [:]
 
     public init(actions: DiscoverActions, discoveryOn: Bool, isAuthorized: Bool = true) {
         self.actions = actions; self.discoveryOn = discoveryOn; self.isAuthorized = isAuthorized
@@ -106,6 +115,7 @@ public final class DiscoverModel: ObservableObject {
         feedState = .idle; detailState = .idle; favoritesState = .idle; savedLinksState = .idle
         feedTruncated = false; favoritesTruncated = false; savedLinksTruncated = false
         removedAt = [:]
+        concealedCards = [:]; failedCardReloadIDs = []
         isWriting = false; deletion = .none; failedOperation = nil
     }
 
@@ -120,7 +130,7 @@ public final class DiscoverModel: ObservableObject {
             guard current(token), resource == feedEpoch else { return }
             authorizeRead()
             feedContentEpoch &+= 1
-            feed = result.cards.filter { (removedAt[$0.id] ?? 0) <= removals }; feedTruncated = result.truncated; feedState = .loaded
+            feed = result.cards.filter { (removedAt[$0.id] ?? 0) <= removals && concealedCards[$0.id] == nil }; feedTruncated = result.truncated; feedState = .loaded
         } catch {
             guard current(token), resource == feedEpoch else { return }
             if let failure = error as? ProfileActionError,
@@ -135,12 +145,13 @@ public final class DiscoverModel: ObservableObject {
     public func loadCard(_ id: String) async {
         requestedCardID = id
         guard canLoad else { return }
+        if concealedCards[id] != nil { await reloadConcealedCard(id); return }
         detailEpoch &+= 1
-        let token = epoch, resource = detailEpoch
+        let token = epoch, resource = detailEpoch, removals = removalEpoch
         detailState = .loading
         do {
             let result = try await actions.loadCard(id)
-            guard current(token), resource == detailEpoch else { return }
+            guard current(token), resource == detailEpoch, (removedAt[id] ?? 0) <= removals else { return }
             authorizeRead()
             guard let result, result.card.id == id else {
                 remove(id); card = nil; detailState = .missing; return
@@ -148,7 +159,7 @@ public final class DiscoverModel: ObservableObject {
             detailContentEpoch &+= 1
             card = result; detailState = .loaded
         } catch {
-            guard current(token), resource == detailEpoch else { return }
+            guard current(token), resource == detailEpoch, (removedAt[id] ?? 0) <= removals else { return }
             if isNotFound(error) { remove(id); card = nil; detailState = .missing }
             else { handleReadFailure(error); detailState = .failed }
         }
@@ -165,7 +176,7 @@ public final class DiscoverModel: ObservableObject {
             guard current(token), resource == favoritesEpoch else { return }
             authorizeRead()
             favoritesContentEpoch &+= 1
-            favorites = result.cards.filter { (removedAt[$0.id] ?? 0) <= removals }; favoritesTruncated = result.truncated; favoritesState = .loaded
+            favorites = result.cards.filter { (removedAt[$0.id] ?? 0) <= removals && concealedCards[$0.id] == nil }; favoritesTruncated = result.truncated; favoritesState = .loaded
         } catch {
             guard current(token), resource == favoritesEpoch else { return }
             handleReadFailure(error); favoritesState = .failed
@@ -183,7 +194,7 @@ public final class DiscoverModel: ObservableObject {
             guard current(token), resource == savedEpoch else { return }
             authorizeRead()
             savedContentEpoch &+= 1
-            savedLinks = result.links.filter { (removedAt[$0.encounterID] ?? 0) <= removals }; savedLinksTruncated = result.truncated; savedLinksState = .loaded
+            savedLinks = result.links.filter { (removedAt[$0.encounterID] ?? 0) <= removals && concealedCards[$0.encounterID] == nil }; savedLinksTruncated = result.truncated; savedLinksState = .loaded
         } catch {
             guard current(token), resource == savedEpoch else { return }
             handleReadFailure(error); savedLinksState = .failed
@@ -266,12 +277,14 @@ public final class DiscoverModel: ObservableObject {
         isWriting = true; failedOperation = nil
         update(operation)
         do {
+            let removesRetention: Bool
             switch operation {
             case let .favorite(id, value):
                 let result = try await actions.setFavorite(id, value)
                 guard currentWrite(token, id: id, removals: removals) else { return }
                 guard result.encounterID == id else { throw DiscoverActionError.unavailable }
                 update(.favorite(result.encounterID, result.favorite))
+                removesRetention = !result.favorite
             case let .save(id, linkID, value):
                 let result: EncounterSavedResult
                 if value { result = try await actions.saveLink(id, linkID) }
@@ -279,7 +292,16 @@ public final class DiscoverModel: ObservableObject {
                 guard currentWrite(token, id: id, removals: removals) else { return }
                 guard result.encounterID == id, result.linkID == linkID else { throw DiscoverActionError.unavailable }
                 update(.save(result.encounterID, result.linkID, result.saved))
+                removesRetention = !result.saved
             case .delete: return
+            }
+            if removesRetention {
+                concealedCards[id] = ConcealedCard(feedIndex: beforeFeed.firstIndex { $0.id == id },
+                    favoritesIndex: beforeFavorites.firstIndex { $0.id == id },
+                    savedIndex: beforeLinks.firstIndex { $0.encounterID == id })
+                fenceCardCopies(id)
+                await reloadConcealedCard(id)
+                guard current(token) else { return }
             }
             isWriting = false
         } catch {
@@ -295,6 +317,62 @@ public final class DiscoverModel: ObservableObject {
                 if savedContentEpoch == savedToken { savedLinks = beforeLinks }
                 if detailContentEpoch == detailToken { card = beforeCard }
                 failedOperation = operation; isWriting = false
+            }
+        }
+    }
+
+    /// Retry the read, never the already successful retention-removal write.
+    public func retryCardReloads() async {
+        for id in failedCardReloadIDs.sorted() { await reloadConcealedCard(id) }
+    }
+
+    private func fenceCardCopies(_ id: String) {
+        removalEpoch &+= 1; removedAt[id] = removalEpoch
+        feedContentEpoch &+= 1; favoritesContentEpoch &+= 1; savedContentEpoch &+= 1
+        feed.removeAll { $0.id == id }; favorites.removeAll { $0.id == id }
+        savedLinks.removeAll { $0.encounterID == id }
+        if card?.card.id == id { card = nil; detailContentEpoch &+= 1 }
+        if requestedCardID == id { detailEpoch &+= 1; detailState = .loading }
+    }
+
+    private func reloadConcealedCard(_ id: String) async {
+        guard canLoad, var context = concealedCards[id] else { return }
+        context.request = UUID(); concealedCards[id] = context
+        let token = epoch
+        failedCardReloadIDs.remove(id)
+        if requestedCardID == id { detailState = .loading }
+        do {
+            let result = try await actions.loadCard(id)
+            guard current(token), concealedCards[id]?.request == context.request else { return }
+            authorizeRead()
+            guard let result, result.card.id == id else { remove(id); return }
+            // Fence list reads started during concealment too; none may restore old fields.
+            fenceCardCopies(id)
+            concealedCards[id] = nil
+            let entry = EncounterFeedCard(card: result.card, favorite: result.favorite)
+            if let index = context.feedIndex, feed.count < 200 {
+                feed.insert(entry, at: min(index, feed.count))
+            }
+            if result.favorite, let index = context.favoritesIndex, favorites.count < 200 {
+                favorites.insert(entry, at: min(index, favorites.count))
+            }
+            if let index = context.savedIndex {
+                let links = result.card.links.filter { result.savedLinkIDs.contains($0.id) }.map {
+                    EncounterSavedLink(encounterID: id, day: result.card.day, kind: result.card.kind, link: $0)
+                }
+                savedLinks.insert(contentsOf: links.prefix(max(0, 200 - savedLinks.count)),
+                                  at: min(index, savedLinks.count))
+            }
+            if requestedCardID == id {
+                detailContentEpoch &+= 1; card = result; detailState = .loaded
+            }
+        } catch {
+            guard current(token), concealedCards[id]?.request == context.request else { return }
+            if isNotFound(error) { remove(id) }
+            else if isAuthorizationFailure(error) { loseAuthorization() }
+            else {
+                failedCardReloadIDs.insert(id)
+                if requestedCardID == id { detailState = .failed }
             }
         }
     }
@@ -332,6 +410,7 @@ public final class DiscoverModel: ObservableObject {
         feedContentEpoch &+= 1; favoritesContentEpoch &+= 1; savedContentEpoch &+= 1; detailContentEpoch &+= 1
         removalEpoch &+= 1
         removedAt[id] = removalEpoch
+        concealedCards[id] = nil; failedCardReloadIDs.remove(id)
         feed.removeAll { $0.id == id }; favorites.removeAll { $0.id == id }
         savedLinks.removeAll { $0.encounterID == id }
         if requestedCardID == id {
