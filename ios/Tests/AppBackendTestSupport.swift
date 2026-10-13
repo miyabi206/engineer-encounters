@@ -129,16 +129,42 @@ func appBackendEventually(_ condition: @MainActor () async throws -> Bool) async
 enum AppBackendTestFailure: Error { case didNotSettle }
 
 @MainActor
-func appBackendDefaults(userID: UUID? = appBackendTestUser, bound: Bool = true) -> UserDefaults {
-    let defaults = UserDefaults(suiteName: "EngineerEncounters.Backend.Tests.\(UUID().uuidString)")!
+func appBackendDefaults(userID: UUID? = appBackendTestUser, bound: Bool = true,
+                        defaults suppliedDefaults: UserDefaults? = nil,
+                        file: StaticString = #filePath, line: UInt = #line) -> UserDefaults {
+    guard let defaults = suppliedDefaults ?? UserDefaults(suiteName: "EngineerEncounters.Backend.Tests.\(UUID().uuidString)") else {
+        XCTFail("Unable to create backend test defaults", file: file, line: line)
+        return AppInMemoryDefaults()
+    }
     // Seed fakes with the binding that a preceding successful sign-in would have saved.
     if bound {
         let backend = BackendStorageBinding.identity(appBackendTestConfiguration())
         defaults.set(backend, forKey: BackendStorageBinding.sessionBackendKey)
-        defaults.set(try! JSONEncoder().encode(BackendStorageOwner(backend: backend, account: userID, salt: try! InstallationStorageSalt.load(defaults: defaults))),
-                     forKey: BackendStorageBinding.ownerKey)
+        do {
+            let salt = try InstallationStorageSalt.load(defaults: defaults)
+            let owner = BackendStorageOwner(backend: backend, account: userID, salt: salt)
+            defaults.set(try JSONEncoder().encode(owner), forKey: BackendStorageBinding.ownerKey)
+            guard defaults.synchronize() else { throw BackendError.storageFailure }
+        } catch {
+            XCTFail("Unable to seed backend test defaults: storage unavailable or invalid binding", file: file, line: line)
+        }
     }
     return defaults
+}
+
+/// Each instance has its own store and never reads or writes a preferences suite.
+final class AppInMemoryDefaults: UserDefaults, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: Any] = [:]
+    override func synchronize() -> Bool { true }
+    override func object(forKey name: String) -> Any? { lock.withLock { values[name] } }
+    override func data(forKey name: String) -> Data? { object(forKey: name) as? Data }
+    override func string(forKey name: String) -> String? { object(forKey: name) as? String }
+    override func bool(forKey name: String) -> Bool { object(forKey: name) as? Bool ?? false }
+    override func dictionaryRepresentation() -> [String: Any] { lock.withLock { values } }
+    override func set(_ value: Any?, forKey name: String) { lock.withLock { values[name] = value } }
+    override func set(_ value: Bool, forKey name: String) { set(value as Any, forKey: name) }
+    override func removeObject(forKey name: String) { lock.withLock { values[name] = nil } }
 }
 
 @MainActor

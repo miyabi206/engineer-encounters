@@ -183,7 +183,15 @@ final class SessionAdapter: ObservableObject {
             await withCheckedContinuation { continuation in
                 let completion = SessionStopCompletion(continuation)
                 stopping = Task {
-                    _ = try? await backend.call(outgoing: true) { try await $0.session.stopSession() }
+                    do {
+                        if await self.holder.needsStopCheck(owner: backend.owner) {
+                            _ = try await self.fetch(backend, starting: false, outgoing: true)
+                        }
+                        if try await self.holder.pendingStop(owner: backend.owner) != nil {
+                            try Task.checkCancellation()
+                            _ = try await backend.call(outgoing: true) { try await $0.session.stopSession() }
+                        }
+                    } catch { /* The bounded outgoing attempt never owns a later retry. */ }
                     completion.finish()
                 }
                 timeout = Task {
@@ -268,13 +276,13 @@ final class SessionAdapter: ObservableObject {
         await update()
     }
 
-    private func fetch(_ backend: SessionBackendServices, starting: Bool) async throws -> SessionState {
+    private func fetch(_ backend: SessionBackendServices, starting: Bool, outgoing: Bool = false) async throws -> SessionState {
         guard read == nil else { throw SessionActionError.unavailable }
         let request = try await holder.begin(owner: backend.owner, starting: starting)
         let id = UUID()
         let task = Task {
             guard await self.holder.isCurrent(request) else { throw SessionActionError.unavailable }
-            return try await backend.call { services -> SessionTransfer? in
+            return try await backend.call(outgoing: outgoing) { services -> SessionTransfer? in
                 guard await self.holder.markSent(request) else { throw SessionActionError.unavailable }
                 if starting { return try await services.session.startSession() }
                 return try await services.session.getOwnSession()
@@ -286,7 +294,7 @@ final class SessionAdapter: ObservableObject {
         do {
             let response = try await task.value
             guard backend.isCurrent else { throw SessionActionError.unavailable }
-            guard try await holder.receive(response, for: request) else { throw SessionActionError.unavailable }
+            guard try await holder.receive(response, for: request, acceptingActive: !outgoing) else { throw SessionActionError.unavailable }
             failure = nil
             let snapshot = await holder.snapshot()
             publish(snapshot)

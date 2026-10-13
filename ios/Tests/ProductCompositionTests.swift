@@ -235,6 +235,98 @@ final class ProductCompositionTests: XCTestCase {
         XCTAssertTrue(model.feed.isEmpty); XCTAssertNil(model.card); XCTAssertFalse(model.isAuthorized)
     }
 
+    func testAllCapturedAdapterFamiliesRejectAccountAndBackendChangesBeforeReadsOrWrites() async throws {
+        for changeAccount in [false, true] {
+            let other = UUID()
+            let transport = productTransport(["signin": [.response(appBackendAuthResponse(userID: other))],
+                "accept_declarations": [.response(appAccountOK())]])
+            let composition = try productComposition(transport, defaults: appBackendDefaults(defaults: AppInMemoryDefaults()))
+            await composition.waitForRestoration(); productAuthorize(composition)
+            let discover = composition.discoverAdapter.actions()
+            let session = composition.sessionAdapter.actions()
+            let qr = composition.qrAdapter.actions()
+            let links = composition.linkAdapter.actions()
+            let profile = composition.account.profileActions { .available }
+            let settings = composition.settingsSafetyAdapter.reportSettingsActions()
+            let ownCard = composition.settingsSafetyAdapter.myCardActions()
+            let account = composition.settingsSafetyAdapter.accountActions()
+            let blocked = composition.settingsSafetyAdapter.blockedActions()
+            let safety = composition.settingsSafetyAdapter.reportActions(encounterID: productEncounterID)
+            let report = try XCTUnwrap(SafetyReportRequest(encounterID: productEncounterID, reason: .spam, link: nil))
+            let payload = try XCTUnwrap(QRPayload(token: String(repeating: "a", count: 32)))
+            let code = QRCode(payload: payload, expiresAt: appBackendTestNow)
+            // Exercise the early local-hide return as well as the network paths.
+            composition.discoverAdapter.conceal(productEncounterID)
+            if changeAccount {
+                try await composition.account.signOut()
+                try await composition.account.signIn(using: .init(path: "signin", body: Data()),
+                    isAdult: true, acceptsTermsAndPrivacy: true, termsVersion: "fixture-terms", privacyVersion: "fixture-privacy")
+                productAuthorize(composition)
+            } else {
+                let replacement = UUID()
+                composition.account.bindingGeneration = { replacement }
+            }
+            let before = await transport.recorded().count
+            let profileOperations: [(String, @MainActor () async throws -> Void)] = [
+                ("feed", { _ = try await discover.loadFeed() }),
+                ("hidden card", { _ = try await discover.loadCard(productEncounterID) }),
+                ("favorites", { _ = try await discover.loadFavorites() }),
+                ("saved links", { _ = try await discover.loadSavedLinks() }),
+                ("favorite write", { _ = try await discover.setFavorite(productEncounterID, false) }),
+                ("save link", { _ = try await discover.saveLink(productEncounterID, productLinkID) }),
+                ("unsave link", { _ = try await discover.unsaveLink(productEncounterID, productLinkID) }),
+                ("delete encounter", { try await XCTUnwrap(discover.deleteEncounter)(productEncounterID) }),
+                ("profile catalogue", { _ = try await profile.loadInterests() }),
+                ("profile settings", { _ = try await profile.setMinimumSharedInterests(5) }),
+                ("report settings", { _ = try await settings.load() }),
+                ("report time", { _ = try await settings.saveTime(.init()) }),
+                ("notification settings", { _ = try await settings.setNotifications(false) }),
+                ("permission", { _ = try await settings.requestPermission() }),
+                ("own card", { _ = try await ownCard.load() }),
+                ("account settings", { _ = try await account.load() }),
+                ("disconnect", { _ = try await account.disconnectGitHub() }),
+                ("sign out", { try await account.signOut() }),
+                ("delete account", { _ = try await account.deleteAccount() }),
+                ("block list", { _ = try await blocked.load() }),
+                ("unblock", { try await blocked.unblock(productEncounterID) }),
+                ("report", { try await safety.report(report) }),
+                ("block", { try await safety.block(productEncounterID) }),
+                ("reopen", { _ = try await safety.authorizeReopening() })]
+            for (name, operation) in profileOperations {
+                do { try await operation(); XCTFail("Obsolete \(name) must be refused") }
+                catch { XCTAssertEqual(error as? ProfileActionError, .init(code: .notAuthenticated), name) }
+            }
+            let linkOperations: [@MainActor () async throws -> Void] = [
+                { _ = try await links.loadLinks() }, { _ = try await links.loadConnection() },
+                { _ = try await links.connectGitHub() }, { _ = try await links.listRepositories(1) }]
+            for operation in linkOperations {
+                do { try await operation(); XCTFail("Obsolete link action must be refused") }
+                catch { XCTAssertEqual(error as? LinkActionError, .init(code: .unavailable, details: ["not_authenticated"])) }
+            }
+            let sessionOperations: [@MainActor () async throws -> Void] = [
+                { _ = try await session.startSession() }, { try await session.stopSession() },
+                { _ = try await session.refreshSession() }]
+            for operation in sessionOperations {
+                do { try await operation(); XCTFail("Obsolete session action must be refused") }
+                catch { XCTAssertEqual(error as? SessionActionError, .unavailable) }
+            }
+            let qrOperations: [@MainActor () async throws -> Void] = [
+                { _ = try await qr.issueCode() }, { try await qr.cancelCode(code) },
+                { _ = try await qr.redeemCode(payload) }]
+            for operation in qrOperations {
+                do { try await operation(); XCTFail("Obsolete QR action must be refused") }
+                catch { XCTAssertTrue(error is CancellationError) }
+            }
+            var suspended = false
+            composition.settingsSafetyAdapter.suspendParticipation = { suspended = true }
+            account.suspendParticipation()
+            XCTAssertFalse(suspended)
+            let after = await transport.recorded().count
+            XCTAssertEqual(before, after)
+            XCTAssertTrue(composition.account.state.isSignedIn)
+        }
+    }
+
     func testSessionStateDrivesButtonAndSessionChangesReloadTheFeed() async throws {
         let session = productResponse(["session_id": "00000000-0000-0000-0000-000000000777",
             "starts_at": 1000, "expires_at": 8200, "server_time": 1000])

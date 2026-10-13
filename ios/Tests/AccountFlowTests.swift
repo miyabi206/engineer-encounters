@@ -111,7 +111,8 @@ final class AccountFlowTests: XCTestCase {
         let catalogue = HTTPResponse(data: Data(#"[{"interest_id":"a","label_ja":"技術","label_en":"Technology","display_order":1}]"#.utf8), statusCode: 200)
         let transport = ControlledAppBackendTransport([
             "register_time_zone": [.response(appAccountOK())],
-            "get_own_profile": [.response(appOwnProfileResponse(profile)), .response(appOwnProfileResponse(saved))],
+            "get_own_profile": [.response(appOwnProfileResponse(profile)), .response(appOwnProfileResponse(profile)),
+                .response(appOwnProfileResponse(saved))],
             "list_interests": [.response(catalogue)],
             "set_minimum_shared_interests": [.held]
         ])
@@ -126,6 +127,8 @@ final class AccountFlowTests: XCTestCase {
         settings.introduction = "Unsaved introduction"
         settings.visibility[.introduction] = .private
         settings.minimumSharedInterests = 5
+        XCTAssertEqual(settings.profile.minimumSharedInterests, 3)
+        XCTAssertTrue(settings.canSaveMatching)
         let saving = Task { await settings.saveMatching() }
         try await appBackendEventually { await transport.isHeld("set_minimum_shared_interests") }
         composition.account.publishProfile(unready, stale: false)

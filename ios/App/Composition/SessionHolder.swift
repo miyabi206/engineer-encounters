@@ -102,7 +102,7 @@ actor SessionHolder {
     }
 
     @discardableResult
-    func receive(_ value: SessionTransfer?, for request: Request) async throws -> Bool {
+    func receive(_ value: SessionTransfer?, for request: Request, acceptingActive: Bool = true) async throws -> Bool {
         let time = await clock.now()
         let sentAt = (self.request?.id == request.id ? self.request : stoppedRequest)?.sentAt ?? request.sentAt
         lastMonotonic = time.monotonic
@@ -130,7 +130,7 @@ actor SessionHolder {
         self.request = nil
         clear()
         state = .none
-        if let value, value.sessionID != suppressed?.sessionID,
+        if acceptingActive, let value, value.sessionID != suppressed?.sessionID,
            !(completedStop?.owner == request.owner && completedStop?.sessionID == value.sessionID),
            value.startsAt.date <= value.serverTime.date,
            sentAt.monotonic + value.expiresAt.date.timeIntervalSince(value.serverTime.date) > time.monotonic {
@@ -189,8 +189,11 @@ actor SessionHolder {
         await expire(at: time.monotonic)
         guard self.owner == owner else { return nil }
         let needed = force || acknowledgement != nil || request != nil || pending != nil
-        stoppedRequest = request ?? stoppedRequest
-        request = nil; checkingStop = nil
+        let needsCheck = needsStopCheck(owner: owner)
+        // An unresolved get is not an in-flight start: its answer must never
+        // replace the marked ID with a session started on another device.
+        stoppedRequest = needsCheck ? nil : (request ?? stoppedRequest)
+        request = nil
         let acknowledgement = acknowledgement
         let marker = acknowledgement.flatMap { value in
             UUID(uuidString: value.sessionID).map {
@@ -201,6 +204,8 @@ actor SessionHolder {
         clear()
         if discoveryOff { self.discoveryOff = true; discoveryOffPending = true }
         if needed || discoveryOff { pending = Stop(owner: owner, id: UUID()) }
+        // Replacing the local stop must not authorize an unresolved durable marker.
+        checkingStop = needsCheck ? pending : nil
         state = pending == nil ? .none : .stopping
         changed()
         if let marker {

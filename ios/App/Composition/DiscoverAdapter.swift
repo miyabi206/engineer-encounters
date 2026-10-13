@@ -108,12 +108,15 @@ final class DiscoverAdapter: ObservableObject {
         let epoch = account.sessionGeneration
         let fence = account.backendCallFence()
         return DiscoverActions(loadFeed: {
-            guard fence.isCurrent(), self.account.sessionGeneration == epoch, !self.account.deletionSuspended else { throw CancellationError() }
+            try self.require(epoch: epoch, fence: fence)
             try await self.beforeFeedRead()
             let result = try await self.call(epoch: epoch, fence: fence) { try await $0.encounter.getEncounterFeed() }
             return try self.present(result)
         }, loadCard: { id in
-            if self.pendingHiddenIDs.contains(id) { return nil }
+            try self.require(epoch: epoch, fence: fence)
+            // A local pending hide is not a server deletion. Preserve the requested
+            // detail so cancelling the report can recheck its authorization.
+            if self.pendingHiddenIDs.contains(id) { throw CancellationError() }
             let id = try Self.identifier(id, field: "encounter_id")
             let result = try await self.call(epoch: epoch, fence: fence) { try await $0.encounter.getEncounterCard(encounterID: id) }
             return EncounterDetail(card: try self.present(result.card), favorite: result.favorite,
@@ -160,12 +163,17 @@ final class DiscoverAdapter: ObservableObject {
                                     linkID: result.linkID.uuidString.lowercased(), saved: result.saved)
     }
 
-    private func call<Value>(epoch: UUID, fence: BackendCallFence, _ operation: @MainActor (SessionBackendServices.Services) async throws -> Value) async throws -> Value {
-        guard !account.deletionSuspended else { throw CancellationError() }
+    private func require(epoch: UUID, fence: BackendCallFence) throws {
         guard fence.isCurrent(), account.sessionGeneration == epoch, case .signedIn = account.state,
               !account.sessionChangeInProgress, let backend, backend.isCurrent else {
             throw ProfileActionError(code: .notAuthenticated)
         }
+        guard !account.deletionSuspended else { throw CancellationError() }
+    }
+
+    private func call<Value>(epoch: UUID, fence: BackendCallFence, _ operation: @MainActor (SessionBackendServices.Services) async throws -> Value) async throws -> Value {
+        try require(epoch: epoch, fence: fence)
+        guard let backend else { throw ProfileActionError(code: .notAuthenticated) }
         do {
             let result = try await backend.call(operation)
             failure = nil

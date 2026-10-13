@@ -223,13 +223,18 @@ final class SettingsSafetyAdapterTests: XCTestCase {
     }
 
     func testCancellingFailedReportReloadsAuthorizedCardAndRequestedLists() async throws {
+        let saved = productResponse(["links": [["encounter_id": productEncounterID,
+            "day": "2026-10-13", "kind": "session", "link": productLink()]], "truncated": false])
         let transport = productTransport(["get_encounter_feed": [.response(productFeed()), .response(productFeed()), .response(productFeed())],
+            "list_encounter_favorites": [.response(productFeed()), .response(productFeed()), .response(productFeed())],
+            "list_saved_links": [.response(saved), .response(saved), .response(saved)],
             "get_encounter_card": [.response(productResponse(productCard(detail: true))), .response(productResponse(productCard(detail: true)))],
             "report_encounter_person": [.failure]])
         let composition = try productComposition(transport)
         await composition.waitForRestoration(); productAuthorize(composition)
         let discover = try XCTUnwrap(composition.discoverAdapter.model)
-        await discover.loadFeed(); await discover.loadCard(productEncounterID)
+        await discover.loadFeed(); await discover.loadFavorites(); await discover.loadSavedLinks()
+        await discover.loadCard(productEncounterID)
         composition.settingsSafetyAdapter.presentReport(productEncounterID, linkID: nil, completed: {})
         let model = try XCTUnwrap(composition.settingsSafetyAdapter.sheet?.model)
         model.reason = .spam; await model.submit()
@@ -238,6 +243,8 @@ final class SettingsSafetyAdapterTests: XCTestCase {
         XCTAssertNil(composition.settingsSafetyAdapter.sheet)
         XCTAssertEqual(discover.card?.card.id, productEncounterID)
         XCTAssertEqual(discover.feed.first?.id, productEncounterID)
+        XCTAssertEqual(discover.favorites.first?.id, productEncounterID)
+        XCTAssertEqual(discover.savedLinks.first?.encounterID, productEncounterID)
     }
 
     func testVisibilityWriteDropsCardsBeforeItsFollowUpProfileReadCompletes() async throws {

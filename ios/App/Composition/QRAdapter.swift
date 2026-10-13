@@ -67,7 +67,8 @@ final class QRAdapter: ObservableObject {
 
     private func cancel(_ code: QRCode, epoch: UUID, fence: BackendCallFence, outgoing: Bool = false) async throws {
         try await serialized {
-            guard epoch == self.account.sessionGeneration, self.outstanding == code else { return }
+            guard fence.isCurrent(), epoch == self.account.sessionGeneration else { throw CancellationError() }
+            guard self.outstanding == code else { return }
             _ = try await self.call(epoch: epoch, fence: fence, outgoing: outgoing) { try await $0.qr.cancelQRCode() }
             if self.outstanding == code { self.outstanding = nil }
         }

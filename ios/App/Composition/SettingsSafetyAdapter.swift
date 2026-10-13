@@ -42,7 +42,10 @@ final class SettingsSafetyAdapter: ObservableObject {
             return MyCardData(profile: profile, links: ownLinks, interests: interests.map {
                 .init(id: $0.interestID, labelJapanese: $0.labelJA, labelEnglish: $0.labelEN)
             })
-        }, openOriginal: openOriginal)
+        }, openOriginal: { url in
+            try self.require(epoch, fence: fence)
+            try await openOriginal(url)
+        })
     }
 
     func reportSettingsActions() -> ReportSettingsActions {
@@ -56,7 +59,10 @@ final class SettingsSafetyAdapter: ObservableObject {
             })
         }, setNotifications: { enabled in
             Self.present(try await self.call(epoch, fence: fence) { try await $0.report.setNotificationsEnabled(enabled: enabled) })
-        }, requestPermission: { .unavailable })
+        }, requestPermission: {
+            try self.require(epoch, fence: fence)
+            return .unavailable
+        })
     }
 
     func blockedActions() -> SafetyBlockedActions {
@@ -157,14 +163,19 @@ final class SettingsSafetyAdapter: ObservableObject {
             if let profile = self.verifiedProfile { self.account.publishProfile(profile, stale: false) }
             self.verifiedProfile = nil
             self.resumeParticipation()
-        }, suspendParticipation: { self.suspendParticipation() })
+        }, suspendParticipation: {
+            guard fence.isCurrent(), epoch == self.account.sessionGeneration else { return }
+            self.suspendParticipation()
+        })
     }
 
     private func loadAccount(_ epoch: UUID, fence: BackendCallFence) async throws -> AccountSettingsData {
         try require(epoch, fence: fence)
+        let linkActions = links.actions()
         let profile = try await account.loadOwnProfile()
-        _ = try await links.actions().loadConnection()
-        let ownLinks = try await links.actions().loadLinks()
+        try require(epoch, fence: fence)
+        _ = try await linkActions.loadConnection()
+        let ownLinks = try await linkActions.loadLinks()
         try require(epoch, fence: fence)
         return accountData(profile: profile, ownLinks: ownLinks)
     }

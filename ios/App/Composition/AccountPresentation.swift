@@ -28,8 +28,9 @@ extension AccountModel {
     func profileActions(bluetoothState: (@MainActor () -> BluetoothPermissionState)? = nil,
                         requestBluetooth: @escaping @MainActor () async throws -> BluetoothPermissionState) -> ProfileActions {
         let epoch = sessionGeneration
+        let fence = backendCallFence()
         let requireSession: @MainActor () throws -> Void = {
-            guard self.hasCurrentSessionContext, !self.sessionCleanupPending, self.sessionGeneration == epoch,
+            guard fence.isCurrent(), self.hasCurrentSessionContext, !self.sessionCleanupPending, self.sessionGeneration == epoch,
                   self.state.isSignedIn else {
                 throw ProfileActionError(code: .notAuthenticated)
             }
@@ -77,7 +78,6 @@ extension AccountModel {
             requestBluetooth: {
                 try requireSession()
                 do {
-                    let fence = self.backendCallFence()
                     let bluetooth = try await fence.call { try await requestBluetooth() }
                     guard self.sessionGeneration == epoch else { return bluetooth }
                     _ = try? await self.loadOwnProfile()
@@ -142,7 +142,7 @@ extension AccountModel {
         } catch is CancellationError { throw CancellationError() }
         catch {
             let failure = error as? ProfileActionError ?? Self.presentationError(error)
-            if failure.code == .notAuthenticated { await rejectDeadSession(generation: epoch) }
+            if failure.code == .notAuthenticated, fence.isCurrent() { await rejectDeadSession(generation: epoch) }
             throw failure
         }
     }

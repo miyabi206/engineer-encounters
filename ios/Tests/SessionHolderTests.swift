@@ -116,7 +116,7 @@ final class SessionHolderTests: XCTestCase {
     }
 
     func testAcknowledgedStopDeadlineCannotDropLaterOfflineStopForInFlightStart() async throws {
-        let defaults = appBackendDefaults()
+        let defaults = appBackendDefaults(defaults: AppInMemoryDefaults())
         let clock = ManualEncounterClock()
         let nextID = "00000000-0000-0000-0000-000000000445"
         let transport = sessionTransport(["start_session": [.response(sessionResponse(expiry: 1005)), .held],
@@ -291,6 +291,121 @@ final class SessionHolderTests: XCTestCase {
         let paths = await transport.recorded().map { $0.url?.lastPathComponent }
         XCTAssertEqual(Array(paths.suffix(3)), ["get_own_session", "stop_session", "start_session"])
         await next.sessionAdapter.invalidate()
+    }
+
+    func testS08StopWithUnresolvedMarkerChecksServerBeforeStopping() async throws {
+        let otherID = "00000000-0000-0000-0000-000000000445"
+        for answer in ["marked", "none", "other"] {
+            let defaults = appBackendDefaults(defaults: AppInMemoryDefaults())
+            try seedUnresolvedStop(defaults)
+            let transport = sessionTransport(["get_own_session": [.failure, .failure, .held], "stop_session": [.held]])
+            let composition = try sessionComposition(transport, defaults: defaults, online: { false })
+            await composition.waitForRestoration()
+            let actions = composition.sessionAdapter.actions()
+            do { _ = try await actions.refreshSession(); XCTFail("Offline S08 cannot resolve the marker") } catch { }
+            do { try await actions.stopSession(); XCTFail("Offline stop must retain reconciliation") } catch { }
+            XCTAssertTrue(composition.sessionAdapter.stopPending)
+            let stopsOffline = await transport.count("stop_session")
+            XCTAssertEqual(stopsOffline, 0)
+            await composition.sessionAdapter.foreground()
+            try await appBackendEventually { await transport.isHeld("get_own_session") }
+            let stopsBeforeGet = await transport.count("stop_session")
+            XCTAssertEqual(stopsBeforeGet, 0)
+            await assertFlag(composition, false)
+            await transport.release("get_own_session", with: answer == "none" ? sessionNull :
+                sessionResponse(id: answer == "marked" ? "00000000-0000-0000-0000-000000000444" : otherID))
+            if answer == "marked" {
+                try await appBackendEventually { await transport.isHeld("stop_session") }
+                await assertFlag(composition, false)
+                await transport.release("stop_session", with: sessionNull)
+            }
+            try await appBackendEventually { !composition.sessionAdapter.stopPending }
+            await assertFlag(composition, answer == "other")
+            XCTAssertTrue(pendingStopKeys(defaults).isEmpty)
+            let stops = await transport.count("stop_session")
+            let gets = await transport.count("get_own_session")
+            XCTAssertEqual(stops, answer == "marked" ? 1 : 0)
+            XCTAssertEqual(gets, 3)
+            await composition.sessionAdapter.invalidate()
+        }
+    }
+
+    func testSignOutWithUnresolvedMarkerChecksServerAndDropsItBeforeCredentials() async throws {
+        for answer in ["marked", "none", "other", "offline", "timeout"] {
+            let defaults = appBackendDefaults(defaults: AppInMemoryDefaults())
+            try seedUnresolvedStop(defaults)
+            let clock = ManualEncounterClock()
+            let store = SessionCredentialClearGate(session: try appBackendTestSession())
+            let transport = sessionTransport(["get_own_session": [.held], "stop_session": [.held]])
+            let composition = try sessionComposition(transport, clock: clock, store: store, defaults: defaults)
+            await composition.waitForRestoration()
+            let signingOut = Task { try await composition.account.signOut() }
+            try await appBackendEventually { await transport.isHeld("get_own_session") }
+            await assertFlag(composition, false)
+            let stopsBeforeGet = await transport.count("stop_session")
+            XCTAssertEqual(stopsBeforeGet, 0)
+            XCTAssertEqual(pendingStopKeys(defaults).count, 1)
+            if answer == "timeout" {
+                try await appBackendEventually { await clock.pendingWaitCount > 0 }
+                await clock.advance(by: 1.99)
+                let clearedEarly = await store.clearStarted
+                XCTAssertFalse(clearedEarly)
+                await clock.advance(by: 0.01)
+            } else {
+                let response: HTTPResponse
+                switch answer {
+                case "marked": response = sessionResponse()
+                case "other": response = sessionResponse(id: "00000000-0000-0000-0000-000000000445")
+                case "offline": response = HTTPResponse(data: Data(), statusCode: 503)
+                default: response = sessionNull
+                }
+                await transport.release("get_own_session", with: response)
+                if answer == "marked" {
+                    try await appBackendEventually { await transport.isHeld("stop_session") }
+                    await assertFlag(composition, false)
+                    await transport.release("stop_session", with: sessionNull)
+                }
+            }
+            try await appBackendEventually { await store.clearStarted }
+            XCTAssertTrue(pendingStopKeys(defaults).isEmpty)
+            await assertFlag(composition, false)
+            await store.releaseClear()
+            try await signingOut.value
+            XCTAssertEqual(composition.account.state, .signedOut)
+            if answer == "timeout" {
+                await transport.release("get_own_session", with: sessionResponse())
+                try await appBackendEventually { await clock.pendingWaitCount == 0 }
+            }
+            let paths = await transport.recorded().compactMap { $0.url?.lastPathComponent }
+            XCTAssertEqual(paths, answer == "marked" ? ["register_time_zone", "get_own_session", "stop_session"] :
+                ["register_time_zone", "get_own_session"])
+            XCTAssertTrue(pendingStopKeys(defaults).isEmpty)
+        }
+    }
+
+    func testStoppingDuringHeldMarkerCheckCannotRetargetStopToAnotherDeviceSession() async throws {
+        let defaults = appBackendDefaults(defaults: AppInMemoryDefaults())
+        try seedUnresolvedStop(defaults)
+        let other = sessionResponse(id: "00000000-0000-0000-0000-000000000445")
+        let transport = sessionTransport(["get_own_session": [.held, .response(other)]])
+        let composition = try sessionComposition(transport, defaults: defaults)
+        await composition.waitForRestoration()
+        let actions = composition.sessionAdapter.actions()
+        let checking = Task { try await actions.refreshSession() }
+        try await appBackendEventually { await transport.isHeld("get_own_session") }
+        do { try await actions.stopSession(); XCTFail("An outstanding check cannot authorize a stop") } catch { }
+        await transport.release("get_own_session", with: other)
+        do { _ = try await checking.value; XCTFail("Locally superseded get must be obsolete") } catch { }
+        let marker = try JSONDecoder().decode(PendingSessionStopStore.Marker.self,
+            from: XCTUnwrap(defaults.data(forKey: XCTUnwrap(pendingStopKeys(defaults).first))))
+        XCTAssertEqual(marker.sessionID.uuidString.lowercased(), "00000000-0000-0000-0000-000000000444")
+        _ = try await actions.refreshSession()
+        XCTAssertFalse(composition.sessionAdapter.stopPending)
+        XCTAssertTrue(pendingStopKeys(defaults).isEmpty)
+        await assertFlag(composition, true)
+        let stops = await transport.count("stop_session")
+        XCTAssertEqual(stops, 0)
+        await composition.sessionAdapter.invalidate()
     }
 
     func testPendingStopMarkerCannotTravelToAnotherAccountOrBackend() async throws {
@@ -1047,4 +1162,13 @@ private actor SessionCredentialClearGate: SessionStore {
 @MainActor
 private func pendingStopKeys(_ defaults: UserDefaults) -> [String] {
     defaults.dictionaryRepresentation().keys.filter { $0.hasPrefix(PendingSessionStopStore.prefix) }.sorted()
+}
+
+@MainActor
+private func seedUnresolvedStop(_ defaults: UserDefaults) throws {
+    let owner = try JSONDecoder().decode(BackendStorageOwner.self,
+        from: XCTUnwrap(defaults.data(forKey: BackendStorageBinding.ownerKey)))
+    let id = try XCTUnwrap(UUID(uuidString: "00000000-0000-0000-0000-000000000444"))
+    try PendingSessionStopStore(defaults: defaults).save(.init(sessionID: id,
+        expiresAt: appBackendTestNow.addingTimeInterval(7200)), owner: owner)
 }
