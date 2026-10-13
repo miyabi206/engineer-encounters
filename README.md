@@ -1,128 +1,131 @@
-# Engineer Encounters
+# すれちがいエンジニア（Engineer Encounters）
+日本語 | [English](README.en.md)
 
-**すれちがいエンジニア**: an iPhone app for discovering the work of the engineers you cross paths with.
+**すれちがったエンジニアの作品を見つけよう。** 身近ですれちがったエンジニアの作品に出会えるiPhoneアプリです。
 
-Engineer Encounters helps engineers discover each other's work through chance encounters in the real world. When two people who use the app spend a couple of minutes near each other, for example at a meetup, on campus or on a train, with the app open on at least one phone, their phones notice each other over Bluetooth. Later, each of them can read the other's profile and the links that person chose to share, such as GitHub repositories and technical articles. Reading someone's work is valuable even when the two never talk, so nobody is ever asked to.
+すれちがいエンジニアは、日常の偶然のすれちがいを通じて、エンジニア同士がお互いの作品を見つけるためのアプリです。たとえば勉強会や学校、電車の中で、アプリの利用者2人が数分間近くにいて、少なくともどちらかがアプリを開いていれば、端末同士がBluetoothでお互いを検知します。あとから、相手のプロフィールと、GitHubリポジトリや技術記事など相手が公開しているリンクを見ることができます。会話をしなくても作品を読むだけで価値があるので、話しかける必要はありません。
 
-The app is free, with no ads and no purchases, and is for engineers aged 18 or older.
+18歳以上のエンジニアを対象とした無料のアプリで、広告もアプリ内課金もありません。
 
-## How it works
+## 使い方
 
-1. **Make your card.** Write a short introduction, pick your interests and add links to your work. You decide who can see each item.
-2. **Go about your day.** When you and another user stay within Bluetooth range for two minutes and at least one of you has the app open, both phones record the encounter. It may also work with the app in the background.
-3. **Read at your own pace.** Once a day, a daily report shows the engineers you encountered and what they share.
+1. **自分のカードを作ります。** 短い自己紹介を書き、興味のある分野を選んで、作品へのリンクを追加します。項目ごとに、誰に公開するかを自分で決められます。
+2. **いつもどおりに過ごします。** あなたとほかの利用者が、少なくともどちらかがアプリを開いた状態でBluetoothの届く範囲に2分以上いると、両方の端末にすれちがいが記録されます。アプリがバックグラウンドにあるときも、記録される場合があります。
+3. **自分のペースで作品を見ます。** 1日1回、毎日のレポートで、すれちがったエンジニアと、その人が公開している作品を確認できます。
 
-At an event, two people can also see each other right away, by both starting a session or by one scanning the other's QR code.
+イベントでは、2人ともセッションを開始するか、片方が相手のQRコードを読み取るQR交換で、お互いの情報をすぐに見ることもできます。
 
-## Privacy by design
+## プライバシーを守る設計
 
-- **No location.** The app never asks for or stores where you were, and it keeps the date of an encounter, not the time.
-- **No identity over Bluetooth.** Phones exchange only short-lived random values, and the token that stands for you changes every 15 minutes. Names, accounts and links never travel over the air.
-- **Both phones must agree.** The server confirms an encounter only when both phones report it, and everyday contacts shorter than two minutes are discarded, so nobody can collect cards by walking past.
-- **No "someone is nearby" alerts.** Everyday encounters are revealed later, in the daily report, never in real time.
-- **You control visibility.** Each profile field and link is shown to everyone you encounter, only to people whose purposes and interests match yours, or to nobody, and the server enforces that choice.
+- **位置情報を使いません。** どこにいたかを尋ねたり保存したりすることはありません。すれちがいは日付だけを記録し、時刻は記録しません。
+- **Bluetoothで個人を特定できる情報を送りません。** 端末間で交換するのは、有効期間の短いランダムな値だけです。あなたを表すトークンは15分ごとに変わります。名前、アカウント、リンクを無線で送ることはありません。
+- **両方の端末からの報告が必要です。** サーバーは、両方の端末が報告した場合にだけすれちがいを確認します。通常のすれちがいで2分に満たないものは破棄するため、通り過ぎるだけでカードを集めることはできません。
+- **「近くに誰かがいる」という通知はありません。** 通常のすれちがいは、リアルタイムでは表示せず、あとから毎日のレポートで届きます。
+- **公開範囲を自分で決められます。** プロフィールの各項目やリンクは、すれちがった相手全員、利用目的と興味のある分野が合う相手のみ、非公開のいずれかを選べます。この選択どおりに公開されるよう、サーバーが制御します。
 
-## Technologies
+## 使用技術
 
-| Area | Technology |
+| 分野 | 技術 |
 |---|---|
-| iOS app | Swift 6, SwiftUI, iOS 26 or later |
-| Proximity detection | Core Bluetooth; every phone acts as both central and peripheral |
-| On-device storage | SwiftData for encounter receipts, Keychain for tokens and sessions |
-| Backend | [Supabase](https://supabase.com): Auth, and PostgreSQL reached only through access-controlled SQL functions |
-| Tests | XCTest, pgTAP and Deno |
-| Tooling | XcodeGen and Swift Package Manager |
-| Languages | Japanese and English |
+| iOSアプリ | Swift 6、SwiftUI、iOS 26以降 |
+| 近くの端末の検知 | Core Bluetooth。各端末がセントラルとペリフェラルの両方として動作します |
+| 端末内の保存 | すれちがいの受領記録にはSwiftData、トークンとセッションにはKeychainを使用します |
+| バックエンド | [Supabase](https://supabase.com)：Authと、アクセス制御されたSQL関数経由でのみアクセスするPostgreSQL |
+| テスト | XCTest、pgTAP、Deno |
+| ツール | XcodeGen、Swift Package Manager |
+| 対応言語 | 日本語、英語 |
 
-## Project structure
+## プロジェクト構成
 
-- `ios/App`: the app entry point, which wires the packages together
-- `ios/Packages/EncounterDomain`: the encounter engine (exchange protocol, two-minute rule, token rotation), free of Bluetooth code so it is tested against a simulated radio
-- `ios/Packages/EncounterBluetooth`: the Core Bluetooth transport
-- `ios/Packages/EncounterStorage`: the SwiftData receipt queue and the Keychain token store
-- `ios/Packages/EncounterBackend`: the backend client for sign-in, token issue and receipt upload
-- `ios/Packages/EncounterUI`: the SwiftUI screens
-- `supabase/`: the database migrations and their tests
-- `docs/`: the specification, design and screen definitions
+- `ios/App`：各パッケージをつなぐアプリのエントリーポイントです。
+- `ios/Packages/EncounterDomain`：すれちがいのエンジンです。交換プロトコル、2分ルール、トークンの更新を扱います。Bluetoothのコードを含まないため、無線通信をシミュレートしてテストします。
+- `ios/Packages/EncounterBluetooth`：Core Bluetoothによる通信を担います。
+- `ios/Packages/EncounterStorage`：SwiftDataによる受領記録のキューと、Keychainによるトークンの保存を担います。
+- `ios/Packages/EncounterBackend`：サインイン、トークンの発行、受領記録のアップロードを行うバックエンドクライアントです。
+- `ios/Packages/EncounterUI`：SwiftUIの画面です。
+- `supabase/`：データベースのマイグレーションとそのテストです。
+- `docs/`：仕様、設計、画面定義です。
 
-## What you need
+## 必要なもの
 
-- A Mac with **Xcode 27.0** in the Applications folder. It includes Swift; when it first opens, let it install the iOS platform, which provides the iPhone simulator. The app requires iOS 26.0 or later.
-- [Homebrew](https://brew.sh), to install the other tools.
-- **XcodeGen** 2.46.0 or later, which creates the Xcode project file. Install it with `brew install xcodegen`.
+- 「アプリケーション」フォルダに**Xcode 27.0**をインストールしたMacが必要です。SwiftはXcodeに含まれています。初めて起動するときに、iPhoneシミュレータを含むiOSプラットフォームをインストールしてください。アプリにはiOS 26.0以降が必要です。
+- ほかのツールをインストールするために、[Homebrew](https://brew.sh)が必要です。
+- Xcodeのプロジェクトファイルを生成する**XcodeGen** 2.46.0以降が必要です。`brew install xcodegen`でインストールできます。
 
-## Build and run the app
+## アプリのビルドと実行
 
-1. Get the code:
+1. コードを取得します。
 
    ```sh
    git clone https://github.com/miyabi206/engineer-streetpass.git
    cd engineer-streetpass
    ```
 
-2. Create the Xcode project. It is generated from `ios/project.yml` and is not stored in git, so run this again after every `git pull` and whenever files under `ios/` are added, removed or renamed:
+2. Xcodeのプロジェクトを生成します。プロジェクトは`ios/project.yml`から生成され、gitには保存されていません。`git pull`のあとや、`ios/`内のファイルを追加、削除、名前変更したときは、その都度このコマンドを実行してください。
 
    ```sh
    xcodegen generate --spec ios/project.yml
    ```
 
-3. Open the project with `open ios/EngineerEncounters.xcodeproj`.
-4. In Xcode, choose the **EngineerEncounters** scheme and an iPhone simulator at the top of the window, then press **Run** (⌘R).
+3. `open ios/EngineerEncounters.xcodeproj`でプロジェクトを開きます。
+4. Xcodeのウィンドウ上部で**EngineerEncounters**スキームとiPhoneシミュレータを選び、**Run**（⌘R）を押します。
 
-To check from the terminal that the app builds, without running it:
+アプリを起動せずに、ターミナルからビルドできることを確認するには、次のコマンドを実行します。
 
 ```sh
 xcodebuild -project ios/EngineerEncounters.xcodeproj -scheme EngineerEncounters -configuration Development -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
 ```
 
-The simulator has no Bluetooth: you can look around the app there, but detecting another phone needs two real iPhones. Signing in needs a backend; see **Run the backend locally** below.
+シミュレータではBluetoothを使えません。アプリの画面を見ることはできますが、別の端末を検知するには実機のiPhoneが2台必要です。サインインにはバックエンドが必要です。下の**バックエンドをローカルで実行する**を参照してください。
 
-### Run on a real iPhone
+### 実機のiPhoneで実行する
 
-Copy the example settings file. The copy is ignored by git, so your values stay on your Mac.
+設定ファイルのサンプルをコピーします。コピーしたファイルはgitの管理対象外なので、設定値は自分のMacにだけ保存されます。
 
 ```sh
 cp ios/Config/Local.xcconfig.example ios/Config/Local.xcconfig
 ```
 
-In the copy, set `DEVELOPMENT_TEAM` to your Apple developer Team ID (the 10-character ID under Membership details at [developer.apple.com/account](https://developer.apple.com/account)) and `APP_BUNDLE_IDENTIFIER` to an identifier of your own. Then connect an iPhone that runs iOS 26.0 or later with Developer Mode turned on, pick it in Xcode and press **Run**.
+コピーしたファイルで、`DEVELOPMENT_TEAM`にAppleのチームID（[developer.apple.com/account](https://developer.apple.com/account)の「メンバーシップの詳細」にある10文字のID）を、`APP_BUNDLE_IDENTIFIER`に自分の識別子を設定してください。その後、iOS 26.0以降でデベロッパモードをオンにしたiPhoneを接続し、Xcodeでその端末を選んで**Run**を押します。
 
-## Run the backend locally
+## バックエンドをローカルで実行する
 
-You also need [Docker Desktop](https://www.docker.com/products/docker-desktop/) and the Supabase CLI, which you install with `brew install supabase/tap/supabase`. Start Docker Desktop, then run these from the repository root:
+[Docker Desktop](https://www.docker.com/products/docker-desktop/)とSupabase CLIも必要です。Supabase CLIは`brew install supabase/tap/supabase`でインストールできます。Docker Desktopを起動し、リポジトリのルートで次のコマンドを実行してください。
 
 ```sh
-supabase start      # starts the local backend; the first run downloads several images
-supabase db reset   # creates the database tables and loads the seed data
-supabase status     # shows the API URL and the keys
+supabase start      # ローカルのバックエンドを起動します。初回は複数のイメージをダウンロードします
+supabase db reset   # データベースのテーブルを作成し、シードデータを読み込みます
+supabase status     # APIのURLとキーを表示します
 ```
 
-To connect the app to it, put these two lines in `ios/Config/Local.xcconfig`. Create the file if it does not exist; if you copied it from the example, replace the two empty lines that have the same names. Use the publishable key that `supabase status` prints (older versions call it the anon key):
+アプリを接続するには、`ios/Config/Local.xcconfig`に次の2行を記入します。ファイルがなければ作成してください。サンプルをコピーして使っている場合は、同じ名前の空欄の2行を置き換えてください。`supabase status`が表示するpublishable keyを使います（古いバージョンではanon keyと呼ばれています）。
 
 ```
 DEVELOPMENT_BACKEND_URL = http:/$()/127.0.0.1:54321
 DEVELOPMENT_BACKEND_PUBLIC_KEY = <publishable key>
 ```
 
-Write `/$()/` instead of `//` in the address, because the settings file treats `//` as the start of a comment. `127.0.0.1` works from the simulator; a real iPhone needs an address it can reach. Stop the backend with `supabase stop`.
+設定ファイルでは`//`がコメントの開始として扱われるため、アドレスには`//`の代わりに`/$()/`と書きます。シミュレータからは`127.0.0.1`で接続できます。実機のiPhoneでは、その端末からアクセスできるアドレスが必要です。バックエンドは`supabase stop`で停止できます。
 
-## Run the tests
+## テストの実行
 
-Run these from the repository root:
+リポジトリのルートで次のコマンドを実行してください。
 
 ```sh
-swift test --package-path ios/Packages/EncounterDomain   # also EncounterBluetooth, EncounterStorage, EncounterBackend
-sh ios/Scripts/typecheck-app.sh Development              # type-checks the app without a full Xcode build
-supabase test db                                         # database tests; needs the local backend running
-deno test supabase/functions                             # Deno tests; needs Deno (brew install deno)
+swift test --package-path ios/Packages/EncounterDomain   # EncounterBluetooth、EncounterStorage、EncounterBackendも同様です
+sh ios/Scripts/typecheck-app.sh Development              # Xcodeでの完全なビルドを行わずにアプリの型をチェックします
+supabase test db                                         # データベースのテストです。ローカルのバックエンドを起動しておく必要があります
+deno test supabase/functions                             # Denoのテストです。Denoが必要です（brew install deno）
 ```
 
-## Documentation
+## ドキュメント
 
-- [docs/specification.md](docs/specification.md): the product requirements
-- [docs/ui.md](docs/ui.md): the screens
-- [docs/design.md](docs/design.md): the architecture, Bluetooth protocol and data model
+ドキュメントは英語で書かれています。
 
-## License
+- [docs/specification.md](docs/specification.md)：プロダクトの要件です。
+- [docs/ui.md](docs/ui.md)：画面の定義です。
+- [docs/design.md](docs/design.md)：アーキテクチャ、Bluetoothプロトコル、データモデルです。
+
+## ライセンス
 
 [Apache License 2.0](LICENSE)
