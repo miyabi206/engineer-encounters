@@ -1,10 +1,39 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import XCTest
 @testable import EncounterBackend
 
 @MainActor
 final class RedirectTests: XCTestCase {
     private let location = URL(string: "https://another-origin.example/collect")!
+
+    func testRealURLSessionTransportRefusesURLProtocolRedirectWithoutContactingTarget() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RedirectURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let transport = URLSessionHTTPTransport(session: session)
+        for status in [307, 308] {
+            RedirectURLProtocol.requests.reset()
+            var request = URLRequest(url: URL(string: "https://redirect-stub.example/\(status)")!, timeoutInterval: 2)
+            request.httpMethod = "POST"
+            request.httpBody = Data("synthetic-body".utf8)
+            request.setValue("Bearer synthetic-test-token", forHTTPHeaderField: "Authorization")
+            // Prove that the protocol stub really redirects an ordinary URLSession task.
+            let (_, followed) = try await session.data(for: request)
+            XCTAssertEqual((followed as? HTTPURLResponse)?.statusCode, 200)
+            XCTAssertEqual(RedirectURLProtocol.requests.hosts, ["redirect-stub.example", "redirect-target.example"])
+            RedirectURLProtocol.requests.reset()
+            let response = try await transport.sendWithoutRedirects(request)
+            XCTAssertEqual(response.statusCode, status)
+            XCTAssertEqual(RedirectURLProtocol.requests.hosts, ["redirect-stub.example"])
+            do { _ = try await transport.send(request); XCTFail("Credential transport must reject redirect status") }
+            catch { XCTAssertEqual(error as? BackendError, .transportFailure) }
+            XCTAssertEqual(RedirectURLProtocol.requests.hosts, ["redirect-stub.example", "redirect-stub.example"])
+        }
+    }
 
     func testAuthRequestsRefuse307And308WithoutInstallingOrClearingSessions() async throws {
         for status in [307, 308] {
@@ -117,4 +146,39 @@ final class RedirectTests: XCTestCase {
             }
         }
     }
+}
+
+private final class RedirectRequestLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String] = []
+    var hosts: [String] { lock.withLock { values } }
+    func append(_ host: String) { lock.withLock { values.append(host) } }
+    func reset() { lock.withLock { values = [] } }
+}
+
+private final class RedirectURLProtocol: URLProtocol, @unchecked Sendable {
+    static let requests = RedirectRequestLog()
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let url = request.url!
+        Self.requests.append(url.host!)
+        if url.host == "redirect-stub.example" {
+            let target = URL(string: "https://redirect-target.example/collect")!
+            let response = HTTPURLResponse(url: url, statusCode: Int(url.lastPathComponent)!,
+                httpVersion: "HTTP/1.1", headerFields: ["Location": target.absoluteString])!
+            var redirected = request
+            redirected.url = target
+            client?.urlProtocol(self, wasRedirectedTo: redirected, redirectResponse: response)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data("redirect-response".utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        } else {
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data("unexpected-follow".utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        }
+    }
+    override func stopLoading() {}
 }

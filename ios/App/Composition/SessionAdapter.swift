@@ -75,6 +75,9 @@ final class SessionAdapter: ObservableObject {
     private var upload: (id: UUID, task: Task<Void, any Error>)?
     private var discoveryStop: SessionHolder.Stop?
     private var retry: (id: UUID, task: Task<Void, Never>)?
+    private var activityReconciled = false
+    private var deletionSuspension: Task<Void, Never>?
+    private var rejectedAuthorizationEpoch: UUID?
 
     init(account: AccountModel, holder: SessionHolder, clock: any EncounterClock,
          isOnline: @escaping @MainActor () -> Bool, activities: SessionActivityCoordinator? = nil,
@@ -95,6 +98,10 @@ final class SessionAdapter: ObservableObject {
         self.backend = backend
         await holder.observe { [weak self] in self?.publish($0, allowSameVersion: false) }
         if let backend {
+            if let configuredEpoch, configuredEpoch != backend.epoch {
+                activities.end()
+                activityReconciled = false
+            }
             configuredEpoch = backend.epoch
             configuredOwner = backend.owner
             configuredFence = account.backendCallFence()
@@ -105,10 +112,12 @@ final class SessionAdapter: ObservableObject {
         }
         // Temporary storage/Keychain unavailability does not discard a same-account stop.
         // There is no service route until preparation recovers, but its non-secret marker stays.
+        if account.deletionSuspended { await suspendLocalClaimForDeletion() }
         await update()
     }
 
     func invalidate() async {
+        activityReconciled = true
         cancellationPoll?.job.cancel(); cancellationPoll = nil
         retry?.task.cancel(); retry = nil
         read?.task.cancel(); read = nil
@@ -120,6 +129,28 @@ final class SessionAdapter: ObservableObject {
 
     func refuseControlStart() { controlStartFailure = .unavailable; controlNeedsAccountRefresh = true }
 
+    func clearControlStartFailure() { controlStartFailure = nil; controlNeedsAccountRefresh = false }
+
+    func suspendForDeletion() {
+        clearControlStartFailure()
+        activities.end()
+        cancellationPoll?.job.cancel(); cancellationPoll = nil
+        retry?.task.cancel(); retry = nil
+        deletionSuspension = Task { await self.suspendLocalClaimForDeletion() }
+    }
+
+    func finishDeletionSuspension() async { await deletionSuspension?.value }
+
+    private func suspendLocalClaimForDeletion() async {
+        guard account.deletionSuspended, configuredEpoch == account.sessionGeneration,
+              let owner = configuredOwner else { return }
+        let snapshot = await holder.snapshot()
+        if !snapshot.stopPending {
+            _ = try? await holder.stop(owner: owner, force: false, requiringGet: true)
+        }
+        await update()
+    }
+
     func startFromControl() async {
         guard !controlStartInProgress, !account.deletionSuspended else { return }
         controlStartInProgress = true
@@ -128,6 +159,10 @@ final class SessionAdapter: ObservableObject {
         let epoch = account.sessionGeneration, fence = account.backendCallFence()
         let state = await presentationState()
         guard fence.isCurrent(), epoch == account.sessionGeneration, !account.deletionSuspended else { return }
+        guard !account.sessionChangeInProgress, state != .starting, state != .stopping else {
+            refuseControlStart()
+            return
+        }
         if case .active = state { controlStartFailure = nil; return }
         do {
             let actions = actions()
@@ -242,7 +277,7 @@ final class SessionAdapter: ObservableObject {
                             let authorized = await self.holder.canUploadStop(pending)
                             if !quarantined || authorized {
                                 try Task.checkCancellation()
-                                _ = try await backend.call(outgoing: true) { try await $0.session.stopSession() }
+                                _ = try await self.call(backend, outgoing: true) { try await $0.session.stopSession() }
                             }
                         }
                     } catch { /* The bounded outgoing attempt never owns a later retry. */ }
@@ -281,6 +316,7 @@ final class SessionAdapter: ObservableObject {
     }
 
     private func start(epoch: UUID) async throws -> SessionAcknowledgement {
+        clearControlStartFailure()
         let backend = try context(epoch: epoch)
         do {
             try await flushStop(backend)
@@ -345,6 +381,28 @@ final class SessionAdapter: ObservableObject {
         await update()
     }
 
+    /// Clear the marked claim immediately, then get before authorizing its stop.
+    func stopFromActivity(sessionID: String) async {
+        let epoch = account.sessionGeneration, fence = account.backendCallFence()
+        var current = await presentationState()
+        var gotSession = false
+        if case .active = current {} else {
+            guard let refreshed = try? await refresh(epoch: epoch) else { return }
+            current = refreshed; gotSession = true
+        }
+        guard fence.isCurrent(), epoch == account.sessionGeneration, !account.deletionSuspended,
+              !account.sessionChangeInProgress, case .active(let session) = current,
+              session.sessionID == sessionID, let owner = configuredOwner else { return }
+        do {
+            try await holder.stop(owner: owner, requiringGet: !gotSession)
+            await update()
+            if let backend { try await flushStop(backend) }
+        } catch {
+            if let backend { await handle(error, backend: backend, starting: false) }
+        }
+        await update()
+    }
+
     private func fetch(_ backend: SessionBackendServices, starting: Bool, outgoing: Bool = false) async throws -> SessionState {
         guard read == nil else { throw SessionActionError.unavailable }
         let request = try await holder.begin(owner: backend.owner, starting: starting)
@@ -353,7 +411,7 @@ final class SessionAdapter: ObservableObject {
             do {
                 guard await self.holder.isCurrent(request) else { throw SessionActionError.unavailable }
                 let operation: @MainActor () async throws -> SessionTransfer? = {
-                    try await backend.call(outgoing: outgoing) { services in
+                    try await self.call(backend, outgoing: outgoing) { services in
                         try Task.checkCancellation()
                         guard await self.holder.markSent(request) else { throw SessionActionError.unavailable }
                         if starting { return try await services.session.startSession() }
@@ -367,6 +425,7 @@ final class SessionAdapter: ObservableObject {
                 guard try await self.holder.receive(response, for: request, acceptingActive: !outgoing) else {
                     throw SessionActionError.unavailable
                 }
+                self.activityReconciled = true
                 return await self.holder.snapshot().state
             } catch {
                 await self.holder.fail(request, offline: starting && !self.isOnline(),
@@ -448,13 +507,13 @@ final class SessionAdapter: ObservableObject {
             guard backend.isCurrent, try await self.holder.pendingStop(owner: backend.owner) == stop,
                   await self.holder.canUploadStop(stop) else { return }
             if await self.holder.needsDiscoveryOff(stop) {
-                try await backend.call { try await $0.ownAccount.setDiscovery(enabled: false) }
+                try await self.call(backend) { try await $0.ownAccount.setDiscovery(enabled: false) }
                 if var profile = self.account.profile {
                     profile.discoveryOn = false
                     self.account.publishProfile(profile, stale: true)
                 }
             } else {
-                _ = try await backend.call { try await $0.session.stopSession() }
+                _ = try await self.call(backend) { try await $0.session.stopSession() }
             }
             try Task.checkCancellation()
             await self.holder.finish(stop)
@@ -472,10 +531,21 @@ final class SessionAdapter: ObservableObject {
         } else if self.backend === backend { failure = nil }
     }
 
+    private func call<Value>(_ backend: SessionBackendServices, outgoing: Bool = false,
+                             _ operation: @MainActor (SessionBackendServices.Services) async throws -> Value) async throws -> Value {
+        try await backend.call(outgoing: outgoing) { services in
+            do { return try await operation(services) }
+            catch {
+                if error as? BackendError == .notAuthenticated { self.rejectedAuthorizationEpoch = backend.epoch }
+                throw error
+            }
+        }
+    }
+
     private func handle(_ error: any Error, backend: SessionBackendServices, starting: Bool) async {
         guard self.backend === backend, account.hasCurrentSessionContext,
               account.sessionGeneration == backend.epoch, !account.sessionChangeInProgress else { return }
-        if error as? BackendError == .notAuthenticated {
+        if error as? BackendError == .notAuthenticated, rejectedAuthorizationEpoch == backend.epoch {
             await account.rejectDeadSession(generation: backend.epoch)
             return
         }
@@ -526,6 +596,9 @@ final class SessionAdapter: ObservableObject {
         if case .active = snapshot.state { controlStartFailure = nil; controlNeedsAccountRefresh = false }
         activities.receive(snapshot, displayName: account.profile?.displayName ?? "",
             isCurrent: account.hasCurrentSessionContext && account.state.isSignedIn &&
-                configuredEpoch == account.sessionGeneration && configuredFence?.isCurrent() == true)
+                configuredEpoch == account.sessionGeneration && configuredFence?.isCurrent() == true &&
+                !account.deletionSuspended,
+            awaitingReconciliation: !activityReconciled && !account.deletionSuspended &&
+                account.hasCurrentSessionContext && account.state != .signedOut && account.state != .unavailable)
     }
 }

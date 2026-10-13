@@ -111,7 +111,7 @@ actor SessionHolder {
         let time = await clock.now()
         await expire(at: time.monotonic)
         lastMonotonic = time.monotonic
-        guard self.owner == owner else { throw BackendError.notAuthenticated }
+        guard self.owner == owner else { throw SessionActionError.unavailable }
         guard request == nil, !loadingStop, pending == nil || (!starting && needsStopCheck(owner: owner)) else {
             throw BackendError.transportFailure
         }
@@ -282,7 +282,8 @@ actor SessionHolder {
     }
 
     @discardableResult
-    func stop(owner: BackendStorageOwner, discoveryOff: Bool = false, force: Bool = true) async throws -> Stop? {
+    func stop(owner: BackendStorageOwner, discoveryOff: Bool = false, force: Bool = true,
+              requiringGet: Bool = false) async throws -> Stop? {
         let time = await clock.now()
         lastMonotonic = time.monotonic
         await expire(at: time.monotonic)
@@ -321,6 +322,7 @@ actor SessionHolder {
         }
         if let marker {
             suppressed = marker
+            if requiringGet { checkingStop = pending }
             suppressionDeadline = deadline
             markerNeedsSaving = true
             try await persistMarker(owner: owner)

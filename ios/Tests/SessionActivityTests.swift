@@ -39,7 +39,7 @@ final class SessionActivityTests: XCTestCase {
     func testActivityStartsOnlyAfterAcknowledgementUpdatesOwnNameAndEndsBeforeServerStopCompletes() async throws {
         let controller = RecordingSessionActivityController()
         let clock = ManualEncounterClock(wall: appBackendTestNow.addingTimeInterval(400))
-        let transport = surfaceTransport(["start_session": [.held], "stop_session": [.held]])
+        let transport = surfaceTransport(["start_session": [.held], "get_own_session": [.response(surfaceSession(expiry: 1100))], "stop_session": [.held]])
         let composition = try surfaceComposition(transport, clock: clock, controller: controller)
         await composition.accountFlow.start()
         let starting = Task { try await composition.sessionAdapter.actions().startSession() }
@@ -151,8 +151,12 @@ final class SessionActivityTests: XCTestCase {
     }
 
     func testControlRoutesWelcomeOnboardingDiscoveryOffAndBluetoothWithoutStarting() async throws {
-        let signedOut = AppComposition(configuration: nil, defaults: AppInMemoryDefaults(), keychain: AppMemoryKeychain(),
+        let signedOut = AppComposition(configuration: appBackendTestConfiguration(), defaults: AppInMemoryDefaults(),
+            transport: ControlledAppBackendTransport([:]), keychain: AppMemoryKeychain(),
+            sessionStore: InMemorySessionStore(), serverTokenStore: InMemoryTokenBatchStore(),
+            signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { InMemoryReceiptQueue() },
             activityController: RecordingSessionActivityController())
+        XCTAssertEqual(signedOut.accountFlow.root, .restoring)
         await signedOut.startSessionFromControl()
         XCTAssertEqual(signedOut.accountFlow.root, .welcome)
         for scenario in ["basics", "interests", "firstLink", "permissions", "discovery", "radio"] {
@@ -165,10 +169,23 @@ final class SessionActivityTests: XCTestCase {
             }
             let transport = surfaceTransport([:], profile: profile)
             let composition = try surfaceComposition(transport, completed: scenario == "discovery" || scenario == "radio")
+            await composition.accountFlow.start()
+            if scenario == "discovery" || scenario == "radio" {
+                composition.productNavigation.push(.favorites, in: .discover)
+                composition.productNavigation.select(.settings)
+            } else {
+                let onboarding = try XCTUnwrap(composition.accountFlow.onboarding)
+                while onboarding.step != .basics { onboarding.back() }
+                onboarding.back()
+                XCTAssertEqual(composition.accountFlow.root, .welcome)
+            }
             await composition.startSessionFromControl()
             let starts = await transport.count("start_session")
             XCTAssertEqual(starts, 0, scenario)
-            if scenario == "discovery" { XCTAssertEqual(composition.productNavigation.discover, []) }
+            if scenario == "discovery" {
+                XCTAssertEqual(composition.productNavigation.selection, .discover)
+                XCTAssertEqual(composition.productNavigation.discover, [])
+            }
             else if scenario == "radio" { XCTAssertEqual(composition.productNavigation.discover, [.bluetooth]) }
             else {
                 XCTAssertEqual(composition.accountFlow.root, .onboarding)
@@ -199,7 +216,8 @@ final class SessionActivityTests: XCTestCase {
     }
 
     func testOldActivityStopCannotStopNewSessionAndFailedStopNeverRestoresActivity() async throws {
-        let transport = surfaceTransport(["start_session": [.response(surfaceSession())], "stop_session": [.failure]])
+        let transport = surfaceTransport(["start_session": [.response(surfaceSession())],
+            "get_own_session": [.response(surfaceSession())], "stop_session": [.failure]])
         let composition = try surfaceComposition(transport)
         await composition.accountFlow.start()
         _ = try await composition.sessionAdapter.actions().startSession()
@@ -213,7 +231,8 @@ final class SessionActivityTests: XCTestCase {
     }
 
     func testTemporaryServiceOutageStillClearsLocallyAndQueuesStop() async throws {
-        let transport = surfaceTransport(["start_session": [.response(surfaceSession())], "stop_session": [.response(surfaceNull)]])
+        let transport = surfaceTransport(["start_session": [.response(surfaceSession())],
+            "get_own_session": [.response(surfaceSession())], "stop_session": [.response(surfaceNull)]])
         let composition = try surfaceComposition(transport)
         await composition.accountFlow.start()
         _ = try await composition.sessionAdapter.actions().startSession()
@@ -258,22 +277,181 @@ final class SessionActivityTests: XCTestCase {
     }
 
     func testControlRoutesToDeletionBlockBothWhilePendingAndAfterFailure() async throws {
-        let transport = surfaceTransport(["delete_own_account": [.held]])
+        let transport = surfaceTransport(["delete_own_account": [.held], "start_session": [.response(surfaceSession())]])
         let composition = try surfaceComposition(transport)
         await composition.accountFlow.start()
         composition.runtime?.receive(.radioAvailability(.available))
+        _ = try await composition.sessionAdapter.actions().startSession()
+        XCTAssertNotNil(composition.sessionActivity.payload)
         let deleting = Task { try await composition.settingsSafetyAdapter.accountActions().deleteAccount() }
         try await appBackendEventually { await transport.isHeld("delete_own_account") }
         await composition.startSessionFromControl()
         XCTAssertTrue(composition.deletionSuspended)
+        XCTAssertNil(composition.sessionActivity.payload)
+        let activeDuringDeletion = await composition.sessionHolder.isActive()
+        XCTAssertFalse(activeDuringDeletion)
         let pendingStarts = await transport.count("start_session")
-        XCTAssertEqual(pendingStarts, 0)
+        XCTAssertEqual(pendingStarts, 1)
         await transport.release("delete_own_account", with: HTTPResponse(data: Data(), statusCode: 503))
         do { _ = try await deleting.value; XCTFail("Deletion should fail") } catch {}
         await composition.startSessionFromControl()
         XCTAssertTrue(composition.deletionSuspended)
         let failedStarts = await transport.count("start_session")
-        XCTAssertEqual(failedStarts, 0)
+        XCTAssertEqual(failedStarts, 1)
+    }
+
+    func testControlRefusesQuarantinedStartWithoutReadingOrClearingCancellation() async throws {
+        let defaults = appBackendDefaults(defaults: AppInMemoryDefaults())
+        let owner = try JSONDecoder().decode(BackendStorageOwner.self,
+            from: XCTUnwrap(defaults.data(forKey: BackendStorageBinding.ownerKey)))
+        let store = PendingSessionStopStore(defaults: defaults)
+        let marker = PendingSessionStopStore.CancelledStart(requestID: UUID())
+        try store.saveCancelledStart(marker, owner: owner)
+        let controller = RecordingSessionActivityController()
+        let transport = surfaceTransport([:])
+        let composition = try surfaceComposition(transport, controller: controller, defaults: defaults)
+        await composition.accountFlow.start()
+        composition.runtime?.receive(.radioAvailability(.available))
+        await composition.startSessionFromControl()
+        XCTAssertEqual(composition.sessionAdapter.controlStartFailure, .unavailable)
+        XCTAssertEqual(composition.productNavigation.discover, [.session])
+        XCTAssertEqual(composition.sessionAdapter.state, .stopping)
+        XCTAssertEqual(composition.account.state, .signedIn(appBackendTestUser))
+        XCTAssertEqual(try store.loadCancelledStart(owner: owner), marker)
+        let starts = await transport.count("start_session"), gets = await transport.count("get_own_session")
+        XCTAssertEqual(starts, 0); XCTAssertEqual(gets, 0)
+        XCTAssertNil(composition.sessionActivity.payload)
+        XCTAssertFalse(controller.calls.contains { $0 != nil })
+        let navigation = SessionNavigationActions(openQR: {}, openEncounter: { _ in }, close: {}, openDiscoveryOff: {})
+        let otherScene = ProductSessionPresentation()
+        await otherScene.open(adapter: composition.sessionAdapter, navigation: navigation)
+        XCTAssertEqual(otherScene.model?.state, .stopping)
+    }
+
+    func testRelaunchKeepsSurvivingActivityUntilSuccessfulGetAndNeverClaimsEarly() async throws {
+        for active in [true, false] {
+            let controller = RecordingSessionActivityController()
+            let transport = surfaceTransport(["get_own_session": [.failure, .held]])
+            let composition = try surfaceComposition(transport, controller: controller)
+            await composition.accountFlow.start()
+            await composition.sessionActivity.flush()
+            XCTAssertTrue(controller.calls.isEmpty, "Unknown state must leave the system activity alone")
+            let initialFlag = await composition.sessionHolder.isActive()
+            XCTAssertFalse(initialFlag)
+            do { _ = try await composition.sessionAdapter.actions().refreshSession(); XCTFail("First get fails") } catch {}
+            await composition.sessionActivity.flush()
+            XCTAssertTrue(controller.calls.isEmpty)
+            let refreshing = Task { try await composition.sessionAdapter.actions().refreshSession() }
+            try await appBackendEventually { await transport.isHeld("get_own_session") }
+            XCTAssertTrue(controller.calls.isEmpty)
+            await transport.release("get_own_session", with: active ? surfaceSession() : surfaceNull)
+            _ = try await refreshing.value
+            await composition.sessionActivity.flush()
+            XCTAssertFalse(controller.calls.isEmpty)
+            XCTAssertEqual(composition.sessionActivity.payload?.sessionID, active ? surfaceSessionID : nil)
+            let flag = await composition.sessionHolder.isActive()
+            XCTAssertEqual(flag, active)
+        }
+    }
+
+    func testActivityKeepsLastNameOnTransientProfileLossAndRetriesPresentationOnUpdateAndForeground() async throws {
+        let controller = RecordingSessionActivityController()
+        controller.skippedRequests = 1
+        let composition = try surfaceComposition(surfaceTransport(["start_session": [.response(surfaceSession())]]),
+            controller: controller)
+        await composition.accountFlow.start()
+        _ = try await composition.sessionAdapter.actions().startSession()
+        let payload = try XCTUnwrap(composition.sessionActivity.payload)
+        let attempts = controller.calls.count
+        composition.account.profile = nil
+        await composition.sessionAdapter.refreshActivity()
+        XCTAssertEqual(composition.sessionActivity.payload, payload)
+        XCTAssertGreaterThan(controller.calls.count, attempts)
+        let afterUpdate = controller.calls.count
+        await composition.sessionAdapter.foreground()
+        XCTAssertGreaterThan(controller.calls.count, afterUpdate)
+        XCTAssertEqual(controller.calls.last!, payload)
+        XCTAssertEqual(controller.presented, payload)
+    }
+
+    func testBluetoothActionDuringRuntimeRecreationIsLocalRefusalAndKeepsCredentials() async throws {
+        let keychain = HeldSurfaceKeychain()
+        let transport = surfaceTransport([:])
+        let composition = try surfaceComposition(transport, keychain: keychain)
+        await composition.accountFlow.start()
+        await keychain.holdNextRead()
+        let recreating = Task { await composition.account.sessionDidChange(true) }
+        try await appBackendEventually { await keychain.isHeld }
+        let epoch = composition.account.sessionGeneration
+        let actions = composition.account.profileActions {
+            try await composition.requestBluetooth()
+            return .available
+        }
+        do { _ = try await actions.requestBluetooth(); XCTFail("Recreation must refuse the permission action") }
+        catch { XCTAssertEqual(error as? ProfileActionError, .init(code: .unavailable)) }
+        XCTAssertEqual(composition.account.state, .signedIn(appBackendTestUser))
+        XCTAssertEqual(composition.account.sessionGeneration, epoch)
+        await composition.startSessionFromControl()
+        XCTAssertEqual(composition.sessionAdapter.controlStartFailure, .unavailable)
+        let starts = await transport.count("start_session"), gets = await transport.count("get_own_session")
+        XCTAssertEqual(starts, 0); XCTAssertEqual(gets, 0)
+        XCTAssertEqual(composition.account.sessionGeneration, epoch)
+        let session = try await composition.account.sessions?.session()
+        XCTAssertEqual(session?.userID, appBackendTestUser)
+        await keychain.release()
+        await recreating.value
+    }
+
+    func testActivityStopGetsBeforeStoppingAndDropsMarkedClaimOnNullOrDifferentAnswer() async throws {
+        for answer in ["marked", "none", "other", "failed"] {
+            let other = HTTPResponse(data: Data("""
+            {"session_id":"00000000-0000-0000-0000-000000000445","starts_at":1000,"expires_at":8200,"server_time":1000}
+            """.utf8), statusCode: 200)
+            let transport = surfaceTransport(["start_session": [.response(surfaceSession())],
+                "get_own_session": [.held], "stop_session": [.held]])
+            let composition = try surfaceComposition(transport)
+            await composition.accountFlow.start()
+            _ = try await composition.sessionAdapter.actions().startSession()
+            let stopping = Task { await composition.stopSessionFromActivity(sessionID: surfaceSessionID) }
+            try await appBackendEventually { await transport.isHeld("get_own_session") }
+            XCTAssertNil(composition.sessionActivity.payload)
+            let before = await transport.count("stop_session")
+            XCTAssertEqual(before, 0)
+            if answer == "failed" { await transport.releaseFailure("get_own_session") }
+            else {
+                await transport.release("get_own_session", with: answer == "marked" ? surfaceSession() :
+                    (answer == "other" ? other : surfaceNull))
+            }
+            if answer == "marked" {
+                try await appBackendEventually { await transport.isHeld("stop_session") }
+                await transport.release("stop_session", with: surfaceNull)
+            }
+            await stopping.value
+            let stops = await transport.count("stop_session")
+            XCTAssertEqual(stops, answer == "marked" ? 1 : 0)
+            XCTAssertEqual(composition.sessionAdapter.stopPending, answer == "failed")
+            XCTAssertEqual(composition.sessionActivity.payload?.sessionID, answer == "other" ?
+                "00000000-0000-0000-0000-000000000445" : nil)
+        }
+    }
+
+    func testControlFailureClearsOnLeavingS08ViewingSessionStartingAndAccountChange() async throws {
+        let composition = try surfaceComposition(surfaceTransport(["start_session": [.response(surfaceSession())]]))
+        await composition.accountFlow.start()
+        composition.sessionAdapter.refuseControlStart()
+        composition.sessionAdapter.clearControlStartFailure() // S08's disappearance hook.
+        XCTAssertNil(composition.sessionAdapter.controlStartFailure)
+        XCTAssertFalse(composition.sessionAdapter.controlNeedsAccountRefresh)
+        composition.sessionAdapter.refuseControlStart()
+        await composition.openSessionFromActivity()
+        XCTAssertNil(composition.sessionAdapter.controlStartFailure)
+        composition.sessionAdapter.refuseControlStart()
+        _ = try await composition.sessionAdapter.actions().startSession()
+        XCTAssertNil(composition.sessionAdapter.controlStartFailure)
+        composition.sessionAdapter.refuseControlStart()
+        await composition.sessionAdapter.authorizationWillBeDiscarded()
+        try await composition.account.signOut()
+        XCTAssertNil(composition.sessionAdapter.controlStartFailure)
     }
 
     func testActivityBodyOpensS08AndCoordinatorOrdersEndAfterDelayedUpdate() async throws {
@@ -302,7 +480,35 @@ final class SessionActivityTests: XCTestCase {
 @MainActor
 private final class RecordingSessionActivityController: SessionActivityControlling {
     var calls: [SessionActivityPayload?] = []
-    func apply(_ payload: SessionActivityPayload?) async { calls.append(payload) }
+    var skippedRequests = 0
+    var presented: SessionActivityPayload?
+    func apply(_ payload: SessionActivityPayload?) async {
+        calls.append(payload)
+        if payload != nil, skippedRequests > 0 { skippedRequests -= 1; return }
+        presented = payload
+    }
+}
+
+private actor HeldSurfaceKeychain: KeychainClient {
+    private let memory = AppMemoryKeychain()
+    private var shouldHold = false
+    private var continuation: CheckedContinuation<Void, Never>?
+    var isHeld: Bool { continuation != nil }
+    func holdNextRead() { shouldHold = true }
+    func release() { continuation?.resume(); continuation = nil }
+    func read(service: String, account: String) async throws -> Data? {
+        if shouldHold {
+            shouldHold = false
+            await withCheckedContinuation { continuation = $0 }
+        }
+        return try await memory.read(service: service, account: account)
+    }
+    func writeOrReplace(_ data: Data, service: String, account: String) async throws {
+        try await memory.writeOrReplace(data, service: service, account: account)
+    }
+    func delete(service: String, account: String) async throws {
+        try await memory.delete(service: service, account: account)
+    }
 }
 
 @MainActor
@@ -346,12 +552,12 @@ private func surfaceTransport(_ plans: [String: [ControlledAppBackendTransport.R
 private func surfaceComposition(_ transport: any HTTPTransport,
     clock: ManualEncounterClock = ManualEncounterClock(),
     controller: (any SessionActivityControlling)? = nil, completed: Bool = true, defaults suppliedDefaults: UserDefaults? = nil,
-    online: @escaping @MainActor () -> Bool = { true }) throws -> AppComposition {
+    online: @escaping @MainActor () -> Bool = { true }, keychain: any KeychainClient = AppMemoryKeychain()) throws -> AppComposition {
     let defaults = suppliedDefaults ?? appBackendDefaults()
     if completed { OnboardingCompletionStore(defaults: defaults).finish(appBackendTestUser) }
     return AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults,
         notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
-        transport: transport, keychain: AppMemoryKeychain(), sessionStore: InMemorySessionStore(session: try appBackendTestSession()),
+        transport: transport, keychain: keychain, sessionStore: InMemorySessionStore(session: try appBackendTestSession()),
         serverTokenStore: InMemoryTokenBatchStore(), signedOutTokenStore: InMemoryTokenBatchStore(),
         queueOpener: { InMemoryReceiptQueue() }, transportFactory: {
             await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)

@@ -130,7 +130,8 @@ public final class DiscoverModel: ObservableObject {
             guard current(token), resource == feedEpoch else { return }
             authorizeRead()
             feedContentEpoch &+= 1
-            feed = result.cards.filter { (removedAt[$0.id] ?? 0) <= removals && concealedCards[$0.id] == nil }; feedTruncated = result.truncated; feedState = .loaded
+            feed = mergeReauthorized(result.cards, into: feed, removals: removals, id: { $0.id })
+            feedTruncated = result.truncated; feedState = .loaded
         } catch {
             guard current(token), resource == feedEpoch else { return }
             if let failure = error as? ProfileActionError,
@@ -176,7 +177,8 @@ public final class DiscoverModel: ObservableObject {
             guard current(token), resource == favoritesEpoch else { return }
             authorizeRead()
             favoritesContentEpoch &+= 1
-            favorites = result.cards.filter { (removedAt[$0.id] ?? 0) <= removals && concealedCards[$0.id] == nil }; favoritesTruncated = result.truncated; favoritesState = .loaded
+            favorites = mergeReauthorized(result.cards, into: favorites, removals: removals, id: { $0.id })
+            favoritesTruncated = result.truncated; favoritesState = .loaded
         } catch {
             guard current(token), resource == favoritesEpoch else { return }
             handleReadFailure(error); favoritesState = .failed
@@ -194,7 +196,8 @@ public final class DiscoverModel: ObservableObject {
             guard current(token), resource == savedEpoch else { return }
             authorizeRead()
             savedContentEpoch &+= 1
-            savedLinks = result.links.filter { (removedAt[$0.encounterID] ?? 0) <= removals && concealedCards[$0.encounterID] == nil }; savedLinksTruncated = result.truncated; savedLinksState = .loaded
+            savedLinks = mergeReauthorized(result.links, into: savedLinks, removals: removals, id: { $0.encounterID })
+            savedLinksTruncated = result.truncated; savedLinksState = .loaded
         } catch {
             guard current(token), resource == savedEpoch else { return }
             handleReadFailure(error); savedLinksState = .failed
@@ -247,6 +250,22 @@ public final class DiscoverModel: ObservableObject {
 
     private func current(_ token: UInt) -> Bool { token == epoch && canLoad }
     private func authorizeRead() { isAuthorized = true; canRetryAuthorization = false }
+
+    /// A list requested before a card's fresh authorization cannot replace that card,
+    /// including by omission. Later list requests remain authoritative for their IDs.
+    private func mergeReauthorized<Value>(_ incoming: [Value], into existing: [Value], removals: UInt,
+                                         id: (Value) -> String) -> [Value] {
+        let preserved = existing.enumerated().filter {
+            (removedAt[id($0.element)] ?? 0) > removals && concealedCards[id($0.element)] == nil
+        }
+        var result = Array(incoming.filter {
+            (removedAt[id($0)] ?? 0) <= removals && concealedCards[id($0)] == nil
+        }.prefix(max(0, 200 - preserved.count)))
+        for entry in preserved {
+            result.insert(entry.element, at: min(entry.offset, result.count))
+        }
+        return result
+    }
 
     private func currentWrite(_ token: UInt, id: String, removals: UInt) -> Bool {
         guard current(token) else { return false }

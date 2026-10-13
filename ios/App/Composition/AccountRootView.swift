@@ -49,16 +49,10 @@ struct AccountRootView: View {
                 case .profileUnavailable:
                     NavigationStack {
                         VStack(spacing: 16) {
-                            if sessionAdapter.controlStartFailure != nil {
-                                Text(SessionSurfaceStrings.text("startFailed"))
-                                Button(AccountStrings.text("retry")) { Task { await composition.startSessionFromControl() } }
-                            } else {
-                                Text(AccountStrings.text("profileError"))
-                                Button(AccountStrings.text("retry")) { Task { await flow.refresh() } }
-                            }
+                            Text(AccountStrings.text("profileError"))
+                            Button(AccountStrings.text("retry")) { Task { await flow.refresh() } }
                             diagnosticsLink
                         }.padding()
-                        .navigationTitle(sessionAdapter.controlStartFailure == nil ? "" : SessionSurfaceStrings.text("session"))
                     }
                 case .onboarding:
                     if let model = flow.onboarding { OnboardingView(model: model) }

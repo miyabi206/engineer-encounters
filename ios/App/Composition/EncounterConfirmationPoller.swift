@@ -27,9 +27,14 @@ final class EncounterConfirmationPoller {
     private var confirmed = false
     private var knownFeedIDs: Set<String> = []
     private var hasSuccessfulFeed = false
-    private var baselineBeforeIssue = false
-    private var codeHasBaseline = false
-    private var codeGeneration = UUID()
+    private var baselineBeforeIssue: Set<String>?
+    private struct CodeBaseline {
+        let id = UUID()
+        var ids: Set<String>
+    }
+    private var codeBaseline: CodeBaseline?
+    private var retiredBaselines: [CodeBaseline] = []
+    private var qrVisit = UUID()
     private var lastReadAt: TimeInterval?
     private var reloadRequested = false
     private var qrSubscriptions: Set<AnyCancellable> = []
@@ -58,14 +63,15 @@ final class EncounterConfirmationPoller {
         if canReload { requestReload() }
     }
 
-    func receive(authorized: Bool) {
-        guard self.authorized != authorized else { return }
+    func receive(authorized: Bool, preservingVisibility: Bool = false) {
+        guard self.authorized != authorized || (!authorized && !preservingVisibility) else { return }
         self.authorized = authorized
         pause()
-        if !authorized {
+        if !authorized, !preservingVisibility {
             sessionVisible = false; sessionWasActive = false; sessionActive = false
             qrVisible = false; qr = nil; knownFeedIDs = []; hasSuccessfulFeed = false
-            codeHasBaseline = false; qrSubscriptions = []
+            codeBaseline = nil; retiredBaselines = []; baselineBeforeIssue = nil; qrSubscriptions = []
+            qrVisit = UUID()
         } else if canReload { requestReload() }
     }
 
@@ -97,21 +103,24 @@ final class EncounterConfirmationPoller {
         }
         qr = model; qrVisible = true; showingCode = model.code != nil
         showingSegment = model.segment == .show; confirmed = model.hasConfirmed
-        codeHasBaseline = false; baselineBeforeIssue = false; codeGeneration = UUID()
+        codeBaseline = nil; retiredBaselines = []; baselineBeforeIssue = nil; qrVisit = UUID()
+        // Remember IDs for deduplication, but require a successful read in this visit.
+        hasSuccessfulFeed = false
         qrSubscriptions = []
         await reload()
         guard qr === model, qrVisible else { return }
         model.$isIssuing.dropFirst().sink { [weak self] issuing in
             guard let self, issuing else { return }
-            self.baselineBeforeIssue = self.hasSuccessfulFeed
-            self.codeHasBaseline = false; self.codeGeneration = UUID()
+            self.baselineBeforeIssue = self.hasSuccessfulFeed ? self.knownFeedIDs : nil
         }.store(in: &qrSubscriptions)
         model.$code.dropFirst().sink { [weak self] code in
             guard let self else { return }
             let replacing = self.showingCode
             self.showingCode = code != nil
-            self.codeGeneration = UUID()
-            self.codeHasBaseline = code != nil && self.baselineBeforeIssue
+            // Known IDs only grow: the oldest unchecked baseline covers later
+            // retirements too, without accumulating one record per refresh tap.
+            if let previous = self.codeBaseline, self.retiredBaselines.isEmpty { self.retiredBaselines = [previous] }
+            self.codeBaseline = code == nil ? nil : self.baselineBeforeIssue.map { CodeBaseline(ids: $0) }
             if replacing { self.requestReload() }
             else { Task { [weak self] in self?.schedule() } }
         }.store(in: &qrSubscriptions)
@@ -131,7 +140,7 @@ final class EncounterConfirmationPoller {
     func closeQR(_ model: QRModel) {
         guard qr === model else { return }
         qrVisible = false; qr = nil; qrSubscriptions = []
-        showingCode = false; codeHasBaseline = false; codeGeneration = UUID()
+        showingCode = false; codeBaseline = nil; retiredBaselines = []; baselineBeforeIssue = nil; qrVisit = UUID()
         if !canPoll { pause() }
     }
 
@@ -155,26 +164,33 @@ final class EncounterConfirmationPoller {
             return
         }
         lastReadAt = time.monotonic; reloadRequested = false
-        let id = UUID(), token = generation, codeToken = codeGeneration
+        let id = UUID(), token = generation, visit = qrVisit
+        let baselines = retiredBaselines + (codeBaseline.map { [$0] } ?? [])
         let qrAtStart = qr
         let task = Task { [weak self] in
             guard let self, self.canReload, self.generation == token else { return }
             guard let cards = await self.load(), self.canReload, self.generation == token else { return }
-            let known = self.knownFeedIDs
             self.knownFeedIDs.formUnion(cards.map(\.id))
-            self.hasSuccessfulFeed = true
+            if self.qrVisit == visit { self.hasSuccessfulFeed = true }
             guard let qrAtStart, self.qr === qrAtStart, self.qrVisible,
-                  self.codeGeneration == codeToken, self.codeHasBaseline, self.showingCode,
-                  self.showingSegment, !self.confirmed, qrAtStart.isCodeValid else { return }
+                  self.qrVisit == visit, !baselines.isEmpty, !self.confirmed else { return }
             let now = await self.clock.now()
-            guard self.canReload, self.generation == token, self.codeGeneration == codeToken else { return }
+            guard self.canReload, self.generation == token, self.qrVisit == visit else { return }
             let date = self.calendar().dateComponents([.year, .month, .day], from: now.wall)
             let today = EncounterDay(year: date.year!, month: date.month!, day: date.day!)
             // The feed has no code provenance. A hidden same-day QR returning inside
             // this code's 120 seconds remains indistinguishable from redemption.
-            if let new = cards.first(where: { $0.card.kind == .qr && $0.day == today && !known.contains($0.id) }) {
+            if self.showingSegment, let new = cards.first(where: { card in
+                card.card.kind == .qr && card.day == today && baselines.contains { !$0.ids.contains(card.id) }
+            }) {
                 self.confirmed = true
                 self.confirm(qrAtStart, new.id)
+            } else {
+                let checked = Set(baselines.map(\.id))
+                self.retiredBaselines.removeAll { checked.contains($0.id) }
+                if var current = self.codeBaseline, checked.contains(current.id) {
+                    current.ids.formUnion(cards.map(\.id)); self.codeBaseline = current
+                }
             }
         }
         loading = (id, task)

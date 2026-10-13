@@ -36,12 +36,25 @@ extension AppComposition {
         defer { sessionControlInProgress = false }
         await accountFlow.start()
         guard !deletionSuspended else { return }
+        let initialState = await sessionAdapter.presentationState()
+        guard !account.sessionChangeInProgress, !account.state.isSignedIn || sessionControlAvailable,
+              initialState != .starting, initialState != .stopping else {
+            sessionAdapter.refuseControlStart()
+            if accountFlow.root == .settings { showSessionFromSurface() }
+            return
+        }
         if sessionAdapter.controlNeedsAccountRefresh { await accountFlow.refresh() }
         guard !deletionSuspended else { return }
         // Expire the holder even if its timer could not execute while suspended.
         let epoch = account.sessionGeneration
         let state = await sessionAdapter.presentationState()
         guard epoch == account.sessionGeneration else { return }
+        guard !account.sessionChangeInProgress, !account.state.isSignedIn || sessionControlAvailable,
+              state != .starting, state != .stopping else {
+            sessionAdapter.refuseControlStart()
+            if accountFlow.root == .settings { showSessionFromSurface() }
+            return
+        }
         let active: Bool
         if case .active = state { active = true } else { active = false }
         let completed: Bool
@@ -79,6 +92,7 @@ extension AppComposition {
     func openSessionFromActivity() async {
         await accountFlow.start()
         guard !deletionSuspended else { return }
+        sessionAdapter.clearControlStartFailure()
         if accountFlow.root == .settings { showSessionFromSurface() }
     }
 
@@ -89,17 +103,7 @@ extension AppComposition {
     func stopSessionFromActivity(sessionID: String) async {
         await waitForRestoration()
         guard !deletionSuspended else { return }
-        let epoch = account.sessionGeneration
-        let fence = account.backendCallFence()
-        var state = await sessionAdapter.presentationState()
-        // Process loss restores no active claim: verify the current account's session
-        // before honoring a surviving button. Existing queued stops retain their get fence.
-        if case .active = state {} else {
-            state = (try? await sessionAdapter.actions().refreshSession()) ?? .none
-        }
-        guard fence.isCurrent(), epoch == account.sessionGeneration, !deletionSuspended,
-              case .active(let session) = state, session.sessionID == sessionID else { return }
-        try? await sessionAdapter.actions().stopSession()
+        await sessionAdapter.stopFromActivity(sessionID: sessionID)
     }
 }
 

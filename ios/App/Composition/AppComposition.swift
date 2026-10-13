@@ -51,6 +51,9 @@ final class AppComposition: ObservableObject {
     private let uploadScheduler: any ReceiptUploadScheduler
     private var restorationTask: Task<Void, Never>?
     private var sessionChangeInProgress = false
+    var sessionControlAvailable: Bool {
+        !sessionChangeInProgress && !account.sessionChangeInProgress && !deletionSuspended && storageReady && !keychainUnavailable
+    }
     @Published private(set) var deletionState = AccountSettingsDeletionState.idle
     @Published private(set) var deletionError: ProfileActionError?
     @Published private(set) var checkingDeletionAccount = false
@@ -207,9 +210,19 @@ final class AppComposition: ObservableObject {
         self.productLifecycle.$phase.removeDuplicates().sink { [weak confirmationPoller] phase in
             confirmationPoller?.receive(foreground: phase == .active)
         }.store(in: &productSubscriptions)
-        account.$state.removeDuplicates().sink { [weak confirmationPoller] state in
-            if case .signedIn = state { confirmationPoller?.receive(authorized: true) }
-            else { confirmationPoller?.receive(authorized: false) }
+        account.$state.removeDuplicates().sink { [weak confirmationPoller, weak sessionAdapter] state in
+            sessionAdapter?.clearControlStartFailure()
+            if case .signedIn = state {
+                confirmationPoller?.receive(authorized: true)
+                if case .active = sessionAdapter?.state { confirmationPoller?.receive(sessionActive: true) }
+            } else {
+                let pending: Bool
+                switch state {
+                case .restoring, .signedInPending: pending = true
+                default: pending = false
+                }
+                confirmationPoller?.receive(authorized: false, preservingVisibility: pending)
+            }
         }.store(in: &productSubscriptions)
         account.$profile.dropFirst().sink { [weak sessionAdapter] _ in
             Task { await sessionAdapter?.refreshActivity() }
@@ -367,7 +380,9 @@ final class AppComposition: ObservableObject {
 
     func requestBluetooth() async throws {
         await waitForRestoration()
-        guard !sessionChangeInProgress, !account.deletionSuspended else { throw BackendError.notAuthenticated }
+        guard !sessionChangeInProgress, !account.deletionSuspended, storageReady, !keychainUnavailable else {
+            throw ProfileActionError(code: .unavailable)
+        }
         try await makeRuntime().requestBluetooth()
     }
 
@@ -435,6 +450,7 @@ final class AppComposition: ObservableObject {
         guard !deletionSuspended else { return }
         deletionState = .pending
         account.suspendForDeletion()
+        sessionAdapter.suspendForDeletion()
         confirmationPoller.receive(authorized: false)
         isParticipating = false
         runtime?.suspendForAccountChange()
@@ -499,6 +515,7 @@ final class AppComposition: ObservableObject {
                     self.deletionState = .failed
                 }
             }
+            await self.sessionAdapter.finishDeletionSuspension()
             await self.runtime?.stop()
             do {
                 let deleted = try await self.settingsSafetyAdapter.performDeletion(epoch, fence: fence)

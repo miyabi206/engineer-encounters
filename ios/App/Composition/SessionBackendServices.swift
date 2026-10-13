@@ -67,7 +67,7 @@ final class SessionBackendServices {
     private func requireSession(outgoing: Bool) throws {
         if !outgoing, account.deletionSuspended { throw CancellationError() }
         guard isCurrent, account.state.isSignedIn, !account.sessionCleanupPending,
-              outgoing || (!account.sessionChangeInProgress && !account.deletionSuspended) else { throw BackendError.notAuthenticated }
+              outgoing || (!account.sessionChangeInProgress && !account.deletionSuspended) else { throw BackendError.storageFailure }
         guard account.canRefreshSession() else { throw BackendError.storageFailure }
     }
 }

@@ -195,8 +195,43 @@ final class DiscoverRetentionTests: XCTestCase {
             XCTAssertFalse(model.feed.contains { $0.id == "card" && !$0.card.isShell })
             XCTAssertFalse(model.favorites.contains { $0.id == "card" })
             XCTAssertFalse(model.savedLinks.contains { $0.encounterID == "card" })
-            XCTAssertEqual(model.feed.map(\.id), ["other"])
+            XCTAssertEqual(model.feed.map(\.id), ["card", "other"])
+            XCTAssertEqual(model.feed.first?.card, model.card?.card)
         }
+    }
+
+    func testListsRequestedDuringConcealmentPreserveReauthorizedCardAndLaterListsCanRemoveIt() async {
+        let driver = DiscoverTestDriver()
+        driver.cards = [retainedCard(favorite: true, saved: true), DiscoverTestDriver.card(id: "other")]
+        let model = driver.model()
+        await model.loadFeed(); await model.loadFavorites(); await model.loadSavedLinks()
+        let oldFeed = driver.feedResult, oldSaved = driver.savedResult
+        let cardGate = DiscoverTestGate<EncounterDetail?>()
+        driver.cardHook = { _ in try await cardGate.wait() }
+        let removing = Task { await model.setFavorite("card", favorite: false) }
+        await cardGate.entered()
+        let feedGate = DiscoverTestGate<EncounterCardList>(), favoritesGate = DiscoverTestGate<EncounterCardList>()
+        let savedGate = DiscoverTestGate<EncounterSavedLinkList>()
+        driver.feedHook = { try await feedGate.wait() }
+        driver.favoritesHook = { try await favoritesGate.wait() }
+        driver.savedHook = { try await savedGate.wait() }
+        let feed = Task { await model.loadFeed() }, favorites = Task { await model.loadFavorites() }
+        let saved = Task { await model.loadSavedLinks() }
+        await feedGate.entered(); await favoritesGate.entered(); await savedGate.entered()
+        var fresh = retainedCard(favorite: true, saved: true)
+        fresh = .init(card: .init(id: "card", kind: .ambient, day: expiredDay, displayName: "Fresh name",
+                                 links: [DiscoverTestDriver.link()]), favorite: true, savedLinkIDs: ["link"])
+        cardGate.resolve(.success(fresh)); await removing.value
+        feedGate.resolve(.success(oldFeed)); favoritesGate.resolve(.success(oldFeed)); savedGate.resolve(.success(oldSaved))
+        await feed.value; await favorites.value; await saved.value
+        XCTAssertEqual(model.feed.first?.card, fresh.card)
+        XCTAssertEqual(model.favorites.first?.card, fresh.card)
+        XCTAssertEqual(model.savedLinks.map(\.encounterID), ["card"])
+        driver.feedHook = { .init(cards: [], truncated: false) }
+        driver.favoritesHook = { .init(cards: [], truncated: false) }
+        driver.savedHook = { .init(links: [], truncated: false) }
+        await model.loadFeed(); await model.loadFavorites(); await model.loadSavedLinks()
+        XCTAssertTrue(model.feed.isEmpty); XCTAssertTrue(model.favorites.isEmpty); XCTAssertTrue(model.savedLinks.isEmpty)
     }
 
     func testExtendingAccessKeepsOptimisticContentWithoutCardReload() async {

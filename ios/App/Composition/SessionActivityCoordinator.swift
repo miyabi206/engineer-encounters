@@ -8,7 +8,7 @@ struct SessionActivityPayload: Equatable, Sendable {
     let content: SessionActivityAttributes.ContentState
 
     static func select(snapshot: SessionHolder.Snapshot, displayName: String) -> Self? {
-        guard case .active(let session) = snapshot.state, !snapshot.stopPending, !displayName.isEmpty,
+        guard case .active(let session) = snapshot.state, !snapshot.stopPending,
               let end = snapshot.activityEndsAt else { return nil }
         return Self(sessionID: session.sessionID,
             content: .init(displayName: displayName, endsAt: end, isActive: true))
@@ -32,12 +32,28 @@ final class SessionActivityCoordinator: ObservableObject {
     private let controller: any SessionActivityControlling
     private var received = false
     private var pending: Task<Void, Never>?
+    private var lastDisplayName = ""
 
     init(controller: any SessionActivityControlling) { self.controller = controller }
 
-    func receive(_ snapshot: SessionHolder.Snapshot, displayName: String, isCurrent: Bool = true) {
-        let next = isCurrent ? SessionActivityPayload.select(snapshot: snapshot, displayName: displayName) : nil
-        guard !received || payload != next else { return }
+    func receive(_ snapshot: SessionHolder.Snapshot, displayName: String, isCurrent: Bool = true,
+                 awaitingReconciliation: Bool = false) {
+        if isCurrent, !displayName.isEmpty { lastDisplayName = displayName }
+        let next = isCurrent ? SessionActivityPayload.select(snapshot: snapshot, displayName: lastDisplayName) : nil
+        // Process restoration owns no claim, but cannot decide a surviving activity yet.
+        if awaitingReconciliation, next == nil, !snapshot.stopPending { return }
+        if next == nil { lastDisplayName = "" }
+        // A disabled or failed Activity.request is retried on the next holder update.
+        guard !received || payload != next || next != nil else { return }
+        enqueue(next)
+    }
+
+    func end() {
+        lastDisplayName = ""
+        enqueue(nil)
+    }
+
+    private func enqueue(_ next: SessionActivityPayload?) {
         received = true; payload = next
         let previous = pending, controller = controller
         pending = Task {
@@ -66,9 +82,14 @@ final class SystemSessionActivityController: SessionActivityControlling {
             }
         }
         guard let payload else { return }
-        let content = ActivityContent(state: payload.content, staleDate: payload.content.endsAt)
+        // A background get may precede the profile read on relaunch. A matching
+        // system activity already has the last authorized own display name.
+        let name = payload.content.displayName.isEmpty ? (matching?.content.state.displayName ?? "") : payload.content.displayName
+        let state = SessionActivityAttributes.ContentState(displayName: name,
+            endsAt: payload.content.endsAt, isActive: payload.content.isActive)
+        let content = ActivityContent(state: state, staleDate: payload.content.endsAt)
         if let matching { await matching.update(content) }
-        else if ActivityAuthorizationInfo().areActivitiesEnabled {
+        else if !name.isEmpty, ActivityAuthorizationInfo().areActivitiesEnabled {
             // No push token or entitlement. Failure to present never changes the session.
             _ = try? Activity.request(attributes: SessionActivityAttributes(sessionID: payload.sessionID),
                 content: content, pushType: nil)

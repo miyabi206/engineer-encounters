@@ -152,29 +152,17 @@ private struct ProductSessionView: View {
     }
     var body: some View {
         Group {
-            if let failure = adapter.controlStartFailure, adapter.state != .stopping, adapter.state != .starting {
+            if let failure = adapter.controlStartFailure {
                 VStack(spacing: 16) {
                     Text(SessionSurfaceStrings.text(failure == .offline ? "startOffline" : "startFailed"))
                     Button(AccountStrings.text("retry")) { Task { await retryStart() } }
                         .disabled(adapter.controlStartInProgress)
                     Button(AccountStrings.text("back"), action: navigation.close)
+                    if adapter.state == .stopping || adapter.state == .starting { sessionContent }
                 }
                 .padding()
                 .navigationTitle(SessionSurfaceStrings.text("session"))
-            } else if let model = presentation.model {
-                SessionView(model: model, navigation: navigation, hasRevealedEncounters: !cards.isEmpty) {
-                    ForEach(cards) { item in
-                        Button { navigation.openEncounter(item.id) } label: {
-                            VStack(alignment: .leading) {
-                                if let name = item.card.displayName { Text(name) }
-                                if let introduction = item.card.introduction { Text(introduction) }
-                                if let link = item.card.links.first { Text(link.title) }
-                                Text(item.day.formatted(locale: .current))
-                            }
-                        }
-                    }
-                }
-            } else { ProgressView() }
+            } else { sessionContent }
         }
         .task {
             await presentation.open(adapter: adapter, navigation: navigation)
@@ -184,7 +172,23 @@ private struct ProductSessionView: View {
         .onChange(of: adapter.controlStartFailure) { _, failure in
             if failure == nil { Task { await presentation.reload(adapter: adapter, navigation: navigation) } }
         }
-        .onDisappear { poller.closeSession() }
+        .onDisappear { poller.closeSession(); adapter.clearControlStartFailure() }
+    }
+    @ViewBuilder private var sessionContent: some View {
+        if let model = presentation.model {
+            SessionView(model: model, navigation: navigation, hasRevealedEncounters: !cards.isEmpty) {
+                ForEach(cards) { item in
+                    Button { navigation.openEncounter(item.id) } label: {
+                        VStack(alignment: .leading) {
+                            if let name = item.card.displayName { Text(name) }
+                            if let introduction = item.card.introduction { Text(introduction) }
+                            if let link = item.card.links.first { Text(link.title) }
+                            Text(item.day.formatted(locale: .current))
+                        }
+                    }
+                }
+            }
+        } else { ProgressView() }
     }
     private var cards: [EncounterFeedCard] { discover.feed.filter { $0.card.kind == .session } }
 }

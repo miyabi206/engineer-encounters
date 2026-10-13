@@ -82,8 +82,7 @@ extension AccountModel {
                     let bluetooth = try await fence.call {
                         do { return try await requestBluetooth() }
                         catch {
-                            rejected = error as? BackendError == .notAuthenticated ||
-                                (error as? ProfileActionError)?.code == .notAuthenticated
+                            rejected = error as? BackendError == .notAuthenticated
                             throw error
                         }
                     }

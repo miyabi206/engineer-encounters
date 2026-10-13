@@ -7,6 +7,106 @@ import XCTest
 
 @MainActor
 final class EncounterConfirmationPollerTests: XCTestCase {
+    func testQRVisitRequiresNewSuccessfulBaselineEvenWhenPreviousVisitOrS08Succeeded() async throws {
+        for priorQR in [false, true] {
+            let clock = ManualEncounterClock(), scheduler = ManualReceiptUploadScheduler()
+            var cards: [EncounterFeedCard]? = []
+            var opened: [String] = []
+            let qr = pollQR { opened.append($0) }
+            let poller = EncounterConfirmationPoller(clock: clock, scheduler: scheduler, load: { cards },
+                confirm: { model, id in model.receiveConfirmedEncounter(id) })
+            poller.receive(authorized: true); poller.receive(foreground: true)
+            if priorQR { await poller.openQR(qr); await qr.appear(); poller.closeQR(qr); qr.disappear() }
+            else { await poller.openSession(); poller.closeSession() }
+            // Within the read interval, this visit cannot reuse the previous read.
+            cards = nil
+            await poller.openQR(qr); await qr.appear()
+            try await appBackendEventually { scheduler.jobs.last?.cancelled == false }
+            let index = scheduler.jobs.count - 1
+            try await firePoll(index, clock: clock, scheduler: scheduler)
+            cards = [pollCard("preexisting", kind: .qr)]
+            try await appBackendEventually { scheduler.jobs.count > index + 1 }
+            try await firePoll(scheduler.jobs.count - 1, clock: clock, scheduler: scheduler)
+            XCTAssertTrue(opened.isEmpty)
+            XCTAssertNotNil(qr.code)
+            poller.closeQR(qr); qr.disappear()
+        }
+    }
+
+    func testFinalIntervalRedemptionIsComparedWithExpiredOrReplacedCodesBaseline() async throws {
+        for replacing in [false, true] {
+            let clock = ManualEncounterClock(), scheduler = ManualReceiptUploadScheduler()
+            var monotonic: TimeInterval = 0
+            var issued = 0
+            var cards: [EncounterFeedCard] = []
+            var opened: [String] = []
+            let qr = QRModel(actions: .init(issueCode: {
+                issued += 1
+                if issued > 1, !replacing { throw QRActionError.rateLimited }
+                return QRCode(payload: QRPayload(token: String(repeating: issued == 1 ? "a" : "b", count: 32))!,
+                    expiresAt: EncounterSamples.observationTime.addingTimeInterval(120))
+            }, cancelCode: { _ in }, redeemCode: { _ in "unused" }),
+                navigation: pollNavigation { opened.append($0) }, monotonicNow: { monotonic })
+            let poller = EncounterConfirmationPoller(clock: clock, scheduler: scheduler, load: { cards },
+                confirm: { model, id in model.disappear(); model.receiveConfirmedEncounter(id) })
+            poller.receive(authorized: true); poller.receive(foreground: true)
+            await poller.openQR(qr); await qr.appear()
+            try await appBackendEventually { scheduler.jobs.count == 1 }
+            // A redemption lands after the last read, before code retirement.
+            cards = [pollCard("last-interval", kind: .qr)]
+            if replacing { await qr.refreshCode() }
+            else { monotonic = 120; await qr.tick() }
+            try await appBackendEventually { scheduler.jobs.count >= 2 && scheduler.jobs.last?.cancelled == false }
+            try await firePoll(scheduler.jobs.count - 1, clock: clock, scheduler: scheduler)
+            XCTAssertEqual(opened, ["last-interval"])
+            XCTAssertTrue(qr.hasConfirmed)
+            poller.closeQR(qr)
+        }
+    }
+
+    func testHeldFinalReadCanConfirmAfterCodeWasReplaced() async throws {
+        let clock = ManualEncounterClock(), scheduler = ManualReceiptUploadScheduler()
+        var resume: CheckedContinuation<[EncounterFeedCard]?, Never>?
+        var reads = 0
+        var opened: [String] = []
+        let qr = pollQR { opened.append($0) }
+        let poller = EncounterConfirmationPoller(clock: clock, scheduler: scheduler, load: {
+            reads += 1
+            if reads == 1 { return [] }
+            return await withCheckedContinuation { resume = $0 }
+        }, confirm: { model, id in model.receiveConfirmedEncounter(id) })
+        poller.receive(authorized: true); poller.receive(foreground: true)
+        await poller.openQR(qr); await qr.appear()
+        try await appBackendEventually { scheduler.jobs.count == 1 }
+        await clock.advance(by: 5)
+        let reading = Task { await scheduler.jobs[0].operation() }
+        try await appBackendEventually { resume != nil }
+        await qr.refreshCode()
+        resume?.resume(returning: [pollCard("redeemed-old-code", kind: .qr)])
+        await reading.value
+        XCTAssertEqual(opened, ["redeemed-old-code"])
+        poller.closeQR(qr); qr.disappear()
+    }
+
+    func testVisibleActiveSessionResumesPollingAfterTransientAuthorizationPending() async throws {
+        let clock = ManualEncounterClock(), scheduler = ManualReceiptUploadScheduler()
+        var reads = 0
+        let poller = EncounterConfirmationPoller(clock: clock, scheduler: scheduler,
+            load: { reads += 1; return [] }, confirm: { _, _ in })
+        poller.receive(authorized: true); poller.receive(foreground: true); poller.receive(sessionActive: true)
+        await poller.openSession()
+        try await appBackendEventually { scheduler.jobs.count == 1 }
+        poller.receive(authorized: false, preservingVisibility: true)
+        XCTAssertTrue(scheduler.jobs[0].cancelled)
+        poller.receive(authorized: true); poller.receive(sessionActive: true)
+        try await appBackendEventually { scheduler.jobs.count == 2 }
+        try await firePoll(1, clock: clock, scheduler: scheduler)
+        XCTAssertEqual(reads, 2)
+        try await appBackendEventually { scheduler.jobs.count == 3 }
+        poller.closeSession()
+        XCTAssertTrue(scheduler.jobs[2].cancelled)
+    }
+
     func testShowingPhoneConfirmsOnlyANewQRAndLeavesConsumedCode() async throws {
         let clock = ManualEncounterClock()
         let scheduler = ManualReceiptUploadScheduler()
