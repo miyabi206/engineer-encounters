@@ -45,7 +45,7 @@ begin
     if not private.account_is_ready(caller) then
         perform private.raise_error('account_not_ready');
     end if;
-    if not exists (select 1 from private.profiles as p where p.user_id = caller and p.discovery_on) then
+    if not private.effective_discovery_on(caller) then
         perform private.raise_error('prerequisite_missing', array['discovery']);
     end if;
     if private.record_account_event(caller, 'start_session', 20, interval '1 hour') then
@@ -93,9 +93,15 @@ create function private.get_own_session()
 returns jsonb language plpgsql security definer set search_path = '' as $$
 declare
     caller uuid := private.require_caller();
-    server_time timestamptz := pg_catalog.clock_timestamp();
+    server_time timestamptz;
     active_session private.sessions%rowtype;
 begin
+    perform private.lock_link_account(caller);
+    if exists (select 1 from private.profiles as p where p.user_id = caller and p.discovery_on)
+        and private.countable_link_count(caller) = 0 then
+        perform private.turn_discovery_off(caller);
+    end if;
+    server_time := pg_catalog.clock_timestamp();
     select s.* into active_session from private.sessions as s
     where s.user_id = caller and s.starts_at <= server_time and server_time < s.expires_at
       and s.stopped_at is null
@@ -117,7 +123,7 @@ begin
     if not private.account_is_ready(caller) then
         perform private.raise_error('account_not_ready');
     end if;
-    if not exists (select 1 from private.profiles as p where p.user_id = caller and p.discovery_on) then
+    if not private.effective_discovery_on(caller) then
         perform private.raise_error('prerequisite_missing', array['discovery']);
     end if;
     if private.record_account_event(caller, 'issue_qr_code', 30, interval '1 hour') then
@@ -224,7 +230,7 @@ begin
     if not private.account_is_ready(caller) then
         perform private.raise_error('account_not_ready');
     end if;
-    if not exists (select 1 from private.profiles as p where p.user_id = caller and p.discovery_on) then
+    if not private.effective_discovery_on(caller) then
         perform private.raise_error('prerequisite_missing', array['discovery']);
     end if;
     if input_code is null or input_code !~ '^[0-9a-f]{32}$' then
@@ -252,12 +258,12 @@ begin
     if not private.account_is_ready(caller) then
         perform private.raise_error('account_not_ready');
     end if;
-    if not exists (select 1 from private.profiles as p where p.user_id = caller and p.discovery_on) then
+    if not private.effective_discovery_on(caller) then
         perform private.raise_error('prerequisite_missing', array['discovery']);
     end if;
     if not code_available or code_deadline <= server_seconds or not exists (select 1 from auth.users as u where u.id = issuer)
         or not private.account_is_ready(issuer)
-        or not exists (select 1 from private.profiles as p where p.user_id = issuer and p.discovery_on)
+        or not private.effective_discovery_on(issuer)
         or exists (select 1 from private.blocks as b
             where (b.blocker_id = caller and b.blocked_id = issuer)
                or (b.blocker_id = issuer and b.blocked_id = caller)) then
@@ -323,8 +329,7 @@ begin
     if not exists (select 1 from private.user_interests as i where i.user_id = caller) then
         missing_fields := pg_catalog.array_append(missing_fields, 'interest');
     end if;
-    if not exists (select 1 from private.external_links as l where l.owner_id = caller
-        and (l.source <> 'github' or private.github_identity_is_live(l.owner_id))) then
+    if private.countable_link_count(caller) = 0 then
         missing_fields := pg_catalog.array_append(missing_fields, 'link');
     end if;
     if pg_catalog.cardinality(missing_fields) > 0 then

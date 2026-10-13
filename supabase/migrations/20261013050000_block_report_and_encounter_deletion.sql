@@ -1,10 +1,10 @@
 alter table private.blocks
     add column block_id uuid not null default pg_catalog.gen_random_uuid(),
     add column placed_day date;
-update private.blocks as b set placed_day = (pg_catalog.now() at time zone coalesce((
+update private.blocks as b set placed_day = coalesce(private.try_time_zone((
     select z.name from private.notification_preferences as n
     join private.iana_time_zones as z on z.name = n.time_zone where n.user_id = b.blocker_id
-), 'UTC'))::date;
+), pg_catalog.now()), pg_catalog.timezone('UTC', pg_catalog.now()))::date;
 alter table private.blocks alter column placed_day set not null;
 create unique index blocks_block_id_idx on private.blocks (block_id);
 create index blocks_blocker_day_idx on private.blocks (blocker_id, placed_day desc, block_id);
@@ -34,6 +34,26 @@ create index reports_encounter_idx on private.reports (encounter_id);
 create index reports_link_idx on private.reports (link_id);
 alter table private.reports enable row level security;
 revoke all on table private.reports from public, anon, authenticated, service_role;
+
+-- A saved reference retains a view only while its link is currently shareable.
+-- This deliberately ignores expiry: an authorized save is itself a retention reason.
+create or replace function private.has_visible_saved_link(viewer_id uuid, input_encounter_id uuid)
+returns boolean language sql stable set search_path = '' as $$
+    select exists (
+        select 1 from private.encounters as e
+        join private.saved_links as s on s.encounter_id = e.encounter_id and s.viewer_id = $1
+        join private.external_links as l on l.link_id = s.link_id
+            and l.owner_id = case when e.user_a = $1 then e.user_b else e.user_a end
+        join private.profiles as owner on owner.user_id = l.owner_id and owner.moderation_state = 'active'
+        join private.profiles as viewer on viewer.user_id = $1 and viewer.moderation_state = 'active'
+        cross join lateral private.encounter_authorization($1, l.owner_id) as a
+        where e.encounter_id = $2 and $1 in (e.user_a, e.user_b) and a.eligible
+          and (l.visibility = 'everyone_eligible' or (l.visibility = 'compatible_only' and a.compatible))
+          and (l.source <> 'github' or private.github_identity_is_live(l.owner_id))
+          and not exists (select 1 from private.reports as r
+              where r.reporter_id = $1 and r.subject_id = l.owner_id)
+    );
+$$;
 
 -- Authorization and sort facts contain no card payload. Both branches share
 -- the same gates; an explicit ID array probes encounters and views by PK.
@@ -70,13 +90,8 @@ language sql stable security definer set search_path = '' as $$
         select z.name from (select $1 as viewer_id) as viewer
         left join private.notification_preferences as n on n.user_id = viewer.viewer_id
         left join private.iana_time_zones as z on z.name = n.time_zone
-    ), retained as materialized (
-        select c.* from candidates as c cross join viewer_zone as z
-        where c.favorite or exists (select 1 from private.saved_links as s
-            where s.viewer_id = $1 and s.encounter_id = c.encounter_id)
-          or pg_catalog.now() < private.try_time_zone(z.name, (c.day + 30)::timestamp)
     ), counterparts as materialized (
-        select distinct r.counterpart_id from retained as r
+        select distinct c.counterpart_id from candidates as c
     ), owners as materialized (
         select p.user_id, a.compatible,
             case when exists (select 1 from private.field_visibility as f
@@ -90,6 +105,16 @@ language sql stable security definer set search_path = '' as $$
               where viewer.user_id = $1 and viewer.moderation_state = 'active')
           and ($4 or not exists (select 1 from private.reports as r
               where r.reporter_id = $1 and r.subject_id = p.user_id))
+    ), retained as materialized (
+        select c.* from candidates as c join owners as o on o.user_id = c.counterpart_id cross join viewer_zone as z
+        where c.favorite or exists (select 1 from private.saved_links as s
+            join private.external_links as l on l.link_id = s.link_id and l.owner_id = c.counterpart_id
+            where s.viewer_id = $1 and s.encounter_id = c.encounter_id
+              and (l.visibility = 'everyone_eligible' or (l.visibility = 'compatible_only' and o.compatible))
+              and (l.source <> 'github' or private.github_identity_is_live(l.owner_id))
+              and (not $4 or not exists (select 1 from private.reports as r
+                  where r.reporter_id = $1 and r.subject_id = c.counterpart_id)))
+          or pg_catalog.now() < private.try_time_zone(z.name, (c.day + 30)::timestamp)
     )
     select r.encounter_id, r.counterpart_id, r.kind, r.day, r.favorite,
         o.compatible, o.shared_interest_count
@@ -286,7 +311,8 @@ begin
         select z.name into zone_name from private.notification_preferences as n
         join private.iana_time_zones as z on z.name = n.time_zone where n.user_id = viewer_id;
         insert into private.blocks (blocker_id, blocked_id, placed_day)
-        values (viewer_id, peer, (pg_catalog.now() at time zone coalesce(zone_name, 'UTC'))::date)
+        values (viewer_id, peer, coalesce(private.try_time_zone(zone_name, pg_catalog.now()),
+            pg_catalog.timezone('UTC', pg_catalog.now()))::date)
         on conflict (blocker_id, blocked_id) do nothing;
         select pg_catalog.jsonb_build_object('block_id', b.block_id, 'placed_day', b.placed_day)
         into result from private.blocks as b where b.blocker_id = viewer_id and b.blocked_id = peer;
@@ -424,7 +450,8 @@ begin
         where r.subject_id = subject and r.status = 'open') >= 3 then
         -- A threshold may hide an active account; it never overrides suspension
         -- or records an operator decision, and never automatically reactivates.
-        update private.profiles as p set moderation_state = 'hidden'
+        -- A new automatic hide supersedes the prior dismissal for queue ordering.
+        update private.profiles as p set moderation_state = 'hidden', operator_outcome = null
         where p.user_id = subject and p.moderation_state = 'active';
     end if;
     return pg_catalog.jsonb_build_object('report_id', new_report, 'status', 'open');
@@ -484,11 +511,13 @@ declare result jsonb;
 begin
     perform private.require_operator(account_id);
     with limited as (
-        select p.user_id, p.moderation_state, p.operator_outcome
+        select p.user_id, p.moderation_state, p.operator_outcome,
+            (p.operator_outcome is null or exists (select 1 from private.reports as r
+                where r.subject_id = p.user_id and r.status = 'open')) as awaiting_review
         from private.profiles as p where p.moderation_state <> 'active'
-        order by (p.operator_outcome is not null), p.user_id limit 201
+        order by awaiting_review desc, p.user_id limit 201
     ), numbered as (
-        select p.*, pg_catalog.row_number() over (order by (p.operator_outcome is not null), p.user_id) as position from limited as p
+        select p.*, pg_catalog.row_number() over (order by p.awaiting_review desc, p.user_id) as position from limited as p
     )
     select pg_catalog.jsonb_build_object('accounts', coalesce(pg_catalog.jsonb_agg(
         pg_catalog.jsonb_build_object('account_id', p.user_id, 'moderation_state', p.moderation_state,

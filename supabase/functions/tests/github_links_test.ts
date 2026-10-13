@@ -652,7 +652,7 @@ Deno.test("github-links: uncached handle comes from numeric profile and IDs reta
   const f = fixture();
   f.identity.handle = null;
   equal(await call(f, REQUEST), { status: 200, value: { preview: PREVIEW } });
-  equal(f.events.filter((e) => e.startsWith("github:")), [`github:/user/${USER_ID}`, "github:/repos/octocat/toolkit", "github:/repos/octocat/toolkit/readme"]);
+  equal(f.events.filter((e) => e.startsWith("github:")), [`github:/user/${USER_ID}`, "github:/users/octocat/social_accounts", "github:/repos/octocat/toolkit", "github:/repos/octocat/toolkit/readme"]);
   const bound = fixture({ github: (url, _, state) => url.pathname.endsWith("/toolkit") ? upstream({ ...state.repo, id: "9223372036854775807" }) : undefined });
   equal(await call(bound, { ...REQUEST, repository_id: "9223372036854775807" }), { status: 200, value: { preview: { ...PREVIEW, repository_id: "9223372036854775807" } } });
   for (const text of [
@@ -660,4 +660,43 @@ Deno.test("github-links: uncached handle comes from numeric profile and IDs reta
     JSON.stringify(REPO).replace(`"${REPO_ID}"`, "9.007199254740995e15"),
     JSON.stringify(REPO).replace(`"${REPO_ID}"`, "9223372036854775808"),
   ]) await expectError(fixture({ github: () => new Response(text, { headers: { "content-type": "application/json" } }) }), REQUEST, 400, "prerequisite_missing", ["github_reader"]);
+});
+
+Deno.test("github-links: unsynced repository actions establish cache before repository fetch reservations", async () => {
+  for (const body of [REQUEST, SAVE, { action: "refresh_preview", link_id: LINK }]) {
+    let synced = false;
+    const f = fixture({
+      rpc: (name) => {
+        if (name === "sync_github_identity") synced = true;
+        if (name === "save_github_link") check(synced, "Save requires the established cache");
+      },
+      github: (url) => {
+        if (url.pathname.startsWith("/repos/")) check(synced, "Sync must precede repository reads");
+      },
+    });
+    f.identity.handle = null;
+    equal((await call(f, body)).status, 200);
+    equal(f.events, [
+      "auth", "rpc:get_github_identity",
+      "rpc:record_github_fetch", `github:/user/${USER_ID}`,
+      "rpc:record_github_fetch", "github:/users/octocat/social_accounts", "rpc:sync_github_identity",
+      "rpc:record_github_fetch", "github:/repos/octocat/toolkit",
+      "rpc:record_github_fetch", "github:/repos/octocat/toolkit/readme",
+      ...(body.action === "save_repository" ? ["rpc:save_github_link"] : []),
+    ], "Every attempt has its own reservation; sync finishes before repository budget is spent");
+    equal(f.parameters.find((p) => p.name === "sync_github_identity")?.body.provider_user_id, USER_ID);
+  }
+});
+
+Deno.test("github-links: failed first sync spends no repository fetch budget for any repository action", async () => {
+  for (const body of [REQUEST, SAVE, { action: "refresh_preview", link_id: LINK }]) {
+    const f = fixture({ rpc: (name) => name === "sync_github_identity"
+      ? json({ message: "not_found", details: null }, 404) : undefined });
+    f.identity.handle = null;
+    await expectError(f, body, 404, "not_found");
+    equal(f.events, [
+      "auth", "rpc:get_github_identity", "rpc:record_github_fetch", `github:/user/${USER_ID}`,
+      "rpc:record_github_fetch", "github:/users/octocat/social_accounts", "rpc:sync_github_identity",
+    ]);
+  }
 });

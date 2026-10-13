@@ -74,8 +74,8 @@ from (values (1), (3), (9), (10), (11), (12), (13), (15)) as f(n);
 -- Binding/error contract 5 + unlink and lock witnesses 11 + repeat/merge 16
 -- + expired replacement 5 + expired/empty deletion 6 + restore binding/locks 5
 -- + immutable binding 1 + unblock 6 + calendar/cleanup locks 8
--- + live Apple exclusivity/race 10 + unusable zone cleanup 3 = 76.
-select extensions.plan(76);
+-- + live Apple exclusivity/race 11 + unusable zone cleanup 3 = 77.
+select extensions.plan(77);
 
 select extensions.is((select pg_catalog.array_agg(a.attname::text order by a.attnum)
     from pg_catalog.pg_attribute as a where a.attrelid = 'private.apple_identity_bindings'::regclass
@@ -108,12 +108,17 @@ select deletion_review_test.error('select private.bind_apple_identity(deletion_r
     'second live account cannot bind an Apple hash and receives no identifier detail');
 select deletion_review_test.error('select deletion_review_test.declare_account(14)','account_not_ready','',
     'declarations refuse the already bound Apple identity');
-select deletion_review_test.error('select deletion_review_test.call(14,''select public.delete_own_account()'')','account_not_ready','',
-    'public deletion refuses the already bound Apple identity without leaking a hash');
 select deletion_review_test.error('select private.restore_deletion_safety(deletion_review_test.id(14))','account_not_ready','',
     'restoration cannot consume safety records through an identity bound to another account');
+update private.profiles set moderation_state='suspended',operator_outcome='suspended' where user_id=deletion_review_test.id(14);
+insert into private.blocks (blocker_id,blocked_id,placed_day)
+values (deletion_review_test.id(2),deletion_review_test.id(14),date '2026-10-10');
+select extensions.is(deletion_review_test.call(14,'select public.delete_own_account()'),'{"deleted":true}'::jsonb,
+    'unbound caller can delete despite its Apple identity belonging to another live binding');
 select extensions.ok(not exists(select 1 from private.apple_identity_bindings where account_id=deletion_review_test.id(14))
-    and exists(select 1 from auth.users where id=deletion_review_test.id(14)), 'refused binding/deletion leaves the second account intact and unbound');
+    and not exists(select 1 from auth.users where id=deletion_review_test.id(14)), 'deletion leaves the second account erased and unbound');
+select extensions.ok(not exists(select 1 from private.deletion_safety_records where apple_id_hash=
+    (select hash from review_results where label='apple-1')), 'second-account deletion transfers neither sanction nor blocks to the first binding');
 select extensions.is((select apple_id_hash from private.apple_identity_bindings where account_id=deletion_review_test.id(1)),
     (select hash from review_results where label='apple-1'),'second-account refusals preserve the first binding');
 delete from auth.identities where user_id=deletion_review_test.id(14);
@@ -268,11 +273,12 @@ from pg_catalog.pg_proc as p where p.oid = 'private.restore_deletion_safety(uuid
 
 -- Force a competing binding after the precheck to exercise the uniqueness
 -- handler and its subtransaction rollback, without a second test session.
+-- Account 15 is still live with its own Apple identity; account 14 was deleted.
 create function deletion_review_test.binding_race()
 returns trigger language plpgsql set search_path = '' as $$
 begin
     insert into private.apple_identity_bindings(account_id,apple_id_hash)
-    values (deletion_review_test.id(14),new.apple_id_hash);
+    values (deletion_review_test.id(15),new.apple_id_hash);
     return new;
 end;
 $$;
@@ -282,8 +288,11 @@ select deletion_review_test.error('select deletion_review_test.declare_account(1
     'a concurrent binding uniqueness failure exposes only account_not_ready');
 select extensions.ok(not exists(select 1 from private.apple_identity_bindings where account_id=deletion_review_test.id(13)),
     'failed binding race leaves the caller unbound');
-select extensions.ok(not exists(select 1 from private.apple_identity_bindings where account_id=deletion_review_test.id(14)),
-    'failed binding race rolls back the injected competitor');
+select extensions.ok(exists(select 1 from auth.users where id=deletion_review_test.id(15))
+    and exists(select 1 from auth.identities where user_id=deletion_review_test.id(15)
+        and provider='apple' and provider_id='review-fixture-15')
+    and not exists(select 1 from private.apple_identity_bindings where account_id=deletion_review_test.id(15)),
+    'failed binding race rolls back the injected competitor while its Apple account remains live');
 drop trigger binding_race on private.apple_identity_bindings;
 select private.bind_apple_identity(deletion_review_test.id(13));
 update auth.identities set provider_id = 'changed-review-13', identity_data = '{"sub":"changed-review-13"}'

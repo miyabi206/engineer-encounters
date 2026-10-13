@@ -411,7 +411,9 @@ select extensions.ok((select operator_outcome is null from private.profiles wher
 select safety_test.expect_error(pg_catalog.format('select safety_test.call(1,%L,safety_test.id(102),''spam'',%s)',
     op.name, case when op.name in ('save','unsave') then 'safety_test.link_id(2)' else 'null' end),
     'not_found','','retained report: subject-wide ' || op.name || ' denied')
-from (values ('card'),('favorite'),('save'),('unsave'),('delete'),('report')) as op(name);
+from (values ('card'),('favorite'),('save'),('delete'),('report')) as op(name);
+select extensions.is(safety_test.call(1,'unsave',safety_test.id(102),null,safety_test.link_id(2))->'saved',
+    'false'::jsonb,'reporter can drop own reference after reporting the counterpart');
 select extensions.is(pg_catalog.jsonb_array_length(safety_test.call(1,op.name)->op.collection),1,
     'report hides both subject encounters from ' || op.name || ', unrelated owner remains')
 from (values ('feed','cards'),('favorites','cards'),('saved','links')) as op(name,collection);
@@ -604,11 +606,13 @@ begin
             0::bigint,state_value || ': shared gate returns no facts');
         return next safety_test.expect_error($q$select safety_test.call(1,'card',safety_test.id(101))$q$,
             'not_found','',state_value || ': card refused');
-        foreach operation in array array['favorite','save','unsave','block','delete'] loop
+        foreach operation in array array['favorite','save','block','delete'] loop
             return next safety_test.expect_error(pg_catalog.format(
                 'select safety_test.call(1,%L,safety_test.id(101),null,safety_test.link_id(2))',operation),
                 'not_found','',state_value || ': ' || operation || ' refused');
         end loop;
+        return next extensions.is(safety_test.call(1,'unsave',safety_test.id(101),null,safety_test.link_id(2))->'saved',
+            'false'::jsonb,state_value || ': caller can drop their own saved reference');
         return next safety_test.expect_error($q$select safety_test.call(1,'report',safety_test.id(101),'spam')$q$,
             'account_not_ready','',state_value || ': report requires an active caller');
         foreach operation in array array['feed','daily'] loop
@@ -622,8 +626,8 @@ begin
         return next extensions.is((select pg_catalog.count(*) from private.reports),0::bigint,
             state_value || ': failed report inserts nothing');
         return next extensions.ok((select pg_catalog.bool_and(favorite) from private.encounter_views where viewer_id=safety_test.id(1))
-            and (select pg_catalog.count(*) from private.saved_links where viewer_id=safety_test.id(1))=3,
-            state_value || ': refused writes preserve favorites and saved references');
+            and (select pg_catalog.count(*) from private.saved_links where viewer_id=safety_test.id(1))=2,
+            state_value || ': refused writes preserve favorites and the other saved references');
         return next extensions.is((select moderation_state from private.profiles where user_id=safety_test.id(2)),
             'active',state_value || ': failed safety action does not change the subject');
     end loop;

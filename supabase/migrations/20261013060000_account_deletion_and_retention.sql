@@ -172,7 +172,8 @@ begin
         select z.name into zone_name from private.notification_preferences as n
         join private.iana_time_zones as z on z.name = n.time_zone where n.user_id = viewer_id;
         insert into private.blocks (blocker_id, blocked_id, placed_day)
-        values (viewer_id, peer, (pg_catalog.now() at time zone coalesce(zone_name, 'UTC'))::date)
+        values (viewer_id, peer, coalesce(private.try_time_zone(zone_name, pg_catalog.now()),
+            pg_catalog.timezone('UTC', pg_catalog.now()))::date)
         on conflict (blocker_id, blocked_id) do nothing;
         select pg_catalog.jsonb_build_object('block_id', b.block_id, 'placed_day', b.placed_day)
         into result from private.blocks as b where b.blocker_id = viewer_id and b.blocked_id = peer;
@@ -220,7 +221,11 @@ begin
     if not found then perform private.raise_error('not_authenticated'); end if;
     -- Validate the key before destructive writes, and preserve verified evidence
     -- even if a previously bound identity has since been unlinked in Auth.
-    perform private.bind_apple_identity(caller);
+    -- Deletion must remain possible when another live account owns this hash.
+    -- Unlike admission/restoration, a conflicting first binding is skipped.
+    safety_hash := private.apple_safety_hash(caller);
+    insert into private.apple_identity_bindings (account_id, apple_id_hash)
+    select caller, safety_hash where safety_hash is not null on conflict do nothing;
     select b.apple_id_hash into safety_hash from private.apple_identity_bindings as b where b.account_id = caller;
     perform private.turn_discovery_off(caller);
     select p.operator_outcome into operative_outcome from private.profiles as p where p.user_id = caller;
@@ -435,7 +440,7 @@ begin
                join private.notification_preferences as n on n.user_id = v.viewer_id
                join private.iana_time_zones as z on z.name = n.time_zone
                where v.encounter_id = e.encounter_id and not v.favorite
-                 and not exists (select 1 from private.saved_links as s where s.viewer_id = v.viewer_id and s.encounter_id = v.encounter_id)
+                 and not private.has_visible_saved_link(v.viewer_id, v.encounter_id)
                  and private.try_time_zone(z.name,
                      ((case when e.user_a = v.viewer_id then e.day_a else e.day_b end) + 30)::timestamp) <= cleanup_at
            )
@@ -445,7 +450,7 @@ begin
         delete from private.encounter_views as v using private.notification_preferences as n, private.iana_time_zones as z
         where v.encounter_id = expired_encounter.encounter_id and not v.favorite
           and n.user_id = v.viewer_id and z.name = n.time_zone
-          and not exists (select 1 from private.saved_links as s where s.viewer_id = v.viewer_id and s.encounter_id = v.encounter_id)
+          and not private.has_visible_saved_link(v.viewer_id, v.encounter_id)
           and private.try_time_zone(z.name,
               ((case when expired_encounter.user_a = v.viewer_id then expired_encounter.day_a else expired_encounter.day_b end) + 30)::timestamp) <= cleanup_at;
         delete from private.encounters as e where e.encounter_id = expired_encounter.encounter_id
@@ -492,7 +497,7 @@ begin
     perform pg_catalog.pg_advisory_xact_lock(31001, pg_catalog.hashtext(caller::text));
     perform private.require_caller();
     -- All prerequisite-changing writes serialize on the profile row.
-    select p.discovery_on into discovering from private.profiles as p where p.user_id = caller for update;
+    select private.effective_discovery_on(caller) into discovering from private.profiles as p where p.user_id = caller for update;
     if not found then
         perform private.raise_error('declaration_required');
     end if;
@@ -538,7 +543,7 @@ declare
 begin
     perform pg_catalog.pg_advisory_xact_lock(31001, pg_catalog.hashtext(caller::text));
     perform private.require_caller();
-    select p.discovery_on into discovering from private.profiles as p where p.user_id = caller for update;
+    select private.effective_discovery_on(caller) into discovering from private.profiles as p where p.user_id = caller for update;
     if not found then
         perform private.raise_error('declaration_required');
     end if;

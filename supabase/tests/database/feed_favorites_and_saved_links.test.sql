@@ -196,6 +196,12 @@ begin
                     return next feed_test.error_call(actor, operation, null, null, true,
                         case when scenario = 'missing_zone' then 'account_not_ready' else 'prerequisite_missing' end,
                         case when scenario = 'missing_zone' then '' else 'discovery' end, label || ': feed prerequisite');
+                elsif operation = 'unsave' and actor = v and exists (
+                    select 1 from private.saved_links where viewer_id=feed_test.id(actor)
+                        and encounter_id=feed_test.id(100) and link_id=feed_test.link_id(3-v)) then
+                    return next extensions.is(feed_test.as_caller(feed_test.id(actor),'unsave',
+                        feed_test.id(100),feed_test.link_id(3-v))->'saved','false'::jsonb,
+                        label || ': participant can drop own reference regardless of the read gate');
                 elsif not visible and operation not in ('feed','favorites','saved') then
                     return next feed_test.error_call(actor,
                         case when operation in ('favorite_on', 'favorite_off') then 'favorite' else operation end,
@@ -422,14 +428,18 @@ select feed_test.reset_pair();
 update private.encounters set day_a = feed_test.day() - 40 where encounter_id = feed_test.id(100);
 update private.encounter_views set favorite = false where viewer_id = feed_test.id(1);
 update private.external_links set visibility = 'private' where link_id = feed_test.link_id(2);
-select extensions.is(feed_test.as_caller(feed_test.id(1), 'card', feed_test.id(100))->'saved_link_ids', '[]'::jsonb,
-    'private reference retains expired card without leaking its id');
+select feed_test.error_call(1,'card',feed_test.id(100),null,true,'not_found','',
+    'private reference cannot retain an expired card');
 select extensions.is(feed_test.as_caller(feed_test.id(1), 'saved'), '{"links":[],"truncated":false}'::jsonb,
     'private reference has no authorized saved metadata');
 select extensions.is((select pg_catalog.count(*) from private.saved_links where viewer_id = feed_test.id(1)), 1::bigint,
     'private saved reference remains stored');
-select feed_test.error_call(1, op.operation, feed_test.id(100), feed_test.link_id(2), true, 'not_found', '',
-    op.operation || ': private link is indistinguishable from absent') from (values ('save'),('unsave')) as op(operation);
+select feed_test.error_call(1,'save',feed_test.id(100),feed_test.link_id(2),true,'not_found','',
+    'private link cannot be saved');
+select extensions.is(feed_test.as_caller(feed_test.id(1),'unsave',feed_test.id(100),feed_test.link_id(2))->'saved',
+    'false'::jsonb,'private stale reference can be removed while still a participant');
+-- A separately retained reference resolves live metadata when visibility returns.
+insert into private.saved_links values (feed_test.id(1),feed_test.id(100),feed_test.link_id(2));
 update private.external_links set visibility = 'everyone_eligible', title = 'Updated' where link_id = feed_test.link_id(2);
 select extensions.is(feed_test.as_caller(feed_test.id(1), 'saved')#>>'{links,0,link,title}', 'Updated',
     'saved reads resolve current metadata when link returns');
@@ -460,8 +470,10 @@ from (values (feed_test.link_id(1), 'own link'), (feed_test.link_id(3), 'unrelat
 cross join (values ('save'),('unsave')) as op(operation);
 update private.external_links set visibility = 'compatible_only' where link_id = feed_test.link_id(2);
 update private.matching_preferences set minimum_shared_interests = 10 where user_id = feed_test.id(1);
-select feed_test.error_call(1, op.operation, feed_test.id(100), feed_test.link_id(2), true, 'not_found', '',
-    op.operation || ': compatibility-protected counterpart link') from (values ('save'),('unsave')) as op(operation);
+select feed_test.error_call(1,'save',feed_test.id(100),feed_test.link_id(2),true,'not_found','',
+    'compatibility-protected counterpart link cannot be saved');
+select extensions.is(feed_test.as_caller(feed_test.id(1),'unsave',feed_test.id(100),feed_test.link_id(2))->'saved',
+    'false'::jsonb,'participant can remove a compatibility-protected reference');
 
 -- Multi-owner batch: 8 assertions. Each owner's payload/state remains separate;
 -- an owner-side discovery denial sits beside two differently authorized owners.
@@ -699,7 +711,7 @@ delete from private.notification_preferences where user_id=feed_test.id(1);
 select extensions.is(feed_test.as_caller(feed_test.id(1),'saved')#>>'{links,0,link,link_id}',feed_test.link_id(2)::text,
     'saved reference bypasses missing-zone retention for Live reads');
 
--- A hidden caller is refused by the shared gate on every read and write.
+-- A hidden caller is refused by read/save gates, but may drop their own reference.
 select feed_test.reset_pair();
 update private.profiles set moderation_state='hidden' where user_id=feed_test.id(1);
 select feed_test.error_call(1,'feed',null,null,true,'account_not_ready','','feed requires a ready caller');
@@ -707,7 +719,8 @@ select extensions.is(pg_catalog.jsonb_array_length(feed_test.as_caller(feed_test
 select extensions.is(pg_catalog.jsonb_array_length(feed_test.as_caller(feed_test.id(1),'saved')->'links'),0,'hidden caller saved list is empty');
 select feed_test.error_call(1,'favorite',feed_test.id(100),null,false,'not_found','','hidden caller cannot change favorites');
 select feed_test.error_call(1,'save',feed_test.id(100),feed_test.link_id(2),true,'not_found','','hidden caller cannot save other peoples links');
-select feed_test.error_call(1,'unsave',feed_test.id(100),feed_test.link_id(2),false,'not_found','','hidden caller cannot unsave other peoples links');
+select extensions.is(feed_test.as_caller(feed_test.id(1),'unsave',feed_test.id(100),feed_test.link_id(2))->'saved',
+    'false'::jsonb,'hidden caller can drop their own saved reference');
 
 -- Authorized interests with no overlap must expose [], rather than omit it.
 select feed_test.reset_pair();

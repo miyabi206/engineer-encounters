@@ -33,10 +33,11 @@ create function private.report_instant_in_zone(local_day date, report_hour integ
 returns timestamptz language plpgsql stable security definer set search_path = '' as $$
 declare
     wall_minute timestamp := local_day::timestamp + pg_catalog.make_interval(hours => report_hour, mins => report_minute);
-    conventional timestamptz := pg_catalog.timezone(zone_name, wall_minute);
+    conventional timestamptz := private.try_time_zone(zone_name, wall_minute);
     offsets interval[];
     scheduled timestamptz;
 begin
+    if conventional is null then return null; end if;
     select pg_catalog.array_agg(distinct pg_catalog.timezone(zone_name, s.instant)
         - pg_catalog.timezone('UTC', s.instant)) into offsets
     from pg_catalog.generate_series(conventional - interval '48 hours', conventional + interval '48 hours',
@@ -64,7 +65,10 @@ begin
     if pg_catalog.cardinality(fields) > 0 then perform private.raise_error('invalid_input', fields); end if;
     select n.* into preferences from private.notification_preferences as n where n.user_id = account_id;
     if not found or not exists (select 1 from private.iana_time_zones as z
-        where z.name = preferences.time_zone) then perform private.raise_error('account_not_ready'); end if;
+        where z.name = preferences.time_zone)
+        or private.try_time_zone(preferences.time_zone, report_day::timestamp) is null then
+        perform private.raise_error('account_not_ready');
+    end if;
     return private.report_instant_in_zone(report_day, preferences.report_hour, preferences.report_minute, preferences.time_zone);
 end;
 $$;
@@ -79,10 +83,10 @@ declare
     next_day date;
 begin
     select n.* into preferences from private.notification_preferences as n where n.user_id = account_id;
-    if not found then
+    if not found or private.try_time_zone(preferences.time_zone, report_at) is null then
         preferences.time_zone := 'UTC'; preferences.report_hour := 21; preferences.report_minute := 0;
     end if;
-    next_day := (report_at at time zone preferences.time_zone)::date;
+    next_day := private.try_time_zone(preferences.time_zone, report_at)::date;
     while private.report_instant_in_zone(next_day, preferences.report_hour, preferences.report_minute,
         preferences.time_zone) <= report_at or exists (
             select 1 from private.report_deliveries as d
@@ -94,8 +98,8 @@ begin
 end;
 $$;
 
--- Retention is independent of current visibility/discovery. No authorization
--- gate is used to advance flags; the shared card gate is applied on response.
+-- Favorite/calendar retention is independent of visibility. Saved retention
+-- requires a currently visible link; the shared card gate still applies on response.
 create function private.waiting_ambient_views(account_id uuid, report_at timestamptz)
 returns table (encounter_id uuid, reveal_report_day date)
 language sql stable security definer set search_path = '' as $$
@@ -107,8 +111,7 @@ language sql stable security definer set search_path = '' as $$
     from private.encounter_views as v join private.encounters as e on e.encounter_id = v.encounter_id
     left join viewer_zone as z on true
     where v.viewer_id = $1 and not v.revealed and e.kind = 'ambient' and $1 in (e.user_a, e.user_b)
-      and (v.favorite or exists (select 1 from private.saved_links as s
-            where s.viewer_id = $1 and s.encounter_id = v.encounter_id)
+      and (v.favorite or private.has_visible_saved_link($1, v.encounter_id)
         or $2 < private.try_time_zone(z.name, ((case when e.user_a = $1 then e.day_a else e.day_b end) + 30)::timestamp));
 $$;
 
@@ -335,7 +338,8 @@ begin
     end if;
     perform 1 from private.profiles as p where p.user_id = caller for update;
     if not found then perform private.raise_error('declaration_required'); end if;
-    if input_time_zone is null or not exists (select 1 from private.iana_time_zones as z where z.name = input_time_zone) then
+    if input_time_zone is null or not exists (select 1 from private.iana_time_zones as z where z.name = input_time_zone)
+        or private.try_time_zone(input_time_zone, pg_catalog.now()) is null then
         perform private.raise_error('invalid_input', array['time_zone']);
     end if;
     select n.time_zone into previous_zone from private.notification_preferences as n where n.user_id = caller;
@@ -369,9 +373,11 @@ begin
         select n.time_zone into viewer_zone from private.notification_preferences as n where n.user_id = viewer;
         viewer_zone := coalesce(viewer_zone, 'UTC');
         if viewer = ordered_a then
-            encounter_day_a := (pg_catalog.to_timestamp(viewer_observation::double precision) at time zone viewer_zone)::date;
+            encounter_day_a := coalesce(private.try_time_zone(viewer_zone, pg_catalog.to_timestamp(viewer_observation::double precision)),
+                pg_catalog.timezone('UTC', pg_catalog.to_timestamp(viewer_observation::double precision)))::date;
         else
-            encounter_day_b := (pg_catalog.to_timestamp(viewer_observation::double precision) at time zone viewer_zone)::date;
+            encounter_day_b := coalesce(private.try_time_zone(viewer_zone, pg_catalog.to_timestamp(viewer_observation::double precision)),
+                pg_catalog.timezone('UTC', pg_catalog.to_timestamp(viewer_observation::double precision)))::date;
         end if;
     end loop;
     insert into private.encounters (user_a, user_b, kind, day_a, day_b)
@@ -449,7 +455,7 @@ begin
         perform private.raise_error('not_found');
     end if;
     if not private.account_is_ready(caller) then perform private.raise_error('account_not_ready'); end if;
-    if not exists (select 1 from private.profiles as p where p.user_id = caller and p.discovery_on) then
+    if not private.effective_discovery_on(caller) then
         perform private.raise_error('prerequisite_missing', array['discovery']);
     end if;
     with revealed as (
@@ -485,7 +491,7 @@ returns jsonb language plpgsql security definer set search_path = '' as $$
 declare caller uuid := private.require_caller();
 begin
     if not private.account_is_ready(caller) then perform private.raise_error('account_not_ready'); end if;
-    if not exists (select 1 from private.profiles as p where p.user_id = caller and p.discovery_on) then
+    if not private.effective_discovery_on(caller) then
         perform private.raise_error('prerequisite_missing', array['discovery']);
     end if;
     perform private.run_account_report(caller);

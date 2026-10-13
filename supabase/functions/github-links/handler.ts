@@ -594,7 +594,7 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
         if (result.id !== providerID) throw new Failure("not_found");
         return result;
       }
-      if (body.action === "sync_identity") {
+      async function syncIdentity(): Promise<ObjectValue> {
         const userProfile = await profile();
         const social = (await github(`/users/${encodeURIComponent(userProfile.login as string)}/social_accounts`))!.value;
         if (!Array.isArray(social)) throw readerFailure();
@@ -607,7 +607,12 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
         if (synced.connected !== true || synced.handle !== userProfile.login) throw readerFailure();
         return { connected: true, handle: synced.handle };
       }
-      const handle = identity.handle ?? (await profile()).login;
+      if (body.action === "sync_identity") return await syncIdentity();
+      // Repository reads/saves need the matching SQL cache too. Establish it
+      // before reserving any repository/README fetch for a first-time identity.
+      const needsCache = body.action === "preview_repository" || body.action === "save_repository" ||
+        body.action === "refresh_preview";
+      const handle = identity.handle ?? (needsCache ? (await syncIdentity()).handle : (await profile()).login);
       if (body.action === "list_repositories") {
         const page = body.page as number;
         const path = `/users/${encodeURIComponent(handle as string)}/repos`;

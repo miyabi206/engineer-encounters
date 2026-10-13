@@ -98,7 +98,20 @@ returns boolean language sql stable set search_path = '' as $$
         where c.user_id = $1 and c.provider = 'github');
 $$;
 
--- Treat discovery with no current link as off without mutating owner settings.
+-- One count and effective switch definition for owner reads and all gates.
+create function private.countable_link_count(account_id uuid)
+returns bigint language sql stable set search_path = '' as $$
+    select pg_catalog.count(*) from private.external_links as l
+    where l.owner_id = $1 and (l.source <> 'github' or private.github_identity_is_live(l.owner_id));
+$$;
+
+create function private.effective_discovery_on(account_id uuid)
+returns boolean language sql stable set search_path = '' as $$
+    select exists (select 1 from private.profiles as p
+        where p.user_id = $1 and p.discovery_on and private.countable_link_count(p.user_id) > 0);
+$$;
+
+-- Read-only gates never rewrite owner settings.
 create or replace function private.encounter_authorization(viewer_account uuid, owner_account uuid)
 returns table (eligible boolean, compatible boolean, shared_interest_count integer)
 language sql
@@ -107,18 +120,8 @@ set search_path = ''
 as $$
     with facts as (
         select coalesce(viewer_account <> owner_account, false)
-            and exists (
-                select 1 from private.profiles as p
-                where p.user_id = viewer_account and p.discovery_on
-                  and exists (select 1 from private.external_links as l where l.owner_id = p.user_id
-                      and (l.source <> 'github' or private.github_identity_is_live(l.owner_id)))
-            )
-            and exists (
-                select 1 from private.profiles as p
-                where p.user_id = owner_account and p.discovery_on
-                  and exists (select 1 from private.external_links as l where l.owner_id = p.user_id
-                      and (l.source <> 'github' or private.github_identity_is_live(l.owner_id)))
-            )
+            and private.effective_discovery_on(viewer_account)
+            and private.effective_discovery_on(owner_account)
             and not exists (
                 select 1 from private.blocks as b
                 where (b.blocker_id = viewer_account and b.blocked_id = owner_account)
@@ -220,6 +223,59 @@ begin
     on conflict (owner_id, field) do nothing;
 exception when foreign_key_violation then
     perform private.link_write_race(caller);
+end;
+$$;
+
+create or replace function public.get_own_profile()
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+    caller uuid := private.require_caller();
+    result jsonb;
+begin
+    perform private.lock_link_account(caller);
+    if exists (select 1 from private.profiles as p where p.user_id = caller and p.discovery_on)
+        and private.countable_link_count(caller) = 0 then
+        perform private.turn_discovery_off(caller);
+    end if;
+    select pg_catalog.jsonb_build_object(
+        'display_name', coalesce(p.display_name, ''),
+        'introduction', coalesce(p.introduction, ''),
+        'contact_detail', coalesce(p.contact_detail, ''),
+        'interests', coalesce((
+            select pg_catalog.jsonb_agg(i.interest_id order by i.interest_id)
+            from private.user_interests as i where i.user_id = p.user_id
+        ), '[]'::jsonb),
+        'purposes', coalesce((
+            select pg_catalog.jsonb_agg(u.purpose order by u.purpose)
+            from private.user_purposes as u where u.user_id = p.user_id
+        ), '[]'::jsonb),
+        'minimum_shared_interests', coalesce(m.minimum_shared_interests, 1),
+        'field_visibility', coalesce((
+            select pg_catalog.jsonb_object_agg(v.field, v.level)
+            from private.field_visibility as v where v.owner_id = p.user_id
+        ), '{"display_name":"everyone_eligible","introduction":"everyone_eligible","interests":"everyone_eligible","purposes":"everyone_eligible","contact_detail":"private"}'::jsonb),
+        'discovery_on', private.effective_discovery_on(caller),
+        'link_count', private.countable_link_count(caller),
+        'prerequisites', pg_catalog.jsonb_build_object(
+            'display_name', coalesce(private.trim_input(p.display_name) <> '', false),
+            'introduction', coalesce(private.trim_input(p.introduction) <> '', false),
+            'interest', exists (select 1 from private.user_interests as i where i.user_id = p.user_id),
+            'link', private.countable_link_count(caller) > 0
+        ),
+        'declarations_recorded', coalesce(p.age_18_declared and private.trim_input(p.terms_version) <> '' and private.trim_input(p.privacy_version) <> '', false),
+        'time_zone', n.time_zone,
+        'moderation_state', p.moderation_state
+    ) into result
+    from (select caller as user_id) as a
+    left join private.profiles as p on p.user_id = a.user_id
+    left join private.matching_preferences as m on m.user_id = p.user_id
+    left join private.notification_preferences as n on n.user_id = p.user_id;
+
+    return result;
 end;
 $$;
 
@@ -335,7 +391,7 @@ begin
     if not exists (select 1 from private.external_links as l where l.link_id = input_link_id and l.owner_id = caller) then
         perform private.raise_error('not_found');
     end if;
-    if exists (select 1 from private.profiles as p where p.user_id = caller and p.discovery_on)
+    if private.effective_discovery_on(caller)
         and exists (select 1 from private.external_links as l where l.link_id = input_link_id
             and (l.source <> 'github' or private.github_identity_is_live(l.owner_id)))
         and not exists (select 1 from private.external_links as l where l.owner_id = caller
@@ -398,7 +454,7 @@ declare
     caller uuid := private.require_caller();
 begin
     perform private.lock_link_account(caller);
-    if exists (select 1 from private.profiles as p where p.user_id = caller and p.discovery_on)
+    if private.effective_discovery_on(caller)
         and not exists (select 1 from private.external_links as l where l.owner_id = caller and l.source <> 'github') then
         perform private.raise_error('prerequisite_missing', array['link']);
     end if;
@@ -639,3 +695,6 @@ revoke all on function service.save_github_link(uuid, text, text, text, text, te
 grant execute on function service.save_github_link(uuid, text, text, text, text, text, text, text[], text, text, boolean) to service_role;
 revoke all on function service.record_github_fetch(uuid) from public, anon, authenticated, service_role;
 grant execute on function service.record_github_fetch(uuid) to service_role;
+
+revoke all on function public.get_own_profile() from public, anon, authenticated, service_role;
+grant execute on function public.get_own_profile() to authenticated;

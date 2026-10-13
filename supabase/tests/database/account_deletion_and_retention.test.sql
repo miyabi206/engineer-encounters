@@ -418,6 +418,8 @@ drop trigger fail_token_fk on private.temporary_tokens;
 drop trigger fail_report_fk on private.report_deliveries;
 
 -- Independent viewer calendar retention and favorites/saves: 14 assertions.
+insert into private.external_links (owner_id,source,url,title,visibility)
+values (deletion_test.id(21),'other','https://example.invalid/retention','Retention','private');
 update private.notification_preferences set time_zone='Asia/Tokyo' where user_id=deletion_test.id(21);
 update private.notification_preferences set time_zone='America/Los_Angeles' where user_id=deletion_test.id(22);
 insert into private.encounters (encounter_id,user_a,user_b,kind,day_a,day_b)

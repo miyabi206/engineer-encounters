@@ -34,6 +34,24 @@ create index saved_links_link_idx on private.saved_links (link_id);
 alter table private.saved_links enable row level security;
 revoke all on table private.saved_links from public, anon, authenticated, service_role;
 
+-- A saved reference retains a view only while its link is currently shareable.
+-- This deliberately ignores expiry: an authorized save is itself a retention reason.
+create function private.has_visible_saved_link(viewer_id uuid, input_encounter_id uuid)
+returns boolean language sql stable set search_path = '' as $$
+    select exists (
+        select 1 from private.encounters as e
+        join private.saved_links as s on s.encounter_id = e.encounter_id and s.viewer_id = $1
+        join private.external_links as l on l.link_id = s.link_id
+            and l.owner_id = case when e.user_a = $1 then e.user_b else e.user_a end
+        join private.profiles as owner on owner.user_id = l.owner_id and owner.moderation_state = 'active'
+        join private.profiles as viewer on viewer.user_id = $1 and viewer.moderation_state = 'active'
+        cross join lateral private.encounter_authorization($1, l.owner_id) as a
+        where e.encounter_id = $2 and $1 in (e.user_a, e.user_b) and a.eligible
+          and (l.visibility = 'everyone_eligible' or (l.visibility = 'compatible_only' and a.compatible))
+          and (l.source <> 'github' or private.github_identity_is_live(l.owner_id))
+    );
+$$;
+
 -- Authorization always yields exactly one facts row, even for absent profiles.
 -- Its default SRF estimate of 1000 rows would inflate every counterpart join.
 alter function private.encounter_authorization(uuid, uuid) rows 1;
@@ -64,8 +82,8 @@ language sql stable security definer set search_path = '' as $$
         left join private.notification_preferences as n on n.user_id = viewer.viewer_id
         left join private.iana_time_zones as z on z.name = n.time_zone
     ), saved_encounters as materialized (
-        select distinct s.encounter_id from private.saved_links as s
-        join candidates as c on c.encounter_id = s.encounter_id where s.viewer_id = $1
+        select c.encounter_id from candidates as c
+        where private.has_visible_saved_link($1, c.encounter_id)
     ), retained as materialized (
         select c.* from candidates as c cross join viewer_zone as z
         left join saved_encounters as s on s.encounter_id = c.encounter_id
@@ -202,7 +220,7 @@ declare
     caller uuid := private.require_caller();
 begin
     if not private.account_is_ready(caller) then perform private.raise_error('account_not_ready'); end if;
-    if not exists (select 1 from private.profiles as p where p.user_id = caller and p.discovery_on) then
+    if not private.effective_discovery_on(caller) then
         perform private.raise_error('prerequisite_missing', array['discovery']);
     end if;
     -- report_deliveries and run_account_report arrive in a later migration.
@@ -242,7 +260,8 @@ exception when foreign_key_violation then
 end;
 $$;
 
--- Both operations require the link in the same currently authorized Card.
+-- Saving requires a currently authorized link. Unsaving also permits the
+-- caller to drop an existing reference while still a participant.
 -- Materialize authorization before INSERT/DELETE, so removing an expired
 -- encounter's last reference succeeds, and an idempotent insert still gates.
 create function private.set_saved_link(input_encounter_id uuid, input_link_id uuid, input_saved boolean)
@@ -277,6 +296,11 @@ begin
             select 1 from visible as g
             cross join lateral pg_catalog.jsonb_array_elements(coalesce(g.card->'links', '[]'::jsonb)) as l(value)
             where l.value->>'link_id' = input_link_id::text
+            union all
+            select 1 from private.saved_links as s
+            join private.encounters as e on e.encounter_id = s.encounter_id
+            where s.viewer_id = caller and s.encounter_id = input_encounter_id and s.link_id = input_link_id
+              and caller in (e.user_a, e.user_b)
         ), removed as (
             delete from private.saved_links as s
             where s.viewer_id = caller and s.encounter_id = input_encounter_id and s.link_id = input_link_id
