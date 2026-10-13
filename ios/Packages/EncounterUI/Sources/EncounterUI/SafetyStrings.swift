@@ -2,6 +2,7 @@ import Foundation
 
 enum SafetyString: String, CaseIterable {
     case blockedUsers, empty, unblock, confirmUnblock, notRestored, reportOrBlock, reason, spam, harassment, impersonation, other, submit, hidden, block, blockExplanation, submitted, review, impersonationGuidance, pending, limitedList
+    case acceptedHidden, blockAlso, done, blockUnavailable
 }
 
 enum SafetyStrings {

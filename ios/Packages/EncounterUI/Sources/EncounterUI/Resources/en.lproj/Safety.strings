@@ -14,6 +14,10 @@
 "block" = "Block user";
 "blockExplanation" = "Blocking removes the encounter and saved items for both people.";
 "submitted" = "Report submitted";
+"acceptedHidden" = "This person is hidden from you";
+"blockAlso" = "Block this person as well";
+"done" = "Done";
+"blockUnavailable" = "This person can no longer be blocked";
 "review" = "The operator reviews suspended profiles within 72 hours";
 "impersonationGuidance" = "Use Report impersonation on the link";
 "pending" = "This person is hidden while submission is pending";

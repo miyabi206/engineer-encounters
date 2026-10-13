@@ -107,7 +107,11 @@ public enum SafetyReportState: Equatable, Sendable {
     }
     public var retry: SafetySubmission? { if case .failed(let request) = self { return request }; return nil }
     public mutating func begin(_ submission: SafetySubmission) -> Bool {
-        guard self == .idle || retry != nil else { return false }
+        if case .accepted(.report(let report)) = self {
+            guard submission == .block(report.encounterID) else { return false }
+        } else {
+            guard self == .idle || retry != nil else { return false }
+        }
         self = .submitting(submission); return true
     }
     public mutating func accept() {
@@ -154,6 +158,8 @@ public struct SafetyReportNavigationActions {
 public final class SafetyReportModel: ObservableObject {
     @Published public var reason: SafetyReportReason?
     @Published public private(set) var state = SafetyReportState.idle
+    /// Retain the acceptance receipt even while a follow-up block is pending or fails.
+    @Published public private(set) var acceptedReport: SafetyReportRequest?
     @Published public private(set) var error: ProfileActionError?
     @Published public private(set) var isReopening = false
     public let encounterID: String
@@ -166,6 +172,16 @@ public final class SafetyReportModel: ObservableObject {
         if link != nil { reason = .impersonation }
     }
     public var isBusy: Bool { state.isBusy || isReopening }
+    public var isPendingHide: Bool { acceptedReport == nil && state.isPending }
+    public var isBlockUnavailable: Bool {
+        if case .failed(.block) = state { return error?.code == .notFound }
+        return false
+    }
+    public var canBlock: Bool {
+        guard !isBusy else { return false }
+        if case .accepted(.report) = state { return true }
+        return state == .idle
+    }
     public var canSubmit: Bool {
         state == .idle && !isReopening && reason.map {
             SafetyReportRequest(encounterID: encounterID, reason: $0, link: link) != nil
@@ -176,8 +192,10 @@ public final class SafetyReportModel: ObservableObject {
               let request = SafetyReportRequest(encounterID: encounterID, reason: reason, link: link) else { return }
         await perform(.report(request))
     }
-    public func block() async { if state == .idle { await perform(.block(encounterID)) } }
-    public func retry() async { if let submission = state.retry { await perform(submission) } }
+    public func block() async { if canBlock { await perform(.block(encounterID)) } }
+    public func retry() async {
+        if !isBlockUnavailable, let submission = state.retry { await perform(submission) }
+    }
     private func perform(_ submission: SafetySubmission) async {
         guard !isReopening, state.begin(submission) else { return }
         error = nil
@@ -187,13 +205,22 @@ public final class SafetyReportModel: ObservableObject {
             case .report(let request): try await actions.report(request)
             case .block(let id): try await actions.block(id)
             }
-            state.accept(); navigation.completed()
+            state.accept()
+            switch submission {
+            case .report(let request): acceptedReport = request
+            case .block: navigation.completed()
+            }
         } catch {
             state.fail(); self.error = error as? ProfileActionError ?? .init(code: .unavailable)
         }
     }
+    public func done() {
+        guard !isBusy, acceptedReport != nil else { return }
+        navigation.completed()
+    }
     public func cancel() async {
         guard !isBusy else { return }
+        if acceptedReport != nil { done(); return }
         if state == .idle { navigation.reopenEncounter(); return }
         guard state.cancel() else { navigation.completed(); return }
         actions.clearPendingHide(); error = nil; isReopening = true

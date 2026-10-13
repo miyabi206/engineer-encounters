@@ -92,34 +92,36 @@ public struct SafetyReportSheet: View {
     public var body: some View {
         NavigationStack {
             SafetyPage(title: SafetyStrings.text(.reportOrBlock)) {
-                OnboardingCard {
-                    Text(SafetyStrings.text(.reason)).font(.headline).accessibilityAddTraits(.isHeader)
-                    ForEach(SafetyReportReason.allCases, id: \.self) { reason in
-                        SelectionControl(label: SafetyStrings.text(reason.stringKey), selected: model.reason == reason) {
-                            model.reason = reason
-                        }.disabled(model.state != .idle || model.isBusy)
+                if model.acceptedReport != nil {
+                    OnboardingCard {
+                        Text(SafetyStrings.text(.submitted)).font(.headline)
+                        Text(SafetyStrings.text(.acceptedHidden)).foregroundStyle(.secondary)
                     }
-                    if model.reason == .impersonation && model.link == nil {
-                        Text(SafetyStrings.text(.impersonationGuidance)).foregroundStyle(.secondary)
-                    }
-                    Button(SafetyStrings.text(.submit)) { Task { await model.submit() } }
-                        .buttonStyle(.borderedProminent).disabled(!model.canSubmit)
-                    Text(SafetyStrings.text(.hidden)).foregroundStyle(.secondary)
+                } else {
+                    reportForm
                 }
                 if model.isBusy { ProgressView(SettingsStrings.text(.loading)) }
-                if case .accepted(.report) = model.state { Text(SafetyStrings.text(.submitted)) }
-                if model.state.isPending { Text(SafetyStrings.text(.pending)).foregroundStyle(.secondary) }
-                if let error = model.error {
+                if model.isPendingHide { Text(SafetyStrings.text(.pending)).foregroundStyle(.secondary) }
+                if model.isBlockUnavailable {
+                    Text(SafetyStrings.text(.blockUnavailable)).foregroundStyle(.secondary)
+                } else if let error = model.error {
                     SafetyFailure(error: error, disabled: model.isBusy) { await model.retry() }
                 }
-                Button(SafetyStrings.text(.block), role: .destructive) { confirmsBlock = true }
-                    .disabled(model.state != .idle || model.isBusy)
+                Button(SafetyStrings.text(model.acceptedReport == nil ? .block : .blockAlso), role: .destructive) {
+                    confirmsBlock = true
+                }.disabled(!model.canBlock)
                 Text(SafetyStrings.text(.blockExplanation)).foregroundStyle(.secondary)
                 Text(SafetyStrings.text(.review)).font(.callout).foregroundStyle(.secondary)
+                if model.acceptedReport != nil {
+                    Button(SafetyStrings.text(.done)) { model.done() }
+                        .buttonStyle(.borderedProminent).disabled(model.isBusy)
+                }
             }
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button(SettingsStrings.text(.cancel)) { Task { await model.cancel() } }.disabled(model.isBusy)
+                if model.acceptedReport == nil {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button(SettingsStrings.text(.cancel)) { Task { await model.cancel() } }.disabled(model.isBusy)
+                    }
                 }
             }
             .confirmationDialog(SafetyStrings.text(.block), isPresented: $confirmsBlock, titleVisibility: .visible) {
@@ -129,6 +131,23 @@ public struct SafetyReportSheet: View {
         }
         // Cancelling a failed submission requires fresh authorization before reopening.
         .interactiveDismissDisabled(true)
+    }
+
+    private var reportForm: some View {
+        OnboardingCard {
+            Text(SafetyStrings.text(.reason)).font(.headline).accessibilityAddTraits(.isHeader)
+            ForEach(SafetyReportReason.allCases, id: \.self) { reason in
+                SelectionControl(label: SafetyStrings.text(reason.stringKey), selected: model.reason == reason) {
+                    model.reason = reason
+                }.disabled(model.state != .idle || model.isBusy)
+            }
+            if model.reason == .impersonation && model.link == nil {
+                Text(SafetyStrings.text(.impersonationGuidance)).foregroundStyle(.secondary)
+            }
+            Button(SafetyStrings.text(.submit)) { Task { await model.submit() } }
+                .buttonStyle(.borderedProminent).disabled(!model.canSubmit)
+            Text(SafetyStrings.text(.hidden)).foregroundStyle(.secondary)
+        }
     }
 }
 

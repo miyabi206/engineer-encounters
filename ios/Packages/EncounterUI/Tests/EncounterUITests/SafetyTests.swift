@@ -67,14 +67,17 @@ final class SafetyTests: XCTestCase {
             XCTAssertEqual(driver.calls, ["conceal", "report"])
             XCTAssertTrue(model.isBusy)
             XCTAssertTrue(model.state.isHidden)
+            XCTAssertTrue(model.isPendingHide)
+            XCTAssertNil(model.acceptedReport)
             await model.submit(); await model.block(); await model.retry(); await model.cancel()
         }
         await model.submit()
-        XCTAssertEqual(driver.calls, ["conceal", "report", "completed"])
+        XCTAssertEqual(driver.calls, ["conceal", "report"])
         XCTAssertEqual(driver.requests.first?.linkID, "link")
         XCTAssertNil(model.error)
         guard case .accepted(.report) = model.state else { return XCTFail("Expected accepted report") }
         XCTAssertFalse(model.state.isPending)
+        XCTAssertFalse(model.isPendingHide)
     }
 
     @MainActor
@@ -87,13 +90,152 @@ final class SafetyTests: XCTestCase {
         XCTAssertTrue(model.state.isHidden)
         XCTAssertEqual(driver.calls, ["conceal", "report"])
         XCTAssertNotNil(model.error)
+        XCTAssertNil(model.acceptedReport)
+        XCTAssertTrue(model.isPendingHide)
         guard case .failed(.report(let request)) = model.state else { return XCTFail("Expected failed report") }
         XCTAssertEqual(request.linkID, "link")
         driver.failure = nil
         await model.retry()
         XCTAssertEqual(driver.requests, [request, request])
-        XCTAssertEqual(driver.calls, ["conceal", "report", "conceal", "report", "completed"])
+        XCTAssertEqual(driver.calls, ["conceal", "report", "conceal", "report"])
         XCTAssertNil(model.error)
+        XCTAssertEqual(model.acceptedReport, request)
+        XCTAssertFalse(model.isPendingHide)
+    }
+
+    func testAcceptedReportStateOnlyAllowsBlockingTheSameEncounter() throws {
+        let request = try XCTUnwrap(SafetyReportRequest(encounterID: "encounter", reason: .spam, link: nil))
+        var state = SafetyReportState.accepted(.report(request))
+        XCTAssertFalse(state.begin(.report(request)))
+        XCTAssertFalse(state.begin(.block("other-encounter")))
+        XCTAssertTrue(state.begin(.block("encounter")))
+        XCTAssertEqual(state, .submitting(.block("encounter")))
+    }
+
+    @MainActor
+    func testAcceptedReportThenAcceptedBlockUsesTheSameEncounterIncludingImpersonation() async {
+        for link in [SafetyReportLinkContext?.none, SafetyReportLinkContext(id: "link")] {
+            let driver = SafetyTestDriver()
+            let model = driver.model(link: link)
+            if link == nil { model.reason = .spam }
+            await model.submit()
+            let receipt = model.acceptedReport
+            XCTAssertNotNil(receipt)
+            XCTAssertEqual(receipt?.linkID, link?.id)
+            XCTAssertEqual(driver.calls, ["conceal", "report"])
+            XCTAssertTrue(model.canBlock)
+            XCTAssertFalse(model.canSubmit)
+            XCTAssertFalse(model.isPendingHide)
+            driver.duringSubmission = {
+                XCTAssertEqual(model.state, .submitting(.block("encounter")))
+                XCTAssertEqual(model.acceptedReport, receipt)
+                XCTAssertTrue(model.isBusy)
+                XCTAssertFalse(model.canBlock)
+                XCTAssertFalse(model.isPendingHide)
+                await model.submit(); await model.block(); await model.retry(); await model.cancel()
+                model.done()
+            }
+            await model.block()
+            XCTAssertEqual(model.state, .accepted(.block("encounter")))
+            XCTAssertEqual(model.acceptedReport, receipt)
+            XCTAssertEqual(driver.blocks, ["encounter"])
+            XCTAssertEqual(driver.requests.count, 1)
+            XCTAssertEqual(driver.calls, ["conceal", "report", "conceal", "block", "completed"])
+            XCTAssertFalse(model.isPendingHide)
+            XCTAssertNil(model.error)
+        }
+    }
+
+    @MainActor
+    func testAcceptedReportThenFailedBlockRetainsAcceptanceAndRetriesOnlyBlock() async {
+        let driver = SafetyTestDriver()
+        let model = driver.model(link: .init(id: "link"))
+        await model.submit()
+        let receipt = model.acceptedReport
+        driver.failure = .init(code: .unavailable)
+        await model.block()
+        XCTAssertEqual(model.state, .failed(.block("encounter")))
+        XCTAssertEqual(model.state.retry, .block("encounter"))
+        XCTAssertEqual(model.acceptedReport, receipt)
+        XCTAssertTrue(model.state.isHidden)
+        XCTAssertFalse(model.isBusy)
+        XCTAssertFalse(model.isPendingHide)
+        XCTAssertFalse(model.isBlockUnavailable)
+        XCTAssertNotNil(model.error)
+        XCTAssertEqual(driver.calls, ["conceal", "report", "conceal", "block"])
+        driver.failure = nil
+        await model.retry()
+        XCTAssertEqual(model.state, .accepted(.block("encounter")))
+        XCTAssertEqual(model.acceptedReport, receipt)
+        XCTAssertFalse(model.isPendingHide)
+        XCTAssertEqual(driver.blocks, ["encounter", "encounter"])
+        XCTAssertEqual(driver.requests.count, 1)
+        XCTAssertEqual(driver.calls, ["conceal", "report", "conceal", "block", "conceal", "block", "completed"])
+        XCTAssertNil(model.error)
+    }
+
+    @MainActor
+    func testDoneAfterAcceptedReportClosesWithoutClearingHideOrReopening() async {
+        let driver = SafetyTestDriver()
+        let model = driver.model()
+        model.done()
+        XCTAssertTrue(driver.calls.isEmpty)
+        model.reason = .other
+        await model.submit()
+        let receipt = model.acceptedReport
+        model.done()
+        XCTAssertEqual(model.acceptedReport, receipt)
+        XCTAssertTrue(model.state.isHidden)
+        XCTAssertFalse(model.isPendingHide)
+        XCTAssertEqual(driver.calls, ["conceal", "report", "completed"])
+        XCTAssertTrue(driver.blocks.isEmpty)
+    }
+
+    @MainActor
+    func testDoneOrCancelAfterFailedFollowUpNeverUndoesAcceptedReport() async {
+        for cancel in [false, true] {
+            let driver = SafetyTestDriver()
+            let model = driver.model()
+            model.reason = .harassment
+            await model.submit()
+            let receipt = model.acceptedReport
+            driver.failure = .init(code: .unavailable)
+            await model.block()
+            if cancel { await model.cancel() } else { model.done() }
+            XCTAssertEqual(model.acceptedReport, receipt)
+            XCTAssertEqual(model.state, .failed(.block("encounter")))
+            XCTAssertFalse(model.isPendingHide)
+            XCTAssertEqual(driver.calls, ["conceal", "report", "conceal", "block", "completed"])
+        }
+    }
+
+    @MainActor
+    func testBlockNotFoundOnFirstAttemptCannotBeRetriedFromIdleOrAfterReport() async {
+        for reportFirst in [false, true] {
+            let driver = SafetyTestDriver()
+            let model = driver.model()
+            if reportFirst {
+                model.reason = .spam
+                await model.submit()
+            }
+            driver.failure = .init(code: .notFound)
+            await model.block()
+            XCTAssertEqual(model.state, .failed(.block("encounter")))
+            XCTAssertEqual(model.error?.code, .notFound)
+            XCTAssertTrue(model.isBlockUnavailable)
+            XCTAssertFalse(model.canBlock)
+            XCTAssertEqual(model.acceptedReport != nil, reportFirst)
+            let calls = driver.calls
+            await model.retry(); await model.block()
+            XCTAssertEqual(driver.calls, calls)
+            XCTAssertEqual(driver.blocks, ["encounter"])
+            XCTAssertFalse(driver.calls.contains("completed"))
+            if reportFirst {
+                XCTAssertFalse(model.isPendingHide)
+                model.done()
+                XCTAssertEqual(driver.calls, calls + ["completed"])
+            }
+        }
     }
 
     @MainActor
@@ -147,7 +289,7 @@ final class SafetyTests: XCTestCase {
         driver.failure = nil
         await model.submit()
         await model.cancel()
-        XCTAssertEqual(driver.calls, ["conceal", "report", "completed", "completed"])
+        XCTAssertEqual(driver.calls, ["conceal", "report", "completed"])
     }
 
     @MainActor
