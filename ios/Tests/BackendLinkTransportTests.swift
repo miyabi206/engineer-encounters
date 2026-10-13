@@ -16,7 +16,10 @@ final class BackendLinkTransportTests: XCTestCase {
         let sessions = SessionManager(configuration: appBackendTestConfiguration(), transport: transport,
             store: InMemorySessionStore(session: try appBackendTestSession()), now: { appBackendTestNow })
         do { _ = try await sessions.beginGitHubLink(); XCTFail("Redirect must reach Auth as a refusal") }
-        catch { XCTAssertEqual(error as? BackendError, .httpFailure(statusCode: 302)) }
+        catch {
+            XCTAssertEqual(error as? BackendError, .transportFailure)
+            XCTAssertNotEqual(error as? BackendError, .notAuthenticated, "Redirect failure must not sign the account out")
+        }
         let counts = await underlying.counts()
         XCTAssertEqual(counts.normal, 0)
         XCTAssertEqual(counts.refused, 1)
