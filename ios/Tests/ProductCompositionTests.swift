@@ -25,10 +25,13 @@ final class ProductCompositionTests: XCTestCase {
             })
         ]
         #if DEVELOPMENT_BUILD || INTERNAL_BUILD
-        let operations = baseOperations + [("reveal_ambient_now", { composition in
-            composition.demoSwitch.isEnabled = true
-            try await composition.demoReveal.reveal()
-        })]
+        let demoOperations: [(String, @MainActor (AppComposition) async throws -> Void)] = [
+            ("reveal_ambient_now", { composition in
+                composition.demoSwitch.isEnabled = true
+                try await composition.demoReveal.reveal()
+            })
+        ]
+        let operations = baseOperations + demoOperations
         #else
         let operations = baseOperations
         #endif
