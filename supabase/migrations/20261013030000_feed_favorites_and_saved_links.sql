@@ -1,3 +1,11 @@
+-- Snapshot the installed IANA names once. Reads use its primary key rather
+-- than enumerating pg_timezone_names (which computes offsets for every zone).
+-- Refresh this lookup in a migration when the installed tzdata adds names.
+create table private.iana_time_zones (name text primary key);
+insert into private.iana_time_zones (name) select z.name from pg_catalog.pg_timezone_names as z;
+alter table private.iana_time_zones enable row level security;
+revoke all on table private.iana_time_zones from public, anon, authenticated, service_role;
+
 create table private.saved_links (
     viewer_id uuid not null references auth.users (id) on delete cascade,
     encounter_id uuid not null references private.encounters (encounter_id) on delete cascade,
@@ -32,13 +40,12 @@ language sql stable security definer set search_path = '' as $$
         where v.viewer_id = $1 and $1 in (e.user_a, e.user_b) and v.revealed
           and ($2 is null or e.encounter_id = any($2)) and (not $3 or v.favorite)
     ), viewer_zone as materialized (
-        -- pg_timezone_names enumerates the installed zones. Materialize it
-        -- outside the per-encounter path; missing/invalid registration stays
-        -- SQL null, preserving Unit 3's fail-closed ordinary retention.
+        -- All registration, scheduling and retention use this shared lookup.
+        -- Missing/invalid registration preserves fail-closed retention.
         select z.name
         from (select $1 as viewer_id) as viewer
         left join private.notification_preferences as n on n.user_id = viewer.viewer_id
-        left join pg_catalog.pg_timezone_names as z on z.name = n.time_zone
+        left join private.iana_time_zones as z on z.name = n.time_zone
     ), saved_encounters as materialized (
         select distinct s.encounter_id from private.saved_links as s
         join candidates as c on c.encounter_id = s.encounter_id where s.viewer_id = $1
@@ -56,6 +63,8 @@ language sql stable security definer set search_path = '' as $$
         from counterparts as c join private.profiles as p on p.user_id = c.counterpart_id
         cross join lateral private.encounter_authorization($1, p.user_id) as a
         where a.eligible and p.moderation_state = 'active'
+          and exists (select 1 from private.profiles as viewer
+              where viewer.user_id = $1 and viewer.moderation_state = 'active')
     ), interests as materialized (
         select i.user_id, pg_catalog.jsonb_agg(i.interest_id order by i.interest_id) as value,
             pg_catalog.jsonb_agg(i.interest_id order by i.interest_id)

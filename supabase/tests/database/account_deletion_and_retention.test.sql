@@ -158,8 +158,8 @@ select deletion_test.digest(nonce), deletion_test.id(owner), deletion_test.id(50
     pg_catalog.floor(extract(epoch from pg_catalog.now()))::bigint, 120, false, true, pg_catalog.now(), pg_catalog.now()+interval '1 hour'
 from (values (201,2,7),(202,7,2),(201,14,15)) as f(nonce,owner,peer);
 
--- 44 + 20 + 10 + 37 + 42 + 20 + 9 + 14 + 7 + 9 = 212 assertions.
-select extensions.plan(212);
+-- 44 + 20 + 10 + 37 + 42 + 20 + 10 + 14 + 7 + 9 = 213 assertions.
+select extensions.plan(213);
 
 -- Catalog and scheduling: 44 assertions.
 create temporary table deletion_functions (signature text, argument_names text[], return_type text);
@@ -365,7 +365,13 @@ values (private.apple_safety_hash(deletion_test.id(11)),'hidden',pg_catalog.floo
 select extensions.is(private.restore_deletion_safety(deletion_test.id(11)),'{"applied":true,"moderation_state":"hidden","restored_block_count":0}'::jsonb,'hidden operator outcome restores hidden state');
 
 -- Inject real foreign-key SQLSTATEs at the writes, checking sanitized errors.
--- Seven formerly uncovered paths plus the shared live/deleted mapping: 9.
+-- Seven write paths, shared live/deleted mapping and a no-write fast path: 10.
+-- Account 7 still has UTC's default 21:00 report time. Seed the latest due
+-- date explicitly; the transaction clock fixes it even across real midnight.
+delete from private.report_deliveries where user_id=deletion_test.id(7);
+insert into private.report_deliveries (user_id,report_day,status)
+select deletion_test.id(7),(pg_catalog.now() at time zone 'UTC')::date
+    - case when (pg_catalog.now() at time zone 'UTC')::time < time '21:00' then 1 else 0 end,'closed';
 create trigger fail_interest_fk before insert on private.user_interests for each row execute function deletion_test.fail_fk();
 create trigger fail_purpose_fk before insert on private.user_purposes for each row execute function deletion_test.fail_fk();
 create trigger fail_matching_fk before insert on private.matching_preferences for each row execute function deletion_test.fail_fk();
@@ -373,6 +379,25 @@ create trigger fail_visibility_fk before insert on private.field_visibility for 
 create trigger fail_profile_fk before update on private.profiles for each row execute function deletion_test.fail_fk();
 create trigger fail_token_fk before insert on private.temporary_tokens for each row execute function deletion_test.fail_fk();
 create trigger fail_report_fk before insert on private.report_deliveries for each row execute function deletion_test.fail_fk();
+-- Statement triggers reject even an attempted conflict insert or empty update.
+create trigger fail_report_fast_path_write before insert or update or delete on private.report_deliveries
+for each statement execute function deletion_test.fail_fk();
+create trigger fail_view_fast_path_write before update on private.encounter_views
+for each statement execute function deletion_test.fail_fk();
+select extensions.lives_ok($q$select deletion_test.call(7,'select public.get_daily_report()')$q$,
+    'closed report fast path answers normally without writing deliveries or views');
+drop trigger fail_report_fast_path_write on private.report_deliveries;
+drop trigger fail_view_fast_path_write on private.encounter_views;
+
+-- Now require a write: remove the due delivery and retain a waiting ambient
+-- view assigned to it, so the row-level FK race trigger cannot be bypassed.
+delete from private.report_deliveries where user_id=deletion_test.id(7);
+insert into private.encounters (encounter_id,user_a,user_b,kind,day_a,day_b)
+values (deletion_test.id(109),deletion_test.id(7),deletion_test.id(15),'ambient',
+    (pg_catalog.now() at time zone 'UTC')::date,(pg_catalog.now() at time zone 'UTC')::date);
+insert into private.encounter_views (encounter_id,viewer_id,revealed,reveal_report_day)
+select deletion_test.id(109),deletion_test.id(7),false,(pg_catalog.now() at time zone 'UTC')::date
+    - case when (pg_catalog.now() at time zone 'UTC')::time < time '21:00' then 1 else 0 end;
 select deletion_test.error(pg_catalog.format('select deletion_test.call(7,%L)',q.statement),'not_found','','live foreign-key race: ' || q.statement)
 from (values ('select public.set_own_interests(array[''deletion-interest''])'), ('select public.set_own_purposes(array[''discovery''])'),
     ('select public.set_minimum_shared_interests(1)'), ('select public.set_field_visibility(''display_name'',''private'')'),

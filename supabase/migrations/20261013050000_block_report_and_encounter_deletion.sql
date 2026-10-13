@@ -1,11 +1,3 @@
--- Snapshot the installed IANA names once. Reads use its primary key rather
--- than enumerating pg_timezone_names (which computes offsets for every zone).
--- Refresh this lookup in a migration when the installed tzdata adds names.
-create table private.iana_time_zones (name text primary key);
-insert into private.iana_time_zones (name) select z.name from pg_catalog.pg_timezone_names as z;
-alter table private.iana_time_zones enable row level security;
-revoke all on table private.iana_time_zones from public, anon, authenticated, service_role;
-
 alter table private.blocks
     add column block_id uuid not null default pg_catalog.gen_random_uuid(),
     add column placed_day date;
@@ -46,8 +38,8 @@ revoke all on table private.reports from public, anon, authenticated, service_ro
 -- Authorization and sort facts contain no card payload. Both branches share
 -- the same gates; an explicit ID array probes encounters and views by PK.
 -- ARRAY[null] and an empty array select nothing, never the caller's whole feed.
-create function private.visible_encounter_facts(viewer_id uuid, encounter_ids uuid[] default null,
-    favorites_only boolean default false)
+create function private.gated_encounter_facts(viewer_id uuid, encounter_ids uuid[],
+    favorites_only boolean, allow_own_report boolean)
 returns table (encounter_id uuid, counterpart_id uuid, kind text, day date, favorite boolean,
     compatible boolean, shared_interest_count integer)
 language sql stable security definer set search_path = '' as $$
@@ -90,12 +82,24 @@ language sql stable security definer set search_path = '' as $$
         from counterparts as c join private.profiles as p on p.user_id = c.counterpart_id
         cross join lateral private.encounter_authorization($1, p.user_id) as a
         where a.eligible and p.moderation_state = 'active'
-          and not exists (select 1 from private.reports as r
-              where r.reporter_id = $1 and r.subject_id = p.user_id)
+          and exists (select 1 from private.profiles as viewer
+              where viewer.user_id = $1 and viewer.moderation_state = 'active')
+          and ($4 or not exists (select 1 from private.reports as r
+              where r.reporter_id = $1 and r.subject_id = p.user_id))
     )
     select r.encounter_id, r.counterpart_id, r.kind, r.day, r.favorite,
         o.compatible, o.shared_interest_count
     from retained as r join owners as o on o.user_id = r.counterpart_id;
+$$;
+
+-- Ordinary reads always retain the reporter hide. Only block pair removal
+-- may bypass it, while sharing every other authorization/retention condition.
+create function private.visible_encounter_facts(viewer_id uuid, encounter_ids uuid[] default null,
+    favorites_only boolean default false)
+returns table (encounter_id uuid, counterpart_id uuid, kind text, day date, favorite boolean,
+    compatible boolean, shared_interest_count integer)
+language sql stable security definer set search_path = '' as $$
+    select g.* from private.gated_encounter_facts($1, $2, $3, false) as g;
 $$;
 
 -- Scalar and selected batch reads assemble each surviving owner's metadata
@@ -253,7 +257,7 @@ declare
     result jsonb;
 begin
     select g.counterpart_id into peer
-    from private.visible_encounter_facts(viewer_id, array[input_encounter_id], false) as g;
+    from private.gated_encounter_facts(viewer_id, array[input_encounter_id], false, block_pair) as g;
     if peer is null then perform private.raise_error('not_found'); end if;
     for lock_key in
         select distinct pg_catalog.hashtextextended(pg_catalog.encode(n.digest, 'hex'), 0)
@@ -269,7 +273,7 @@ begin
         pg_catalog.hashtext(least(viewer_id, peer)::text || ':' || greatest(viewer_id, peer)::text));
     perform 1 from private.encounters as e where e.encounter_id = input_encounter_id for update;
     if not found or not exists (select 1
-        from private.visible_encounter_facts(viewer_id, array[input_encounter_id], false) as g
+        from private.gated_encounter_facts(viewer_id, array[input_encounter_id], false, block_pair) as g
         where g.counterpart_id = peer) then perform private.raise_error('not_found'); end if;
     if block_pair then
         select z.name into zone_name from private.notification_preferences as n
@@ -366,7 +370,6 @@ returns jsonb language plpgsql security definer set search_path = '' as $$
 declare
     caller uuid := private.require_caller();
     subject uuid;
-    account uuid;
     fields text[] := '{}'::text[];
     card jsonb;
     new_report uuid;
@@ -380,15 +383,20 @@ begin
         fields := pg_catalog.array_append(fields, 'link_id');
     end if;
     if pg_catalog.cardinality(fields) > 0 then perform private.raise_error('invalid_input', fields); end if;
-    -- Derive the subject before taking either account lock, then acquire both
-    -- in UUID order. All reporters serialize on the subject for threshold/review.
+    if not exists (select 1 from private.profiles as p
+        where p.user_id = caller and p.moderation_state = 'active') then
+        perform private.raise_error('account_not_ready');
+    end if;
+    -- Derive the subject before serialization; all reporters share its lock.
     select g.counterpart_id into subject
     from private.visible_encounter_facts(caller, array[input_encounter_id], false) as g;
     if subject is null then perform private.raise_error('not_found'); end if;
-    for account in select a.id from (values (caller), (subject)) as a(id) order by a.id loop
-        perform pg_catalog.pg_advisory_xact_lock(31001, pg_catalog.hashtext(account::text));
-    end loop;
+    perform private.lock_account_pair(caller, subject);
     perform private.require_caller();
+    if not exists (select 1 from private.profiles as p
+        where p.user_id = caller and p.moderation_state = 'active') then
+        perform private.raise_error('account_not_ready');
+    end if;
     perform pg_catalog.pg_advisory_xact_lock(31003,
         pg_catalog.hashtext(least(caller, subject)::text || ':' || greatest(caller, subject)::text));
     perform 1 from private.profiles as p where p.user_id = subject for update;
@@ -448,12 +456,72 @@ begin
     return result;
 end;
 $$;
+-- The subject profile is locked by the caller, after both account locks.
+-- Report resolution and account review apply exactly the same subject outcome.
+create function private.apply_account_review(input_subject_id uuid, input_outcome text)
+returns text language plpgsql security definer set search_path = '' as $$
+declare subject_state text := case when input_outcome = 'dismissed' then 'active' else input_outcome end;
+begin
+    update private.profiles as p set moderation_state = subject_state, operator_outcome = input_outcome
+    where p.user_id = input_subject_id;
+    update private.reports as r set status = 'resolved', outcome = input_outcome,
+        resolved_day = (pg_catalog.now() at time zone 'UTC')::date
+    where r.subject_id = input_subject_id and r.status = 'open';
+    return subject_state;
+end;
+$$;
+
+create function private.list_moderated_accounts(account_id uuid)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare result jsonb;
+begin
+    perform private.require_operator(account_id);
+    with limited as (
+        select p.user_id, p.moderation_state, p.operator_outcome
+        from private.profiles as p where p.moderation_state <> 'active'
+        order by p.user_id limit 201
+    ), numbered as (
+        select p.*, pg_catalog.row_number() over (order by p.user_id) as position from limited as p
+    )
+    select pg_catalog.jsonb_build_object('accounts', coalesce(pg_catalog.jsonb_agg(
+        pg_catalog.jsonb_build_object('account_id', p.user_id, 'moderation_state', p.moderation_state,
+            'operator_outcome', p.operator_outcome, 'open_report_count', (
+                select pg_catalog.count(*) from private.reports as r
+                where r.subject_id = p.user_id and r.status = 'open'))
+        order by p.position) filter (where p.position <= 200), '[]'::jsonb),
+        'truncated', pg_catalog.count(*) > 200) into result from numbered as p;
+    return result;
+end;
+$$;
+
+create function private.review_account(input_account_id uuid, input_subject_id uuid, input_outcome text)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare fields text[] := '{}'::text[]; subject_state text;
+begin
+    if input_account_id is null then fields := pg_catalog.array_append(fields, 'account_id'); end if;
+    if input_subject_id is null then fields := pg_catalog.array_append(fields, 'subject_id'); end if;
+    if input_outcome is null or input_outcome not in ('dismissed', 'hidden', 'suspended') then
+        fields := pg_catalog.array_append(fields, 'outcome');
+    end if;
+    if pg_catalog.cardinality(fields) > 0 then perform private.raise_error('invalid_input', fields); end if;
+    perform private.require_operator(input_account_id);
+    perform private.lock_account_pair(input_account_id, input_subject_id);
+    perform private.require_operator(input_account_id);
+    perform 1 from auth.users as u where u.id = input_subject_id;
+    if not found then perform private.raise_error('not_found'); end if;
+    perform 1 from private.profiles as p where p.user_id = input_subject_id for update;
+    if not found then perform private.raise_error('not_found'); end if;
+    subject_state := private.apply_account_review(input_subject_id, input_outcome);
+    return pg_catalog.jsonb_build_object('subject_id', input_subject_id,
+        'outcome', input_outcome, 'moderation_state', subject_state);
+end;
+$$;
+
 create function private.resolve_report(input_account_id uuid, input_report_id uuid, input_outcome text)
 returns jsonb language plpgsql security definer set search_path = '' as $$
 declare
     fields text[] := '{}'::text[];
     subject uuid;
-    account uuid;
     report private.reports%rowtype;
     subject_state text;
 begin
@@ -466,9 +534,7 @@ begin
     perform private.require_operator(input_account_id);
     select r.subject_id into subject from private.reports as r where r.report_id = input_report_id;
     if subject is null then perform private.raise_error('not_found'); end if;
-    for account in select distinct a.id from (values (input_account_id), (subject)) as a(id) order by a.id loop
-        perform pg_catalog.pg_advisory_xact_lock(31001, pg_catalog.hashtext(account::text));
-    end loop;
+    perform private.lock_account_pair(input_account_id, subject);
     perform private.require_operator(input_account_id);
     select p.moderation_state into subject_state from private.profiles as p where p.user_id = subject for update;
     if not found then perform private.raise_error('not_found'); end if;
@@ -477,17 +543,14 @@ begin
     if report.status = 'resolved' then
         if report.outcome <> input_outcome then perform private.raise_error('invalid_input', array['outcome']); end if;
     else
-        subject_state := case when input_outcome = 'dismissed' then 'active' else input_outcome end;
-        update private.profiles as p set moderation_state = subject_state, operator_outcome = input_outcome
-        where p.user_id = subject;
-        update private.reports as r set status = 'resolved', outcome = input_outcome,
-            resolved_day = (pg_catalog.now() at time zone 'UTC')::date
-        where r.subject_id = subject and r.status = 'open';
+        subject_state := private.apply_account_review(subject, input_outcome);
     end if;
     return pg_catalog.jsonb_build_object('report_id', input_report_id, 'status', 'resolved',
         'outcome', input_outcome, 'moderation_state', subject_state);
 end;
 $$;
+
+create index profiles_moderated_idx on private.profiles (user_id) where moderation_state <> 'active';
 
 -- Exact wire parameter names live on SQL wrappers, avoiding column ambiguity.
 create function public.block_encounter_person(encounter_id uuid)
@@ -505,6 +568,11 @@ returns jsonb language sql security definer set search_path = '' as $$ select pr
 create function service.resolve_report(account_id uuid, report_id uuid, outcome text)
 returns jsonb language sql security definer set search_path = '' as $$ select private.resolve_report($1, $2, $3); $$;
 
+create function service.list_moderated_accounts(account_id uuid)
+returns jsonb language sql security definer set search_path = '' as $$ select private.list_moderated_accounts($1); $$;
+create function service.review_account(account_id uuid, subject_id uuid, outcome text)
+returns jsonb language sql security definer set search_path = '' as $$ select private.review_account($1, $2, $3); $$;
+
 revoke all on all functions in schema private from public, anon, authenticated, service_role;
 revoke all on function public.block_encounter_person(uuid), public.list_blocks(), public.unblock(uuid),
     public.report_encounter_person(uuid, text, uuid), public.delete_encounter(uuid),
@@ -517,6 +585,8 @@ grant execute on function public.block_encounter_person(uuid), public.list_block
     public.get_encounter_card(uuid), public.get_encounter_feed(), public.list_encounter_favorites(),
     public.set_encounter_favorite(uuid, boolean), public.save_link(uuid, uuid), public.unsave_link(uuid, uuid),
     public.list_saved_links(), public.get_daily_report(), public.reveal_ambient_now() to authenticated;
-revoke all on function service.list_open_reports(uuid), service.resolve_report(uuid, uuid, text)
+revoke all on function service.list_open_reports(uuid), service.resolve_report(uuid, uuid, text),
+    service.list_moderated_accounts(uuid), service.review_account(uuid, uuid, text)
     from public, anon, authenticated, service_role;
-grant execute on function service.list_open_reports(uuid), service.resolve_report(uuid, uuid, text) to service_role;
+grant execute on function service.list_open_reports(uuid), service.resolve_report(uuid, uuid, text),
+    service.list_moderated_accounts(uuid), service.review_account(uuid, uuid, text) to service_role;

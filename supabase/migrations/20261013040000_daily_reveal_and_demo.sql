@@ -21,6 +21,8 @@ alter table private.server_settings enable row level security;
 revoke all on table private.report_deliveries, private.server_settings from public, anon, authenticated, service_role;
 alter table private.encounter_views add column revealed_report_day date;
 create index encounter_views_revealed_report_idx on private.encounter_views (viewer_id, revealed_report_day);
+create index encounter_views_waiting_report_idx on private.encounter_views (viewer_id, reveal_report_day)
+    where not revealed;
 
 -- PostgreSQL's direct local-to-UTC conversion chooses the later repeat and
 -- preserves the minutes inside a gap. Instead, round-trip the offsets on both
@@ -61,7 +63,8 @@ begin
     if report_day is null then fields := pg_catalog.array_append(fields, 'report_day'); end if;
     if pg_catalog.cardinality(fields) > 0 then perform private.raise_error('invalid_input', fields); end if;
     select n.* into preferences from private.notification_preferences as n where n.user_id = account_id;
-    if not found then perform private.raise_error('account_not_ready'); end if;
+    if not found or not exists (select 1 from private.iana_time_zones as z
+        where z.name = preferences.time_zone) then perform private.raise_error('account_not_ready'); end if;
     return private.report_instant_in_zone(report_day, preferences.report_hour, preferences.report_minute, preferences.time_zone);
 end;
 $$;
@@ -98,7 +101,7 @@ returns table (encounter_id uuid, reveal_report_day date)
 language sql stable security definer set search_path = '' as $$
     with viewer_zone as materialized (
         select z.name from private.notification_preferences as n
-        join pg_catalog.pg_timezone_names as z on z.name = n.time_zone where n.user_id = $1
+        join private.iana_time_zones as z on z.name = n.time_zone where n.user_id = $1
     )
     select v.encounter_id, v.reveal_report_day
     from private.encounter_views as v join private.encounters as e on e.encounter_id = v.encounter_id
@@ -109,6 +112,59 @@ language sql stable security definer set search_path = '' as $$
         or $2 < pg_catalog.timezone(z.name, ((case when e.user_a = $1 then e.day_a else e.day_b end) + 30)::timestamp));
 $$;
 
+-- Ordinary days need only local-clock/offset arithmetic. Near a transition,
+-- use the exact gap/repeat rule, including historical offsets/skipped dates.
+create function private.latest_due_report_day(zone_name text, report_hour integer,
+    report_minute integer, report_at timestamptz)
+returns date language plpgsql stable security definer set search_path = '' as $$
+declare
+    local_clock timestamp;
+    current_offset interval;
+    due_day date;
+begin
+    if report_at is null or not exists (select 1 from private.iana_time_zones as z
+        where z.name = zone_name) then return null; end if;
+    local_clock := pg_catalog.timezone(zone_name, report_at);
+    current_offset := local_clock - pg_catalog.timezone('UTC', report_at);
+    due_day := local_clock::date;
+    if current_offset = pg_catalog.timezone(zone_name, report_at - interval '48 hours')
+            - pg_catalog.timezone('UTC', report_at - interval '48 hours')
+        and current_offset = pg_catalog.timezone(zone_name, report_at + interval '48 hours')
+            - pg_catalog.timezone('UTC', report_at + interval '48 hours') then
+        return due_day - case when local_clock::time < pg_catalog.make_time(report_hour, report_minute, 0)
+            then 1 else 0 end;
+    end if;
+    while private.report_instant_in_zone(due_day, report_hour, report_minute, zone_name) > report_at loop
+        due_day := due_day - 1;
+    end loop;
+    return due_day;
+end;
+$$;
+
+-- Read-only, set-based selection: no account/row locks, report step or writes.
+-- PK delivery probes eliminate closed accounts without running a report step.
+-- A late view assigned to a closed date waits for the next later delivery key.
+create function private.due_report_accounts(report_at timestamptz)
+returns table (account_id uuid)
+language sql stable security definer set search_path = '' as $$
+    with schedules as materialized (
+        select n.user_id, private.latest_due_report_day(z.name, n.report_hour, n.report_minute, $1) as due_day
+        from private.notification_preferences as n
+        join private.iana_time_zones as z on z.name = n.time_zone
+        join auth.users as u on u.id = n.user_id
+        join private.profiles as p on p.user_id = n.user_id
+        where $1 is not null and p.moderation_state = 'active' and p.age_18_declared
+          and private.trim_input(p.terms_version) <> '' and private.trim_input(p.privacy_version) <> ''
+    )
+    select s.user_id from schedules as s
+    where s.due_day is not null and (
+        not exists (select 1 from private.report_deliveries as d
+            where d.user_id = s.user_id and d.report_day = s.due_day and d.status = 'closed')
+        or exists (select 1 from private.report_deliveries as d
+            where d.user_id = s.user_id and d.status = 'open' and d.report_day < s.due_day)
+    );
+$$;
+
 create function private.run_account_report(account_id uuid, report_at timestamptz default pg_catalog.now())
 returns jsonb language plpgsql security definer set search_path = '' as $$
 declare
@@ -116,39 +172,52 @@ declare
     due_day date;
     delivery_status text;
     newly_revealed uuid[];
-    zone_name text;
 begin
     if account_id is null then fields := pg_catalog.array_append(fields, 'account_id'); end if;
     if report_at is null then fields := pg_catalog.array_append(fields, 'report_at'); end if;
     if pg_catalog.cardinality(fields) > 0 then perform private.raise_error('invalid_input', fields); end if;
+    if private.account_is_ready(account_id) then
+        select private.latest_due_report_day(z.name, n.report_hour, n.report_minute, report_at)
+        into due_day from private.notification_preferences as n
+        join private.iana_time_zones as z on z.name = n.time_zone
+        join auth.users as u on u.id = n.user_id where n.user_id = account_id;
+    end if;
+    if due_day is null then
+        return pg_catalog.jsonb_build_object('report_day', null, 'newly_revealed_encounter_ids', '[]'::jsonb, 'closed', false);
+    end if;
+    -- A closed, caught-up read does not serialize or attempt any row write.
+    if exists (select 1 from private.report_deliveries as d
+        where d.user_id = account_id and d.report_day = due_day and d.status = 'closed')
+        and not exists (select 1 from private.report_deliveries as d
+            where d.user_id = account_id and d.status = 'open' and d.report_day < due_day)
+        and not exists (select 1 from private.waiting_ambient_views(account_id, report_at) as w
+            where w.reveal_report_day <= due_day) then
+        return pg_catalog.jsonb_build_object('report_day', due_day, 'newly_revealed_encounter_ids', '[]'::jsonb, 'closed', false);
+    end if;
     perform pg_catalog.pg_advisory_xact_lock(31001, pg_catalog.hashtext(account_id::text));
-    -- Recheck live Auth after serialization. Invalid stored zones fail closed,
-    -- preserving the existing read gate for missing/corrupt registration.
-    if not exists (select 1 from auth.users as u where u.id = account_id)
-        or not private.account_is_ready(account_id) then
+    -- Recheck live Auth, readiness and the schedule after serialization.
+    due_day := null;
+    if private.account_is_ready(account_id) then
+        select private.latest_due_report_day(z.name, n.report_hour, n.report_minute, report_at)
+        into due_day from private.notification_preferences as n
+        join private.iana_time_zones as z on z.name = n.time_zone
+        join auth.users as u on u.id = n.user_id where n.user_id = account_id;
+    end if;
+    if due_day is null then
         return pg_catalog.jsonb_build_object('report_day', null, 'newly_revealed_encounter_ids', '[]'::jsonb, 'closed', false);
     end if;
-    select z.name into zone_name from private.notification_preferences as n
-    join pg_catalog.pg_timezone_names as z on z.name = n.time_zone where n.user_id = account_id;
-    if zone_name is null then
-        return pg_catalog.jsonb_build_object('report_day', null, 'newly_revealed_encounter_ids', '[]'::jsonb, 'closed', false);
-    end if;
-    due_day := (report_at at time zone zone_name)::date;
-    while private.local_report_instant(account_id, due_day) > report_at loop due_day := due_day - 1; end loop;
     insert into private.report_deliveries (user_id, report_day, status) values (account_id, due_day, 'open')
     on conflict (user_id, report_day) do nothing;
     select d.status into delivery_status from private.report_deliveries as d
     where d.user_id = account_id and d.report_day = due_day for update;
-    -- Older dates are due too. Close their open keys even when the latest key
-    -- is a replay; never move an already revealed view's report membership.
+    -- Older dates are due too. Close their open keys even on a latest-key replay.
     update private.report_deliveries as d set status = 'closed'
     where d.user_id = account_id and d.status = 'open' and d.report_day < due_day;
     if delivery_status = 'closed' then
         return pg_catalog.jsonb_build_object('report_day', due_day, 'newly_revealed_encounter_ids', '[]'::jsonb, 'closed', false);
     end if;
-    -- Confirmation takes no peer account advisory locks. A peer's waiting view
-    -- can arrive just after its assigned delivery closes; the next later report
-    -- catches up every earlier assigned day and stamps this delivery's date.
+    -- Confirmation takes no peer account locks. Views arriving behind a closed
+    -- assigned date wait for the next later report and get that delivery's date.
     with revealed as (
         update private.encounter_views as v set revealed = true, revealed_report_day = due_day
         where v.viewer_id = account_id and v.encounter_id in (
@@ -169,16 +238,23 @@ exception when foreign_key_violation then
 end;
 $$;
 
-create function private.run_due_reports(report_at timestamptz default pg_catalog.now())
-returns void language plpgsql security definer set search_path = '' as $$
+-- Cron must issue a top-level CALL outside an explicit transaction. This
+-- invoker procedure has no SET clause: both SET and SECURITY DEFINER prohibit
+-- transaction control. Only the migration owner can execute it.
+create procedure private.run_due_reports(report_at timestamptz default pg_catalog.now())
+language plpgsql security invoker as $$
 declare account_id uuid;
 begin
     if report_at is null then perform private.raise_error('invalid_input', array['report_at']); end if;
-    -- Transaction advisory locks survive the loop: keep worker passes in one
-    -- consistent actual-key order, including hash collisions.
-    for account_id in select n.user_id from private.notification_preferences as n
-        order by pg_catalog.hashtext(n.user_id::text), n.user_id loop
-        perform private.run_account_report(account_id, report_at);
+    for account_id in select d.account_id from private.due_report_accounts(report_at) as d order by d.account_id loop
+        begin
+            perform private.run_account_report(account_id, report_at);
+        exception when others then
+            -- The exception subtransaction rolls back this account only.
+            raise warning 'Report step failed for account % (SQLSTATE %)', account_id, sqlstate;
+        end;
+        -- Outside the exception block; releases all locks before the next step.
+        commit;
     end loop;
 end;
 $$;
@@ -257,7 +333,7 @@ begin
     end if;
     perform 1 from private.profiles as p where p.user_id = caller for update;
     if not found then perform private.raise_error('declaration_required'); end if;
-    if input_time_zone is null or not exists (select 1 from pg_catalog.pg_timezone_names as z where z.name = input_time_zone) then
+    if input_time_zone is null or not exists (select 1 from private.iana_time_zones as z where z.name = input_time_zone) then
         perform private.raise_error('invalid_input', array['time_zone']);
     end if;
     select n.time_zone into previous_zone from private.notification_preferences as n where n.user_id = caller;
@@ -453,6 +529,7 @@ create function service.set_demo_reveal_enabled(account_id uuid, enabled boolean
 returns jsonb language sql security definer set search_path = '' as $$ select private.set_demo_reveal_enabled($1, $2); $$;
 
 revoke all on all functions in schema private from public, anon, authenticated, service_role;
+revoke all on procedure private.run_due_reports(timestamptz) from public, anon, authenticated, service_role;
 revoke all on function public.get_report_settings(), public.set_report_time(integer, integer),
     public.set_notifications_enabled(boolean), public.get_daily_report(), public.reveal_ambient_now(),
     public.register_time_zone(text), public.get_encounter_feed() from public, anon, authenticated, service_role;
@@ -464,7 +541,7 @@ grant execute on function service.set_demo_reveal_enabled(uuid, boolean) to serv
 
 do $$
 begin
-    perform cron.schedule('encounters-daily-reports', '*/5 * * * *', 'select private.run_due_reports();');
+    perform cron.schedule('encounters-daily-reports', '*/5 * * * *', 'call private.run_due_reports();');
 end;
 $$;
 

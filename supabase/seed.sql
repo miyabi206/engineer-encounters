@@ -1,3 +1,5 @@
+-- The statement marking this environment local and enabling demo reveal must
+-- never be applied to a hosted production project.
 -- Local development placeholders only. The owner must replace every row with
 -- the curated interest list before any hosted seed is considered.
 insert into private.interests (interest_id, label_ja, label_en, display_order)

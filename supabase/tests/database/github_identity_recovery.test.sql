@@ -148,7 +148,8 @@ from (values (4), (8)) as f(n);
 
 -- 10 declarations + 18 deterministic identity + 13 empty-owner recovery +
 -- 4 constraint-race rollback + 11 remaining-link recovery + 3 privileges = 59.
-select extensions.plan(59);
+-- Same-account switches: 2 rollback + 7 cleanup + 1 new save + 2 same-provider + 5 remaining-link = 17.
+select extensions.plan(76);
 
 select github_recovery_test.expect_error('select github_recovery_test.declare_account(1)', 'account_not_ready',
     'GitHub-only sign-in cannot accept declarations and exposes no detail');
@@ -175,15 +176,79 @@ select github_recovery_test.expect_error('select github_recovery_test.sync(2,''2
 select extensions.is(github_recovery_test.sync(2, '202'), '{"connected":true,"handle":"owner"}'::jsonb, 'sync keeps the cache-matching identity');
 select extensions.is(github_recovery_test.save(2, '202')->>'source_item_id', '220', 'save uses the same cache-matching identity');
 select github_recovery_test.expect_error('select github_recovery_test.save(2,''201'')', 'not_found', 'save refuses a different live identity');
+-- Repository evidence and its saved references belong to the cached identity.
+insert into private.encounters (encounter_id,user_a,user_b,kind,day_a,day_b)
+values (github_recovery_test.id(902),github_recovery_test.id(2),github_recovery_test.id(6),'qr',current_date,current_date);
+insert into private.saved_links (viewer_id,encounter_id,link_id)
+select github_recovery_test.id(6),github_recovery_test.id(902),l.link_id from private.external_links as l
+where l.owner_id=github_recovery_test.id(2) and l.source='github';
+update private.profiles set discovery_on=true where user_id=github_recovery_test.id(2);
+insert into private.sessions (session_id,user_id,starts_at,expires_at)
+values (github_recovery_test.id(1004),github_recovery_test.id(2),pg_catalog.clock_timestamp(),pg_catalog.clock_timestamp()+interval '2 hours');
+insert into private.qr_codes (code_digest,issuer_id,expires_at)
+values (pg_catalog.sha256(pg_catalog.decode(pg_catalog.repeat('22',16),'hex')),github_recovery_test.id(2),
+    pg_catalog.floor(extract(epoch from pg_catalog.clock_timestamp()))::bigint+120);
+
 update auth.identities set created_at = pg_catalog.now() - interval '1 day' where user_id = github_recovery_test.id(2);
 update private.linked_identities set provider_user_id = '999' where user_id = github_recovery_test.id(2);
 select extensions.is(github_recovery_test.identity(2)->>'provider_user_id', '201', 'equal identity timestamps break ties by identity id');
 select extensions.is(github_recovery_test.connection(2), '{"connected":false,"handle":null}'::jsonb, 'mismatched cache is disconnected with two identities');
+insert into github_recovery_test.results values ('before-switch',github_recovery_test.snapshot());
+create trigger same_account_cache_race before insert on private.linked_identities
+for each row when (new.user_id=github_recovery_test.id(2)) execute function github_recovery_test.cache_race('unique');
+select github_recovery_test.expect_error('select github_recovery_test.sync(2,''201'')','not_found',
+    'same-account identity switch normalizes a cache uniqueness race');
+select extensions.is(github_recovery_test.snapshot(),(select value from github_recovery_test.results where label='before-switch'),
+    'failed identity switch rolls back repository, saved, discovery, session and QR changes');
+drop trigger same_account_cache_race on private.linked_identities;
 select extensions.is(github_recovery_test.sync(2, '201'), '{"connected":true,"handle":"owner"}'::jsonb, 'sync replaces the mismatched cache deterministically');
+select extensions.is((select pg_catalog.count(*) from private.external_links where owner_id=github_recovery_test.id(2)),
+    0::bigint,'same-account identity switch removes old repository evidence');
+select extensions.is((select pg_catalog.count(*) from private.saved_links where encounter_id=github_recovery_test.id(902)),
+    0::bigint,'same-account identity switch cascades old repository saved references');
+select extensions.is((select discovery_on from private.profiles where user_id=github_recovery_test.id(2)),false,
+    'same-account identity switch turns discovery off after losing the last link');
+select extensions.ok((select stopped_at>=starts_at from private.sessions where session_id=github_recovery_test.id(1004)),
+    'same-account switch stops a session that began after transaction now');
+select extensions.is((select pg_catalog.count(*) from private.qr_codes where issuer_id=github_recovery_test.id(2)),0::bigint,
+    'same-account switch cancels outstanding QR');
+select extensions.is((select provider_user_id from private.linked_identities where user_id=github_recovery_test.id(2)),'201',
+    'same-account switch rewrites the cache only after stale evidence is removed');
+select extensions.is((select pg_catalog.count(*) from auth.identities where user_id=github_recovery_test.id(2)),2::bigint,
+    'same-account switch preserves every managed Auth identity');
+select extensions.is(github_recovery_test.save(2,'201')->>'source_item_id','220','new identity can save new repository evidence');
+insert into private.external_links (link_id,owner_id,source,url,title,visibility,verification_state)
+values (github_recovery_test.id(209),github_recovery_test.id(2),'other','https://example.invalid/current','Other','private','unverified');
+insert into private.saved_links (viewer_id,encounter_id,link_id)
+select github_recovery_test.id(6),github_recovery_test.id(902),l.link_id from private.external_links as l
+where l.owner_id=github_recovery_test.id(2);
+update private.profiles set discovery_on=true where user_id=github_recovery_test.id(2);
+insert into private.sessions (session_id,user_id,starts_at,expires_at)
+values (github_recovery_test.id(1005),github_recovery_test.id(2),pg_catalog.clock_timestamp(),pg_catalog.clock_timestamp()+interval '2 hours');
+insert into private.qr_codes (code_digest,issuer_id,expires_at)
+values (pg_catalog.sha256(pg_catalog.decode(pg_catalog.repeat('23',16),'hex')),github_recovery_test.id(2),
+    pg_catalog.floor(extract(epoch from pg_catalog.clock_timestamp()))::bigint+120);
+select extensions.is(github_recovery_test.sync(2,'201'),'{"connected":true,"handle":"owner"}'::jsonb,
+    'same provider identity can resync without invalidating evidence');
+select extensions.ok((select pg_catalog.count(*) from private.external_links where owner_id=github_recovery_test.id(2))=2
+    and (select pg_catalog.count(*) from private.saved_links where encounter_id=github_recovery_test.id(902))=2,
+    'same-provider resync preserves repository/other links and both saved references');
+
 delete from auth.identities where user_id = github_recovery_test.id(2) and provider_id = '201';
 select extensions.is(github_recovery_test.identity(2)->>'provider_user_id', '202', 'removed matching identity falls back to remaining live identity');
 select extensions.is(github_recovery_test.connection(2), '{"connected":false,"handle":null}'::jsonb, 'removed Auth identity invalidates the cache');
 select extensions.is(github_recovery_test.sync(2, '202'), '{"connected":true,"handle":"owner"}'::jsonb, 'remaining identity can reestablish the cache');
+select extensions.is((select pg_catalog.array_agg(source order by source) from private.external_links where owner_id=github_recovery_test.id(2)),
+    array['other'],'identity switch preserves a remaining link from another source');
+select extensions.is((select pg_catalog.array_agg(link_id order by link_id) from private.saved_links where encounter_id=github_recovery_test.id(902)),
+    array[github_recovery_test.id(209)],'identity switch removes repository saves and preserves other-source saves');
+select extensions.is((select discovery_on from private.profiles where user_id=github_recovery_test.id(2)),true,
+    'remaining other-source link preserves discovery after same-account switch');
+select extensions.ok((select stopped_at is null from private.sessions where session_id=github_recovery_test.id(1005)),
+    'remaining other-source link preserves the current session');
+select extensions.is((select pg_catalog.count(*) from private.qr_codes where issuer_id=github_recovery_test.id(2)),1::bigint,
+    'remaining other-source link preserves outstanding QR');
+
 
 insert into github_recovery_test.results values ('live-4', github_recovery_test.snapshot());
 select github_recovery_test.expect_error('select github_recovery_test.sync(5,''401'')', 'not_found', 'cache held by another live Auth identity is unavailable');

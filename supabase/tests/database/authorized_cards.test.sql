@@ -593,11 +593,9 @@ revoke all on function authorized_cards_test.moderation_states() from public, an
 select * from authorized_cards_test.moderation_states();
 select authorized_cards_test.reset_pair();
 update private.profiles set moderation_state = 'hidden' where user_id = authorized_cards_test.id(1);
-select extensions.is(authorized_cards_test.as_caller(authorized_cards_test.id(1), authorized_cards_test.id(100))->>'display_name',
-    'Owner2', 'the moderation gate applies to the other account, not the viewer');
+select authorized_cards_test.refused(1, 'hidden viewer cannot read another account card');
 update private.profiles set moderation_state = 'suspended' where user_id = authorized_cards_test.id(1);
-select extensions.is(authorized_cards_test.as_caller(authorized_cards_test.id(1), authorized_cards_test.id(100))->>'display_name',
-    'Owner2', 'viewer suspension does not change the defined owner moderation gate');
+select authorized_cards_test.refused(1, 'suspended viewer cannot read another account card');
 
 select authorized_cards_test.reset_pair();
 update private.encounters set day_a = (pg_catalog.now() at time zone 'UTC')::date - 29,

@@ -154,10 +154,10 @@ delete from auth.users where id = links_github_test.id(5);
 grant execute on all functions in schema links_github_test to anon, authenticated, service_role;
 
 -- Catalog/roles: 67; Live errors: 20; invalid inputs: 101;
--- reads/sync: 14; resources: 4; update/reorder/bounds: 9; save: 12;
+-- reads/sync: 17; resources: 4; update/reorder/bounds: 9; save: 12;
 -- inclusive sync/ID bounds: 3; link cap: 7; fetch budget: 8;
--- delete/disconnect/cache/cascade: 38. Total: 283.
-select extensions.plan(283);
+-- delete/disconnect/cache/cascade: 38. Total: 286.
+select extensions.plan(286);
 
 select extensions.ok((select relrowsecurity from pg_catalog.pg_class
     where oid = 'private.linked_identities'::regclass), 'linked identity cache has RLS');
@@ -315,6 +315,7 @@ select extensions.is(links_github_test.as_service('service.get_github_identity(l
     '["https://example.invalid/"]'::jsonb, 'identity exposes matching verified addresses');
 select extensions.is(links_github_test.as_service($call$service.sync_github_identity(links_github_test.id(1), '101', 'new-owner', '{}'::text[])$call$),
     '{"connected":true,"handle":"new-owner"}'::jsonb, 'sync updates matching cache');
+select links_github_test.as_caller_void(links_github_test.id(1),'public.set_discovery(true)');
 update private.linked_identities set provider_user_id = '999' where user_id = links_github_test.id(1);
 select extensions.is(links_github_test.as_caller(links_github_test.id(1), 'public.get_github_connection()'),
     '{"connected":false,"handle":null}'::jsonb, 'mismatched cache does not prove connection');
@@ -325,6 +326,22 @@ select links_github_test.expect_error($stmt$select links_github_test.as_service(
 select links_github_test.expect_error($stmt$select links_github_test.as_service('service.sync_github_identity(links_github_test.id(4),''104'',''owner'',''{}''::text[])')$stmt$,
     'not_found','','absent live identity cannot sync');
 insert into links_github_test.results values ('resync',links_github_test.as_service($call$service.sync_github_identity(links_github_test.id(1),'101','owner-1','{}'::text[])$call$));
+select extensions.is(links_github_test.as_service('service.get_github_identity(links_github_test.id(1))')->'repository_links',
+    '[]'::jsonb,'identity switch removes repository links read through the old identity');
+select extensions.is((select pg_catalog.count(*) from links_github_test.saved_references),0::bigint,
+    'identity switch cascades the old repository saved references');
+select extensions.is((select discovery_on from private.profiles where user_id=links_github_test.id(1)),false,
+    'identity switch turns discovery off when it removes every link');
+
+-- Fresh repository evidence for the current identity keeps the following
+-- metadata, reorder, refresh and removal assertions independent of cleanup.
+insert into private.external_links (link_id, owner_id, source, source_item_id, url, title, description,
+    main_language, tags, opening_text, visibility, verification_state, display_order)
+select links_github_test.id(n), links_github_test.id(1), 'github', n::text,
+    'https://github.com/owner-1/repo-' || n, 'Title ' || n, 'Description ' || n,
+    'Swift', array['a','b'], 'Opening ' || n, 'private', 'verified', 4
+from pg_catalog.generate_series(201,202) as n;
+insert into links_github_test.saved_references values (1,links_github_test.id(201)),(2,links_github_test.id(202));
 
 -- Four resource errors: foreign and absent IDs are indistinguishable.
 select links_github_test.expect_error(pg_catalog.format('select links_github_test.as_caller(links_github_test.id(1),%L)',

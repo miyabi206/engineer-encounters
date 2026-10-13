@@ -153,10 +153,12 @@ select extensions.is(p.proargnames, r.names, r.signature || ' exact parameters')
 from report_helpers as r join pg_catalog.pg_proc as p on p.oid = r.signature::regprocedure;
 select extensions.is(pg_catalog.format_type(p.prorettype, null), r.result_type, r.signature || ' return type')
 from report_helpers as r join pg_catalog.pg_proc as p on p.oid = r.signature::regprocedure;
-select extensions.ok(p.prosecdef and 'search_path=""' = any(p.proconfig), r.signature || ' private definer')
+select extensions.ok(case when r.signature = 'private.run_due_reports(timestamptz)'
+    then p.prokind = 'p' and not p.prosecdef and p.proconfig is null
+    else p.prosecdef and 'search_path=""' = any(p.proconfig) end, r.signature || ' safe execution configuration')
 from report_helpers as r join pg_catalog.pg_proc as p on p.oid = r.signature::regprocedure;
-select extensions.ok(not pg_catalog.has_function_privilege('authenticated', r.signature, 'execute'), r.signature || ' not client executable') from report_helpers as r;
-select extensions.is(p.pronargdefaults, case when r.signature like '%local_report%' then 0 else 1 end::smallint,
+select extensions.ok(not pg_catalog.has_function_privilege('authenticated', r.signature::regprocedure::oid, 'execute'), r.signature || ' not client executable') from report_helpers as r;
+select extensions.is(p.pronargdefaults, case when r.signature = 'private.local_report_instant(uuid,date)' then 0 else 1 end::smallint,
     r.signature || ' default clock') from report_helpers as r join pg_catalog.pg_proc as p on p.oid = r.signature::regprocedure;
 select extensions.is(p.provolatile::text, 'v', 'local report instant permits its volatile validation error helper')
 from pg_catalog.pg_proc as p where p.oid = 'private.local_report_instant(uuid,date)'::regprocedure;
@@ -177,13 +179,13 @@ select extensions.is((select a.atttypid::regtype::text from pg_catalog.pg_attrib
     where a.attrelid = 'private.encounter_views'::regclass and a.attname = 'revealed_report_day'), 'date', 'report membership is date-only');
 select extensions.is((select pg_catalog.count(*) from cron.job where jobname = 'encounters-daily-reports'), 1::bigint, 'one daily-report Cron job');
 select extensions.is((select schedule from cron.job where jobname = 'encounters-daily-reports'), '*/5 * * * *', 'five-minute schedule');
-select extensions.is((select command from cron.job where jobname = 'encounters-daily-reports'), 'select private.run_due_reports();', 'Cron uses the shared default-clock step');
+select extensions.is((select command from cron.job where jobname = 'encounters-daily-reports'), 'call private.run_due_reports();', 'Cron uses the shared default-clock step');
 select extensions.ok((select active from cron.job where jobname = 'encounters-daily-reports'), 'Cron active');
 select extensions.is((select database from cron.job where jobname = 'encounters-daily-reports'), pg_catalog.current_database()::text, 'Cron database');
 select extensions.is((select username from cron.job where jobname = 'encounters-daily-reports'), current_user::text, 'Cron migration owner');
 do $$ begin
-    perform cron.schedule('encounters-daily-reports', '*/5 * * * *', 'select private.run_due_reports();');
-    perform cron.schedule('encounters-daily-reports', '*/5 * * * *', 'select private.run_due_reports();');
+    perform cron.schedule('encounters-daily-reports', '*/5 * * * *', 'call private.run_due_reports();');
+    perform cron.schedule('encounters-daily-reports', '*/5 * * * *', 'call private.run_due_reports();');
 end; $$;
 select extensions.is((select pg_catalog.count(*) from cron.job where jobname = 'encounters-daily-reports'), 1::bigint, 'rescheduling is idempotent');
 select extensions.is((select pg_catalog.count(*) from private.server_settings), 1::bigint, 'exactly one deployment row');
@@ -225,7 +227,11 @@ select daily_test.expect_error(pg_catalog.format('select private.run_account_rep
 from (values (null::uuid,null::timestamptz,'account_id,report_at','step both null'),
     (null,timestamptz '2026-10-13 21:00+00','account_id','step null account'),
     (daily_test.id(1),null,'report_at','step null clock')) as t(account,at_time,detail,description);
-select daily_test.expect_error('select private.run_due_reports(null)', 'invalid_input', 'report_at', 'worker null clock');
+-- A committing procedure cannot run inside pgTAP's transaction. Inspect its
+-- null-clock guard and exercise only its read-only selection/account step.
+select extensions.ok(pg_catalog.strpos((select prosrc from pg_catalog.pg_proc
+    where oid = 'private.run_due_reports(timestamptz)'::regprocedure),
+    'if report_at is null then perform private.raise_error(''invalid_input'', array[''report_at'']); end if;') > 0, 'worker null clock guard');
 select extensions.is(private.run_account_report(daily_test.id(230), timestamptz '2026-10-13 21:00+00'),
     '{"report_day":null,"newly_revealed_encounter_ids":[],"closed":false}'::jsonb, 'worker skips unready account');
 select extensions.is(private.run_account_report(daily_test.id(999), timestamptz '2026-10-13 21:00+00'),
@@ -262,10 +268,12 @@ insert into private.report_deliveries values (daily_test.id(1),date '2026-10-11'
 select extensions.is(private.run_account_report(daily_test.id(1), timestamptz '2026-10-13 21:00+00'),
     '{"report_day":"2026-10-13","newly_revealed_encounter_ids":[],"closed":false}'::jsonb, 'caller step replay is idempotent');
 select extensions.is((select status from private.report_deliveries where user_id=daily_test.id(1) and report_day=date '2026-10-11'), 'closed', 'replay also closes any older open due key');
-select private.run_due_reports(timestamptz '2026-10-13 21:00+00');
-select private.run_due_reports(timestamptz '2026-10-13 21:00+00');
-select extensions.is((select pg_catalog.count(*) from private.report_deliveries where user_id = daily_test.id(1)), 3::bigint, 'Cron replays add no caller delivery key');
-select extensions.is((select revealed_report_day from private.encounter_views where encounter_id = daily_test.id(1001)), date '2026-10-13', 'Cron replays preserve membership');
+select private.run_account_report(d.account_id, timestamptz '2026-10-13 21:00+00')
+from private.due_report_accounts(timestamptz '2026-10-13 21:00+00') as d;
+select private.run_account_report(d.account_id, timestamptz '2026-10-13 21:00+00')
+from private.due_report_accounts(timestamptz '2026-10-13 21:00+00') as d;
+select extensions.is((select pg_catalog.count(*) from private.report_deliveries where user_id = daily_test.id(1)), 3::bigint, 'due-step replays add no caller delivery key');
+select extensions.is((select revealed_report_day from private.encounter_views where encounter_id = daily_test.id(1001)), date '2026-10-13', 'due-step replays preserve membership');
 select extensions.is(private.run_account_report(daily_test.id(1), timestamptz '2026-10-14 21:00+00'),
     '{"report_day":"2026-10-14","newly_revealed_encounter_ids":[],"closed":true}'::jsonb, 'empty day closes once');
 select extensions.is(private.run_account_report(daily_test.id(1), timestamptz '2026-10-14 21:01+00'),
@@ -314,10 +322,11 @@ select daily_test.reset();
 select daily_test.waiting(1,2,date '2026-10-13',date '2026-10-13');
 update private.notification_preferences set notifications_enabled=false where user_id=daily_test.id(1);
 update private.profiles set discovery_on=false where user_id in (daily_test.id(1),daily_test.id(2));
-select private.run_due_reports(timestamptz '2026-10-13 21:00+00');
-select extensions.is((select revealed_report_day from private.encounter_views where encounter_id=daily_test.id(1001)), date '2026-10-13', 'Cron first reveal ignores discovery and notification preference');
+select private.run_account_report(d.account_id, timestamptz '2026-10-13 21:00+00')
+from private.due_report_accounts(timestamptz '2026-10-13 21:00+00') as d;
+select extensions.is((select revealed_report_day from private.encounter_views where encounter_id=daily_test.id(1001)), date '2026-10-13', 'due-step first reveal ignores discovery and notification preference');
 select extensions.is(private.run_account_report(daily_test.id(1),timestamptz '2026-10-13 21:00+00'),
-    '{"report_day":"2026-10-13","newly_revealed_encounter_ids":[],"closed":false}'::jsonb, 'caller replay after Cron first reveal is idempotent');
+    '{"report_day":"2026-10-13","newly_revealed_encounter_ids":[],"closed":false}'::jsonb, 'caller replay after due-step first reveal is idempotent');
 
 -- DST and settings/travel: 27. Public writes use transaction time, while
 -- precise DST report boundaries use explicit clocks, never pg_sleep.

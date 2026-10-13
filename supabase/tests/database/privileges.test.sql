@@ -171,12 +171,14 @@ insert into service_rpc_signatures values ('service.get_github_identity(uuid)'),
     ('service.record_github_fetch(uuid)'),
     ('service.set_demo_reveal_enabled(uuid,boolean)'),
     ('service.list_open_reports(uuid)'),
-    ('service.resolve_report(uuid,uuid,text)');
+    ('service.resolve_report(uuid,uuid,text)'),
+    ('service.list_moderated_accounts(uuid)'),
+    ('service.review_account(uuid,uuid,text)');
 select extensions.is((select pg_catalog.count(*) from service_rpc_signatures as f
     join pg_catalog.pg_proc as p on p.oid = pg_catalog.to_regprocedure(f.signature)
-    where p.pronamespace = 'service'::regnamespace), 7::bigint, 'all seven service RPC signatures exist');
+    where p.pronamespace = 'service'::regnamespace), 9::bigint, 'all nine service RPC signatures exist');
 select extensions.is((select pg_catalog.count(*) from pg_catalog.pg_proc as p where p.pronamespace = 'service'::regnamespace),
-    7::bigint, 'no unlisted service functions or overloads');
+    9::bigint, 'no unlisted service functions or overloads');
 
 select * from extensions.finish();
 

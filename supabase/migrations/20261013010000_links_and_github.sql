@@ -72,6 +72,19 @@ alter table private.external_links
         and private.github_repository_url(url) and private.trim_input(title) <> ''
         and verification_state = 'verified'));
 
+-- Every operation needing two account locks acquires distinct account IDs in
+-- ascending UUID order, before sorted nonce keys, sorted pair keys, then rows.
+create function private.lock_account_pair(account_a uuid, account_b uuid)
+returns void language plpgsql security definer set search_path = '' as $$
+declare account uuid;
+begin
+    for account in select distinct a.id from (values (account_a), (account_b)) as a(id)
+        where a.id is not null order by a.id loop
+        perform pg_catalog.pg_advisory_xact_lock(31001, pg_catalog.hashtext(account::text));
+    end loop;
+end;
+$$;
+
 -- All account mutations take this lock before looking at live Auth or locking
 -- the profile. The profile lock also serializes with Unit 3 set_discovery.
 create function private.lock_link_account(account_id uuid)
@@ -363,12 +376,7 @@ begin
     select c.user_id into cached_account_id from private.linked_identities as c
     where c.provider = 'github' and c.provider_user_id = sync_github_identity.provider_user_id
         and c.user_id <> account_id;
-    if cached_account_id is not null then
-        perform pg_catalog.pg_advisory_xact_lock(31001, pg_catalog.hashtext(least(account_id, cached_account_id)::text));
-        perform pg_catalog.pg_advisory_xact_lock(31001, pg_catalog.hashtext(greatest(account_id, cached_account_id)::text));
-    else
-        perform pg_catalog.pg_advisory_xact_lock(31001, pg_catalog.hashtext(account_id::text));
-    end if;
+    perform private.lock_account_pair(account_id, cached_account_id);
     if not exists (select 1 from auth.users as u where u.id = account_id) then
         perform private.raise_error('not_authenticated');
     end if;
@@ -396,6 +404,17 @@ begin
         if exists (select 1 from private.profiles as p where p.user_id = current_cached_account_id and p.discovery_on)
             and not exists (select 1 from private.external_links as l where l.owner_id = current_cached_account_id) then
             perform private.turn_discovery_off(current_cached_account_id);
+        end if;
+    end if;
+    -- A different live identity on this same account invalidates repository
+    -- evidence too. Saved references cascade before the cache is rewritten.
+    if exists (select 1 from private.linked_identities as c
+        where c.user_id = account_id and c.provider = 'github'
+          and c.provider_user_id <> live_provider_id) then
+        delete from private.external_links as l where l.owner_id = account_id and l.source = 'github';
+        if exists (select 1 from private.profiles as p where p.user_id = account_id and p.discovery_on)
+            and not exists (select 1 from private.external_links as l where l.owner_id = account_id) then
+            perform private.turn_discovery_off(account_id);
         end if;
     end if;
     insert into private.linked_identities as c (user_id, provider, provider_user_id, handle, verified_addresses)

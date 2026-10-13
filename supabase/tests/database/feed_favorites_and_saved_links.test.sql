@@ -699,18 +699,15 @@ delete from private.notification_preferences where user_id=feed_test.id(1);
 select extensions.is(feed_test.as_caller(feed_test.id(1),'saved')#>>'{links,0,link,link_id}',feed_test.link_id(2)::text,
     'saved reference bypasses missing-zone retention for Live reads');
 
--- Only feed is Ready: other endpoints continue to apply the shared owner gate.
+-- A hidden caller is refused by the shared gate on every read and write.
 select feed_test.reset_pair();
 update private.profiles set moderation_state='hidden' where user_id=feed_test.id(1);
 select feed_test.error_call(1,'feed',null,null,true,'account_not_ready','','feed requires a ready caller');
-select extensions.is(pg_catalog.jsonb_array_length(feed_test.as_caller(feed_test.id(1),'favorites')->'cards'),1,'favorite list is Live');
-select extensions.is(pg_catalog.jsonb_array_length(feed_test.as_caller(feed_test.id(1),'saved')->'links'),1,'saved list is Live');
-select extensions.is(feed_test.as_caller(feed_test.id(1),'favorite',feed_test.id(100),null,false)->'favorite','false'::jsonb,
-    'favorite mutation is Live');
-select extensions.is(feed_test.as_caller(feed_test.id(1),'save',feed_test.id(100),feed_test.link_id(2))->'saved','true'::jsonb,
-    'save mutation is Live');
-select extensions.is(feed_test.as_caller(feed_test.id(1),'unsave',feed_test.id(100),feed_test.link_id(2))->'saved','false'::jsonb,
-    'unsave mutation is Live');
+select extensions.is(pg_catalog.jsonb_array_length(feed_test.as_caller(feed_test.id(1),'favorites')->'cards'),0,'hidden caller favorite list is empty');
+select extensions.is(pg_catalog.jsonb_array_length(feed_test.as_caller(feed_test.id(1),'saved')->'links'),0,'hidden caller saved list is empty');
+select feed_test.error_call(1,'favorite',feed_test.id(100),null,false,'not_found','','hidden caller cannot change favorites');
+select feed_test.error_call(1,'save',feed_test.id(100),feed_test.link_id(2),true,'not_found','','hidden caller cannot save other peoples links');
+select feed_test.error_call(1,'unsave',feed_test.id(100),feed_test.link_id(2),false,'not_found','','hidden caller cannot unsave other peoples links');
 
 -- Authorized interests with no overlap must expose [], rather than omit it.
 select feed_test.reset_pair();

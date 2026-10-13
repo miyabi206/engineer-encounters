@@ -82,7 +82,7 @@ returns jsonb language plpgsql security definer set search_path = '' as $$
 declare peer uuid; lock_key bigint; zone_name text; result jsonb;
 begin
     select g.counterpart_id into peer
-    from private.visible_encounter_facts(viewer_id, array[input_encounter_id], false) as g;
+    from private.gated_encounter_facts(viewer_id, array[input_encounter_id], false, block_pair) as g;
     if peer is null then perform private.raise_error('not_found'); end if;
     for lock_key in
         select distinct pg_catalog.hashtextextended(pg_catalog.encode(n.digest, 'hex'), 0)
@@ -95,7 +95,7 @@ begin
         pg_catalog.hashtext(least(viewer_id, peer)::text || ':' || greatest(viewer_id, peer)::text));
     perform 1 from private.encounters as e where e.encounter_id = input_encounter_id for update;
     if not found or not exists (select 1
-        from private.visible_encounter_facts(viewer_id, array[input_encounter_id], false) as g
+        from private.gated_encounter_facts(viewer_id, array[input_encounter_id], false, block_pair) as g
         where g.counterpart_id = peer) then perform private.raise_error('not_found'); end if;
     if block_pair then
         select z.name into zone_name from private.notification_preferences as n
@@ -604,39 +604,52 @@ declare
     due_day date;
     delivery_status text;
     newly_revealed uuid[];
-    zone_name text;
 begin
     if account_id is null then fields := pg_catalog.array_append(fields, 'account_id'); end if;
     if report_at is null then fields := pg_catalog.array_append(fields, 'report_at'); end if;
     if pg_catalog.cardinality(fields) > 0 then perform private.raise_error('invalid_input', fields); end if;
+    if private.account_is_ready(account_id) then
+        select private.latest_due_report_day(z.name, n.report_hour, n.report_minute, report_at)
+        into due_day from private.notification_preferences as n
+        join private.iana_time_zones as z on z.name = n.time_zone
+        join auth.users as u on u.id = n.user_id where n.user_id = account_id;
+    end if;
+    if due_day is null then
+        return pg_catalog.jsonb_build_object('report_day', null, 'newly_revealed_encounter_ids', '[]'::jsonb, 'closed', false);
+    end if;
+    -- A closed, caught-up read does not serialize or attempt any row write.
+    if exists (select 1 from private.report_deliveries as d
+        where d.user_id = account_id and d.report_day = due_day and d.status = 'closed')
+        and not exists (select 1 from private.report_deliveries as d
+            where d.user_id = account_id and d.status = 'open' and d.report_day < due_day)
+        and not exists (select 1 from private.waiting_ambient_views(account_id, report_at) as w
+            where w.reveal_report_day <= due_day) then
+        return pg_catalog.jsonb_build_object('report_day', due_day, 'newly_revealed_encounter_ids', '[]'::jsonb, 'closed', false);
+    end if;
     perform pg_catalog.pg_advisory_xact_lock(31001, pg_catalog.hashtext(account_id::text));
-    -- Recheck live Auth after serialization. Invalid stored zones fail closed,
-    -- preserving the existing read gate for missing/corrupt registration.
-    if not exists (select 1 from auth.users as u where u.id = account_id)
-        or not private.account_is_ready(account_id) then
+    -- Recheck live Auth, readiness and the schedule after serialization.
+    due_day := null;
+    if private.account_is_ready(account_id) then
+        select private.latest_due_report_day(z.name, n.report_hour, n.report_minute, report_at)
+        into due_day from private.notification_preferences as n
+        join private.iana_time_zones as z on z.name = n.time_zone
+        join auth.users as u on u.id = n.user_id where n.user_id = account_id;
+    end if;
+    if due_day is null then
         return pg_catalog.jsonb_build_object('report_day', null, 'newly_revealed_encounter_ids', '[]'::jsonb, 'closed', false);
     end if;
-    select z.name into zone_name from private.notification_preferences as n
-    join pg_catalog.pg_timezone_names as z on z.name = n.time_zone where n.user_id = account_id;
-    if zone_name is null then
-        return pg_catalog.jsonb_build_object('report_day', null, 'newly_revealed_encounter_ids', '[]'::jsonb, 'closed', false);
-    end if;
-    due_day := (report_at at time zone zone_name)::date;
-    while private.local_report_instant(account_id, due_day) > report_at loop due_day := due_day - 1; end loop;
     insert into private.report_deliveries (user_id, report_day, status) values (account_id, due_day, 'open')
     on conflict (user_id, report_day) do nothing;
     select d.status into delivery_status from private.report_deliveries as d
     where d.user_id = account_id and d.report_day = due_day for update;
-    -- Older dates are due too. Close their open keys even when the latest key
-    -- is a replay; never move an already revealed view's report membership.
+    -- Older dates are due too. Close their open keys even on a latest-key replay.
     update private.report_deliveries as d set status = 'closed'
     where d.user_id = account_id and d.status = 'open' and d.report_day < due_day;
     if delivery_status = 'closed' then
         return pg_catalog.jsonb_build_object('report_day', due_day, 'newly_revealed_encounter_ids', '[]'::jsonb, 'closed', false);
     end if;
-    -- Confirmation takes no peer account advisory locks. A peer's waiting view
-    -- can arrive just after its assigned delivery closes; the next later report
-    -- catches up every earlier assigned day and stamps this delivery's date.
+    -- Confirmation takes no peer account locks. Views arriving behind a closed
+    -- assigned date wait for the next later report and get that delivery's date.
     with revealed as (
         update private.encounter_views as v set revealed = true, revealed_report_day = due_day
         where v.viewer_id = account_id and v.encounter_id in (

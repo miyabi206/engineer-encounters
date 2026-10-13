@@ -75,7 +75,7 @@ returns jsonb language plpgsql set search_path = '' as $$
 declare result jsonb;
 begin
     begin
-        if operation in ('queue', 'resolve') then set local role service_role;
+        if operation in ('queue', 'resolve', 'moderated', 'review') then set local role service_role;
         else set local role authenticated; end if;
         perform pg_catalog.set_config('request.jwt.claim.sub', '', true);
         perform pg_catalog.set_config('request.jwt.claims',
@@ -88,8 +88,11 @@ begin
             when 'delete' then result := public.delete_encounter(resource);
             when 'queue' then result := service.list_open_reports(safety_test.id(n));
             when 'resolve' then result := service.resolve_report(safety_test.id(n), resource, outcome_value);
+            when 'moderated' then result := service.list_moderated_accounts(safety_test.id(n));
+            when 'review' then result := service.review_account(safety_test.id(n), resource, outcome_value);
             when 'card' then result := public.get_encounter_card(resource);
             when 'feed' then result := public.get_encounter_feed();
+            when 'daily' then result := public.get_daily_report();
             when 'favorites' then result := public.list_encounter_favorites();
             when 'saved' then result := public.list_saved_links();
             when 'favorite' then result := public.set_encounter_favorite(resource, false);
@@ -187,10 +190,11 @@ grant execute on all functions in schema extensions to anon, authenticated, serv
 create temporary table results (label text primary key, value jsonb);
 
 -- Fixed row cardinalities are counted by section below.
--- 30 + 21 + 17 + 16 + 56 + 20 + 32 + 29 + 16 + 12 + 17 + 14 + 9 = 289.
-select extensions.plan(289);
+-- Original sections: 36 + 25 + 17 + 16 + 56 + 20 + 31 + 29 + 16 + 12 + 17 + 14 + 9 = 298.
+-- Review additions: 15 + 30 + 12 + 30 + 7 + 6 = 100; total 398.
+select extensions.plan(398);
 
--- Catalog: 30 assertions (7 signatures x 3, default 1, columns 1, RLS 2,
+-- Catalog: 36 assertions (9 signatures x 3, default 1, columns 1, RLS 2,
 -- policies 2, FK actions 1, indexes 1, operator column 1).
 create temporary table safety_rpcs (signature text, names text[], statement text, schema_name text);
 insert into safety_rpcs values
@@ -200,7 +204,9 @@ insert into safety_rpcs values
     ('public.report_encounter_person(uuid,text,uuid)', array['encounter_id','reason','link_id'], 'select public.report_encounter_person(null,null,null)', 'public'),
     ('public.delete_encounter(uuid)', array['encounter_id'], 'select public.delete_encounter(null)', 'public'),
     ('service.list_open_reports(uuid)', array['account_id'], 'select service.list_open_reports(null)', 'service'),
-    ('service.resolve_report(uuid,uuid,text)', array['account_id','report_id','outcome'], 'select service.resolve_report(null,null,null)', 'service');
+    ('service.resolve_report(uuid,uuid,text)', array['account_id','report_id','outcome'], 'select service.resolve_report(null,null,null)', 'service'),
+    ('service.list_moderated_accounts(uuid)', array['account_id'], 'select service.list_moderated_accounts(null)', 'service'),
+    ('service.review_account(uuid,uuid,text)', array['account_id','subject_id','outcome'], 'select service.review_account(null,null,null)', 'service');
 select extensions.is(p.proargnames, r.names, r.signature || ': exact argument names')
 from safety_rpcs as r join pg_catalog.pg_proc as p on p.oid = r.signature::regprocedure;
 select extensions.is(pg_catalog.format_type(p.prorettype, null), 'jsonb', r.signature || ': JSON return')
@@ -225,7 +231,7 @@ select extensions.is((select pg_catalog.count(*) from pg_catalog.pg_index where 
 select extensions.ok((select not attnotnull from pg_catalog.pg_attribute
     where attrelid = 'private.profiles'::regclass and attname = 'operator_outcome'), 'operator outcome is nullable');
 
--- Role boundary: 21 assertions (10 public denials, 4 service denials,
+-- Role boundary: 25 assertions (10 public denials, 8 service denials,
 -- 5 missing callers, 2 missing service accounts).
 select extensions.throws_ok(pg_catalog.format('select safety_test.execute_role(%L,%L)', role.name, r.statement),
     '42501', null, role.name || ': ' || r.signature || ' denied')
@@ -393,7 +399,7 @@ select extensions.is((select pg_catalog.count(*) from private.encounters where u
     2::bigint,'remaining old encounter plus genuinely new encounter');
 select extensions.ok(not exists (select 1 from private.consumed_nonces where exchange_digest=safety_test.exchange(700,3,6)), 'delete: scope does not consume unrelated pair');
 
--- Report suppression and threshold: 32 assertions.
+-- Report suppression and threshold: 31 assertions.
 select safety_test.prepare();
 insert into results values ('first', safety_test.call(1,'report',safety_test.id(101),'impersonation',safety_test.link_id(2)));
 select extensions.is((select pg_catalog.array_agg(k order by k) from results as r
@@ -405,7 +411,7 @@ select extensions.ok((select operator_outcome is null from private.profiles wher
 select safety_test.expect_error(pg_catalog.format('select safety_test.call(1,%L,safety_test.id(102),''spam'',%s)',
     op.name, case when op.name in ('save','unsave') then 'safety_test.link_id(2)' else 'null' end),
     'not_found','','retained report: subject-wide ' || op.name || ' denied')
-from (values ('card'),('favorite'),('save'),('unsave'),('block'),('delete'),('report')) as op(name);
+from (values ('card'),('favorite'),('save'),('unsave'),('delete'),('report')) as op(name);
 select extensions.is(pg_catalog.jsonb_array_length(safety_test.call(1,op.name)->op.collection),1,
     'report hides both subject encounters from ' || op.name || ', unrelated owner remains')
 from (values ('feed','cards'),('favorites','cards'),('saved','links')) as op(name,collection);
@@ -564,6 +570,169 @@ update private.reports set status='resolved',outcome='dismissed',resolved_day=sa
 select extensions.is(safety_test.call(235,'queue')->'truncated','false'::jsonb,'resolved sentinel does not truncate 200 open reports');
 select extensions.is(pg_catalog.jsonb_array_length(safety_test.call(235,'queue')->'reports'),200,'queue retains all 200 open reports');
 
+-- Account review validation/operator boundary: 15 assertions.
+select safety_test.prepare();
+select safety_test.expect_error(pg_catalog.format('select safety_test.call(999,%L,safety_test.id(2),null,null,''dismissed'')',op.name),
+    'not_authenticated','',op.name || ': deleted operator') from (values ('moderated'),('review')) as op(name);
+select safety_test.expect_error($q$select safety_test.call(null,'moderated')$q$,'invalid_input','account_id','moderated: null operator');
+select safety_test.expect_error(pg_catalog.format('select safety_test.call(%s,''review'',%s,null,null,%L)',r.account,r.subject,r.outcome),
+    'invalid_input',r.detail,r.description)
+from (values ('null','null',null,'account_id,subject_id,outcome','review: all null'),
+    ('null','safety_test.id(2)','dismissed','account_id','review: null operator'),
+    ('235','null','dismissed','subject_id','review: null subject'),
+    ('235','safety_test.id(2)',null,'outcome','review: null outcome'),
+    ('235','safety_test.id(2)','active','outcome','review: invalid outcome')) as r(account,subject,outcome,detail,description);
+select safety_test.expect_error(pg_catalog.format('select safety_test.call(1,%L,safety_test.id(2),null,null,''dismissed'')',op.name),
+    'not_found','',op.name || ': nonoperator refused') from (values ('moderated'),('review')) as op(name);
+update private.server_settings set operator_account_id=null;
+select safety_test.expect_error(pg_catalog.format('select safety_test.call(235,%L,safety_test.id(2),null,null,''dismissed'')',op.name),
+    'not_found','',op.name || ': no configured operator') from (values ('moderated'),('review')) as op(name);
+update private.server_settings set operator_account_id=safety_test.id(235);
+select safety_test.expect_error(pg_catalog.format('select safety_test.call(235,''review'',safety_test.id(%s),null,null,''dismissed'')',n),
+    'not_found','','review requires a live subject profile') from (values (999),(235)) as t(n);
+select extensions.is(safety_test.call(235,'moderated'),'{"accounts":[],"truncated":false}'::jsonb,'active accounts stay outside the moderation queue');
+
+-- A non-active viewer cannot use any card/list/save/safety path: 15 x 2 = 30.
+create function safety_test.nonactive_cases()
+returns setof text language plpgsql set search_path = pg_catalog, extensions as $$
+declare state_value text; operation text;
+begin
+    foreach state_value in array array['hidden','suspended'] loop
+        perform safety_test.prepare();
+        update private.profiles set moderation_state=state_value where user_id=safety_test.id(1);
+        return next extensions.is((select pg_catalog.count(*) from private.visible_encounter_facts(safety_test.id(1))),
+            0::bigint,state_value || ': shared gate returns no facts');
+        return next safety_test.expect_error($q$select safety_test.call(1,'card',safety_test.id(101))$q$,
+            'not_found','',state_value || ': card refused');
+        foreach operation in array array['favorite','save','unsave','block','delete'] loop
+            return next safety_test.expect_error(pg_catalog.format(
+                'select safety_test.call(1,%L,safety_test.id(101),null,safety_test.link_id(2))',operation),
+                'not_found','',state_value || ': ' || operation || ' refused');
+        end loop;
+        return next safety_test.expect_error($q$select safety_test.call(1,'report',safety_test.id(101),'spam')$q$,
+            'account_not_ready','',state_value || ': report requires an active caller');
+        foreach operation in array array['feed','daily'] loop
+            return next safety_test.expect_error(pg_catalog.format('select safety_test.call(1,%L)',operation),
+                'account_not_ready','',state_value || ': ' || operation || ' refused');
+        end loop;
+        return next extensions.is(safety_test.call(1,'favorites'),'{"cards":[],"truncated":false}'::jsonb,
+            state_value || ': favorite list has no other peoples cards');
+        return next extensions.is(safety_test.call(1,'saved'),'{"links":[],"truncated":false}'::jsonb,
+            state_value || ': saved list has no other peoples links');
+        return next extensions.is((select pg_catalog.count(*) from private.reports),0::bigint,
+            state_value || ': failed report inserts nothing');
+        return next extensions.ok((select pg_catalog.bool_and(favorite) from private.encounter_views where viewer_id=safety_test.id(1))
+            and (select pg_catalog.count(*) from private.saved_links where viewer_id=safety_test.id(1))=3,
+            state_value || ': refused writes preserve favorites and saved references');
+        return next extensions.is((select moderation_state from private.profiles where user_id=safety_test.id(2)),
+            'active',state_value || ': failed safety action does not change the subject');
+    end loop;
+end;
+$$;
+select * from safety_test.nonactive_cases();
+
+-- Report then block bypasses only one's own retained report: 12 assertions.
+select safety_test.prepare();
+select safety_test.call(1,'report',safety_test.id(101),'spam');
+select extensions.ok(safety_test.call(1,'block',safety_test.id(101))->>'block_id' is not null,'reporter can then block the same person');
+select extensions.is((select pg_catalog.count(*) from private.encounters where user_a=safety_test.id(1) and user_b=safety_test.id(2)),
+    0::bigint,'report then block removes every encounter of the pair');
+select extensions.ok((select encounter_id is null and status='open' from private.reports),
+    'block retains the report with cleared context');
+select safety_test.prepare();
+insert into results values ('reviewed_for_block',safety_test.call(1,'report',safety_test.id(101),'spam'));
+select safety_test.call(235,'resolve',(select (value->>'report_id')::uuid from results where label='reviewed_for_block'),null,null,'dismissed');
+select extensions.ok(safety_test.call(1,'block',safety_test.id(101))->>'block_id' is not null,
+    'reporter can block after resolution while the retained report still hides the subject');
+select safety_test.prepare();
+select safety_test.call(1,'report',safety_test.id(101),'spam');
+update private.profiles set moderation_state='hidden' where user_id=safety_test.id(2);
+select safety_test.expect_error($q$select safety_test.call(1,'block',safety_test.id(101))$q$,'not_found','','report bypass retains subject moderation gate');
+update private.profiles set moderation_state='active',discovery_on=false where user_id=safety_test.id(2);
+select safety_test.expect_error($q$select safety_test.call(1,'block',safety_test.id(101))$q$,'not_found','','report bypass retains subject discovery gate');
+update private.profiles set discovery_on=true where user_id=safety_test.id(2);
+update private.profiles set discovery_on=false where user_id=safety_test.id(1);
+select safety_test.expect_error($q$select safety_test.call(1,'block',safety_test.id(101))$q$,'not_found','','report bypass retains viewer discovery gate');
+update private.profiles set discovery_on=true where user_id=safety_test.id(1);
+update private.encounter_views set revealed=false where viewer_id=safety_test.id(1) and encounter_id=safety_test.id(101);
+select safety_test.expect_error($q$select safety_test.call(1,'block',safety_test.id(101))$q$,'not_found','','report bypass retains reveal gate');
+update private.encounter_views set revealed=true where viewer_id=safety_test.id(1) and encounter_id=safety_test.id(101);
+insert into private.blocks (blocker_id,blocked_id,placed_day) values (safety_test.id(2),safety_test.id(1),safety_test.day());
+select safety_test.expect_error($q$select safety_test.call(1,'block',safety_test.id(101))$q$,'not_found','','report bypass retains reverse block gate');
+delete from private.blocks;
+update private.encounters set day_a=safety_test.day()-30 where encounter_id=safety_test.id(101);
+update private.encounter_views set favorite=false where viewer_id=safety_test.id(1) and encounter_id=safety_test.id(101);
+delete from private.saved_links where viewer_id=safety_test.id(1) and encounter_id=safety_test.id(101);
+select safety_test.expect_error($q$select safety_test.call(1,'block',safety_test.id(101))$q$,'not_found','','report bypass retains expiry gate');
+update private.encounters set day_a=safety_test.day() where encounter_id=safety_test.id(101);
+update private.notification_preferences set time_zone='No/SuchZone' where user_id=safety_test.id(1);
+select safety_test.expect_error($q$select safety_test.call(1,'block',safety_test.id(101))$q$,'not_found','','report bypass retains invalid-zone ordinary retention gate');
+
+-- Report remains a Live operation for an active caller with retention.
+select safety_test.prepare();
+delete from private.notification_preferences where user_id=safety_test.id(1);
+select extensions.is(safety_test.call(1,'report',safety_test.id(101),'spam')->>'status','open',
+    'active caller can still report a favorite-retained encounter without preferences');
+insert into private.notification_preferences(user_id,time_zone) values (safety_test.id(1),'UTC');
+
+-- Review applies the same subject-wide outcome, even without a report ID: 30.
+create function safety_test.account_review_cases()
+returns setof text language plpgsql set search_path = pg_catalog, extensions as $$
+declare outcome_value text; state_value text; response jsonb;
+begin
+    foreach outcome_value in array array['dismissed','hidden','suspended'] loop
+        perform safety_test.prepare();
+        perform safety_test.call(1,'report',safety_test.id(101),'spam');
+        perform safety_test.call(3,'report',safety_test.id(103),'other');
+        update private.profiles set moderation_state='hidden' where user_id=safety_test.id(2);
+        return next extensions.is(safety_test.call(235,'moderated'),pg_catalog.jsonb_build_object('accounts',pg_catalog.jsonb_build_array(
+            pg_catalog.jsonb_build_object('account_id',safety_test.id(2),'moderation_state','hidden','operator_outcome',null,'open_report_count',2)),
+            'truncated',false),outcome_value || ': queue includes moderation and open report count');
+        state_value:=case when outcome_value='dismissed' then 'active' else outcome_value end;
+        response:=safety_test.call(235,'review',safety_test.id(2),null,null,outcome_value);
+        return next extensions.is(response,pg_catalog.jsonb_build_object('subject_id',safety_test.id(2),'outcome',outcome_value,'moderation_state',state_value),
+            outcome_value || ': exact account review response');
+        return next extensions.is((select pg_catalog.jsonb_build_array(moderation_state,operator_outcome) from private.profiles where user_id=safety_test.id(2)),
+            pg_catalog.jsonb_build_array(state_value,outcome_value),outcome_value || ': applies operative subject outcome');
+        return next extensions.ok((select pg_catalog.count(*) from private.reports)=2 and (select pg_catalog.bool_and(
+            status='resolved' and outcome=outcome_value and resolved_day=safety_test.day()) from private.reports),
+            outcome_value || ': resolves all open reports with UTC resolution day');
+        return next extensions.is(safety_test.call(235,'queue'),'{"reports":[],"truncated":false}'::jsonb,outcome_value || ': report queue is cleared');
+        return next extensions.is(safety_test.call(235,'moderated'),case when outcome_value='dismissed' then '{"accounts":[],"truncated":false}'::jsonb
+            else pg_catalog.jsonb_build_object('accounts',pg_catalog.jsonb_build_array(pg_catalog.jsonb_build_object(
+                'account_id',safety_test.id(2),'moderation_state',state_value,'operator_outcome',outcome_value,'open_report_count',0)),'truncated',false) end,
+            outcome_value || ': reviewed non-active account stays reviewable without open reports');
+        return next extensions.is(safety_test.call(235,'review',safety_test.id(2),null,null,outcome_value),response,
+            outcome_value || ': same account outcome replay is idempotent');
+        if outcome_value='dismissed' then
+            return next extensions.is(safety_test.call(5,'card',safety_test.id(105))->>'display_name','Person2','dismissed: nonreporter can read again');
+        else
+            return next safety_test.expect_error($q$select safety_test.call(5,'card',safety_test.id(105))$q$,'not_found','',outcome_value || ': nonreporter still cannot read');
+        end if;
+        return next safety_test.expect_error($q$select safety_test.call(1,'card',safety_test.id(101))$q$,'not_found','',outcome_value || ': retained report still hides subject from reporter');
+        return next extensions.is((select pg_catalog.count(*) from private.profiles where user_id<>safety_test.id(2) and moderation_state<>'active'),
+            0::bigint,outcome_value || ': review changes only its subject');
+    end loop;
+end;
+$$;
+select * from safety_test.account_review_cases();
+
+-- Moderated-account cap/order and 201st sentinel: 7 assertions.
+select safety_test.prepare();
+update private.profiles set moderation_state='hidden' where user_id between safety_test.id(10) and safety_test.id(210);
+select extensions.is(pg_catalog.jsonb_array_length(safety_test.call(235,'moderated')->'accounts'),200,'moderation queue caps at 200 accounts');
+select extensions.is(safety_test.call(235,'moderated')->'truncated','true'::jsonb,'201 moderated accounts truncate');
+select extensions.is(safety_test.call(235,'moderated')#>>'{accounts,0,account_id}',safety_test.id(10)::text,'moderation order begins with smallest account ID');
+select extensions.is(safety_test.call(235,'moderated')#>>'{accounts,199,account_id}',safety_test.id(209)::text,'moderation cap preserves account ID order');
+select extensions.ok(not exists(select 1 from pg_catalog.jsonb_array_elements(safety_test.call(235,'moderated')->'accounts') as a
+    where (select pg_catalog.array_agg(k order by k) from pg_catalog.jsonb_object_keys(a) as k)
+        <>array['account_id','moderation_state','open_report_count','operator_outcome']), 'moderation queue contains only account/state/outcome/count');
+update private.profiles set moderation_state='active' where user_id=safety_test.id(210);
+select extensions.is(safety_test.call(235,'moderated')->'truncated','false'::jsonb,'exactly 200 moderated accounts do not truncate');
+update private.profiles set moderation_state='suspended',operator_outcome='suspended' where user_id=safety_test.id(10);
+select extensions.is(safety_test.call(235,'moderated')#>'{accounts,0}',pg_catalog.jsonb_build_object('account_id',safety_test.id(10),
+    'moderation_state','suspended','operator_outcome','suspended','open_report_count',0),'suspended accounts without reports remain reviewable');
+
 -- Link/encounter context loss and automatic reactivation prohibition: 9 assertions.
 select safety_test.prepare();
 insert into results values ('context',safety_test.call(1,'report',safety_test.id(101),'impersonation',safety_test.link_id(2)));
@@ -582,8 +751,20 @@ select safety_test.call(3,'report',safety_test.id(103),'spam');
 select safety_test.call(4,'report',safety_test.id(104),'other');
 delete from auth.users where id=safety_test.id(4);
 select extensions.is((select moderation_state from private.profiles where user_id=safety_test.id(2)),'hidden','reporter deletion never reactivates subject');
-delete from private.reports where subject_id=safety_test.id(2);
+delete from auth.users where id in (safety_test.id(1),safety_test.id(3));
 select extensions.is((select moderation_state from private.profiles where user_id=safety_test.id(2)),'hidden','removal of all reports never reactivates subject');
+
+-- The automatic hide survives reporter deletion, but can always be reviewed: 6.
+select extensions.is(safety_test.call(235,'queue'),'{"reports":[],"truncated":false}'::jsonb,'deleting every reporter leaves no report queue row');
+select extensions.is(safety_test.call(235,'moderated'),pg_catalog.jsonb_build_object('accounts',pg_catalog.jsonb_build_array(
+    pg_catalog.jsonb_build_object('account_id',safety_test.id(2),'moderation_state','hidden','operator_outcome',null,'open_report_count',0)),
+    'truncated',false),'orphaned automatic hide stays in the account moderation queue');
+select extensions.is(safety_test.call(235,'review',safety_test.id(2),null,null,'dismissed'),pg_catalog.jsonb_build_object(
+    'subject_id',safety_test.id(2),'outcome','dismissed','moderation_state','active'),'operator can dismiss an orphaned hide without any report ID');
+select extensions.is(safety_test.call(235,'moderated'),'{"accounts":[],"truncated":false}'::jsonb,'dismissed orphan leaves the moderated queue');
+select extensions.is((select pg_catalog.jsonb_build_array(moderation_state,operator_outcome) from private.profiles where user_id=safety_test.id(2)),
+    '["active","dismissed"]'::jsonb,'orphan dismissal records the operator outcome');
+select extensions.is(safety_test.call(5,'card',safety_test.id(105))->>'display_name','Person2','orphan dismissal restores access for a remaining nonreporter');
 
 select * from extensions.finish();
 rollback;
