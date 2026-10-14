@@ -6,7 +6,7 @@ import UIKit
 public struct QRView: View {
     @ObservedObject private var model: QRModel
     @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @ScaledMetric(relativeTo: .body) private var cameraHeight = 280.0
     private let navigation: QRNavigationActions
     @SessionViewState private var requestingCamera = false
 
@@ -15,31 +15,32 @@ public struct QRView: View {
     }
 
     public var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                if dynamicTypeSize.isAccessibilitySize { modePicker.pickerStyle(.inline) }
-                else { modePicker.pickerStyle(.segmented) }
-                SessionCard {
+        EncounterScreen {
+            modePicker
+            SessionCard {
+                VStack(spacing: 20) {
                     if model.segment == .show { showCode } else { scanCode }
-                }
-                if let error = model.error {
-                    SessionCard {
-                        Text(SessionStrings.text(SessionStrings.error(error)))
-                        Button(SessionStrings.text(.retry)) { Task { await model.retry() } }
-                            .disabled(model.isIssuing || model.isRedeeming)
+                    Text(SessionStrings.text(.confirmed)).font(.footnote).foregroundStyle(EncounterPalette.inkSecondary)
+                }.multilineTextAlignment(.center).frame(maxWidth: .infinity)
+            }
+            if let error = model.error {
+                SessionCard {
+                    EncounterInlineError(message: SessionStrings.text(SessionStrings.error(error)),
+                                         retryLabel: SessionStrings.text(.retry),
+                                         disabled: model.isIssuing || model.isRedeeming) {
+                        Task { await model.retry() }
                     }
                 }
-                Text(SessionStrings.text(.confirmed)).foregroundStyle(.secondary)
-            }.padding()
+            }
         }
-        .background(Color(uiColor: .systemGroupedBackground))
         .navigationTitle(SessionStrings.text(.qrExchange))
-        .navigationBarTitleDisplayMode(.large)
+        .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden()
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) { Button(SessionStrings.text(.back), action: navigation.close) }
+            ToolbarItem(placement: .topBarLeading) {
+                EncounterBackButton(label: SessionStrings.text(.back), action: navigation.close)
+            }
         }
-        .tint(.teal)
         .background {
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 Color.clear.onChange(of: context.date) {
@@ -59,29 +60,35 @@ public struct QRView: View {
     }
 
     private var modePicker: some View {
-        Picker(SessionStrings.text(.codeMode), selection: Binding(get: { model.segment }, set: { value in
+        EncounterSegmentedControl(segments: [
+            .init(QRSegment.show, label: SessionStrings.text(.showCode)),
+            .init(QRSegment.scan, label: SessionStrings.text(.scanCode), symbol: "camera")
+        ], selection: Binding(get: { model.segment }, set: { value in
             model.select(value)
             Task { await model.tick() }
-        })) {
-            Text(SessionStrings.text(.showCode)).tag(QRSegment.show)
-            Text(SessionStrings.text(.scanCode)).tag(QRSegment.scan)
-        }
+        }))
+        .accessibilityLabel(SessionStrings.text(.codeMode))
     }
 
     @ViewBuilder private var showCode: some View {
-        if model.isIssuing { ProgressView(SessionStrings.text(.loading)) }
+        if model.isIssuing { EncounterProgress(SessionStrings.text(.loading)) }
         if let code = model.code, model.isCodeValid {
             QRImageView(payload: code.payload)
-            Text(SessionStrings.remaining(model.remainingSeconds)).monospacedDigit()
+            Text(SessionStrings.remaining(model.remainingSeconds)).font(.headline).monospacedDigit()
+                .foregroundStyle(EncounterPalette.accent)
         }
-        Text(SessionStrings.text(.validity))
-        Button(SessionStrings.text(.refreshCode)) { Task { await model.refreshCode() } }
+        Text(SessionStrings.text(.validity)).font(.callout).foregroundStyle(EncounterPalette.inkSecondary)
+        Button { Task { await model.refreshCode() } } label: {
+            Label { Text(SessionStrings.text(.refreshCode)) } icon: {
+                Image(systemName: "arrow.clockwise").accessibilityHidden(true)
+            }
+        }.buttonStyle(EncounterButtonStyle(.secondary))
             .disabled(model.isIssuing || model.isRedeeming || model.hasConfirmed)
-        Text(SessionStrings.text(.invalidatesPrevious)).font(.footnote).foregroundStyle(.secondary)
+        Text(SessionStrings.text(.invalidatesPrevious)).font(.footnote).foregroundStyle(EncounterPalette.inkSecondary)
     }
 
     @ViewBuilder private var scanCode: some View {
-        if model.isRedeeming { ProgressView(SessionStrings.text(.confirming)) }
+        if model.isRedeeming { EncounterProgress(SessionStrings.text(.confirming)) }
         switch model.cameraPermission {
         case .notDetermined:
             Button(SessionStrings.text(.allowCamera)) {
@@ -90,19 +97,21 @@ public struct QRView: View {
                     model.receiveCameraPermission(await QRCameraAccess.request())
                     requestingCamera = false
                 }
-            }.disabled(requestingCamera)
+            }.buttonStyle(EncounterButtonStyle(.primary)).disabled(requestingCamera)
         case .denied:
-            Text(SessionStrings.text(.cameraDenied))
+            EncounterNotice(SessionStrings.text(.cameraDenied), kind: .warning)
             Button(SessionStrings.text(.openSettings), action: navigation.openIOSSettings)
+                .buttonStyle(EncounterButtonStyle(.secondary))
         case .restricted:
-            Text(SessionStrings.text(.cameraRestricted))
+            EncounterNotice(SessionStrings.text(.cameraRestricted), kind: .warning)
         case .authorized:
             if scenePhase == .active {
                 QRScannerView(isScanning: !model.isRedeeming && model.error == nil && !model.hasConfirmed,
                               onScan: { text in Task { await model.scan(text) } },
                               onFailure: { model.cameraFailed() })
-                    .frame(height: 280)
-                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                    .frame(height: cameraHeight)
+                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(EncounterPalette.border, lineWidth: 1))
                     .accessibilityLabel(SessionStrings.text(.cameraPreview))
             }
         }
@@ -112,14 +121,22 @@ public struct QRView: View {
 @MainActor
 struct QRImageView: View {
     let payload: QRPayload
+    @ScaledMetric(relativeTo: .body) private var tileWidth = 320.0
+
+    // Resolve the shared light surface explicitly so QR contrast is constant in dark appearance.
+    private let tileFill = Color(uiColor: EncounterPalette.surfaceUIColor.resolvedColor(with: UITraitCollection(userInterfaceStyle: .light)))
+    private let tileBorder = Color(uiColor: EncounterPalette.borderUIColor.resolvedColor(with: UITraitCollection(userInterfaceStyle: .light)))
+
     var body: some View {
         if let image = image {
             Image(uiImage: image).interpolation(.none).resizable().scaledToFit()
-                .padding(24).background(.white)
-                .frame(maxWidth: 320)
+                .padding(24)
+                .background(tileFill, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(tileBorder, lineWidth: 1))
+                .frame(maxWidth: tileWidth)
                 .frame(maxWidth: .infinity)
                 .accessibilityLabel(SessionStrings.text(.qrImage))
-        } else { Text(SessionStrings.text(.unreadable)) }
+        } else { Text(SessionStrings.text(.unreadable)).foregroundStyle(EncounterPalette.destructive) }
     }
 
     private var image: UIImage? {
