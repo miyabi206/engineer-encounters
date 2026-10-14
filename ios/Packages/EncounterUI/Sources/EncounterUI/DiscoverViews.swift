@@ -130,8 +130,10 @@ public struct EncounterDetailView: View {
                         DiscoverSurface {
                             DiscoverProfileHeader(displayName: card.displayName, introduction: card.introduction)
                             DiscoverAdaptiveRow {
-                                Image(systemName: "calendar").accessibilityHidden(true)
-                                Text(card.day.formatted(locale: locale))
+                                HStack(spacing: 8) {
+                                    Image(systemName: "calendar").accessibilityHidden(true)
+                                    Text(card.day.formatted(locale: locale))
+                                }
                                 Text(DiscoverStrings.text(card.kind.discoverLabel))
                             }.font(.callout).foregroundStyle(EncounterPalette.inkSecondary)
                             if card.isShell { Text(DiscoverStrings.text(.shell)) }
@@ -153,20 +155,26 @@ public struct EncounterDetailView: View {
                             DiscoverSurface { DiscoverPanelHeader(key: .contact, symbol: "envelope"); Text(contact) }
                         }
                         DiscoverWriteFailure(model: model)
-                        DiscoverDivider()
-                        DiscoverAdaptiveActions {
-                            if deferred.contains(.safety), let safety = navigation.openReportOrBlock {
-                                Button { safety(card) } label: {
-                                    DiscoverActionLabel(key: .safety, symbol: "exclamationmark.triangle")
-                                        .foregroundStyle(EncounterPalette.destructive)
-                                }.buttonStyle(EncounterButtonStyle(.tertiary)).disabled(model.isWriting)
-                            }
-                            if deferred.contains(.deletion) {
-                                Button(role: .destructive) {
-                                    model.requestDeletion(card.id)
-                                } label: {
-                                    DiscoverActionLabel(key: .deleteEncounter, symbol: "trash")
-                                }.buttonStyle(EncounterButtonStyle(.destructive)).disabled(model.isWriting)
+                        if deferred.contains(.safety) || deferred.contains(.deletion) {
+                            DiscoverDivider()
+                            DiscoverDividedActions {
+                                if deferred.contains(.safety), let safety = navigation.openReportOrBlock {
+                                    Button { safety(card) } label: {
+                                        DiscoverActionLabel(key: .safety, symbol: "exclamationmark.triangle")
+                                            .font(.subheadline.weight(.semibold))
+                                    }.buttonStyle(EncounterButtonStyle(.destructiveText)).disabled(model.isWriting)
+                                }
+                                if deferred.contains(.safety) && deferred.contains(.deletion) {
+                                    DiscoverActionDivider()
+                                }
+                                if deferred.contains(.deletion) {
+                                    Button(role: .destructive) {
+                                        model.requestDeletion(card.id)
+                                    } label: {
+                                        DiscoverActionLabel(key: .deleteEncounter, symbol: "trash")
+                                            .font(.subheadline.weight(.semibold))
+                                    }.buttonStyle(EncounterButtonStyle(.destructiveText)).disabled(model.isWriting)
+                                }
                             }
                         }
                     }
@@ -185,7 +193,7 @@ public struct EncounterDetailView: View {
                               systemImage: detail.favorite ? "star.fill" : "star")
                             .labelStyle(.iconOnly).font(.title3)
                             .frame(minWidth: 44, minHeight: 44)
-                    }.buttonStyle(.plain).foregroundStyle(EncounterPalette.accent).disabled(model.isWriting)
+                    }.buttonStyle(EncounterPlainButtonStyle()).foregroundStyle(EncounterPalette.accent).disabled(model.isWriting)
                 }
             }
         }
@@ -273,8 +281,7 @@ public struct DiscoverFavoritesView: View {
                 EncounterSegmentedControl(segments: [
                     .init(DiscoverFavoritesSegment.encounters, label: DiscoverStrings.text(.encounters)),
                     .init(DiscoverFavoritesSegment.savedLinks, label: DiscoverStrings.text(.savedLinks))
-                ], selection: $segment)
-                .accessibilityLabel(DiscoverStrings.text(.favorites))
+                ], selection: $segment, label: DiscoverStrings.text(.favorites))
                 switch !model.isAuthorized ? .failed : (segment == .encounters ? model.favoritesState : model.savedLinksState) {
                 case .idle, .loading: DiscoverSkeleton()
                 case .failed, .missing: DiscoverFailure { await loadSelectedSegment() }
@@ -349,7 +356,7 @@ public struct DiscoverBluetoothUnavailablePanel: View {
                 switch status {
                 case .poweredOff: Text(DiscoverStrings.text(.bluetoothOff))
                 case .denied: Text(DiscoverStrings.text(.bluetoothDenied))
-                case .checking: DiscoverSkeleton()
+                case .checking: DiscoverSkeletonContent()
                 case .failed:
                     HStack(alignment: .top, spacing: 8) {
                         Image(systemName: "exclamationmark.circle").accessibilityHidden(true)
@@ -399,8 +406,8 @@ public struct DiscoverDiscoveryOffPanel: View {
             DiscoverPanelHeader(key: .discoveryOff, symbol: "pause.circle")
             Text(DiscoverStrings.text(.notParticipating))
             switch DiscoverPrerequisiteContent.select(state: state, prerequisites: prerequisites) {
-            case .loading: DiscoverSkeleton()
-            case .failure: DiscoverFailure(retry: retry)
+            case .loading: DiscoverSkeletonContent()
+            case .failure: DiscoverFailureContent(retry: retry)
             case let .guidance(editProfile, editLinks):
                 Button(DiscoverStrings.text(.enableDiscovery), action: navigation.openDiscoverySettings)
                     .buttonStyle(EncounterButtonStyle(.primary))
@@ -495,13 +502,16 @@ private struct DiscoverCapsuleLabel: View {
     let key: DiscoverString
     let symbol: String
     @ScaledMetric(relativeTo: .body) private var target = 44.0
+    @ScaledMetric(relativeTo: .body) private var corner = 16.0
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     var body: some View {
+        let shape = discoverCapsuleShape(for: dynamicTypeSize, corner: corner)
         DiscoverActionLabel(key: key, symbol: symbol)
             .font(.subheadline.weight(.semibold)).padding(.horizontal, 16).padding(.vertical, 8)
             .frame(minHeight: max(44, target)).foregroundStyle(EncounterPalette.accent)
-            .background(EncounterPalette.accentSoft, in: Capsule())
-            .overlay(Capsule().stroke(EncounterPalette.border, lineWidth: 1))
-            .contentShape(Capsule())
+            .background(EncounterPalette.accentSoft, in: shape)
+            .overlay(shape.stroke(EncounterPalette.border, lineWidth: 1))
+            .contentShape(shape)
     }
 }
 
@@ -509,14 +519,73 @@ private struct DiscoverCapsuleLabel: View {
 private struct DiscoverStatusCapsule: View {
     @ScaledMetric(relativeTo: .body) private var dot = 10.0
     @ScaledMetric(relativeTo: .body) private var target = 44.0
+    @ScaledMetric(relativeTo: .body) private var corner = 16.0
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     var body: some View {
+        let shape = discoverCapsuleShape(for: dynamicTypeSize, corner: corner)
         HStack(spacing: 8) {
             Circle().fill(EncounterPalette.accent).frame(width: dot, height: dot).accessibilityHidden(true)
             Text(DiscoverStrings.text(.discoveryEnabled)).fixedSize(horizontal: false, vertical: true)
             Image(systemName: "chevron.right").accessibilityHidden(true)
         }.font(.subheadline.weight(.semibold)).padding(.horizontal, 16).padding(.vertical, 8)
             .frame(minHeight: max(44, target)).foregroundStyle(EncounterPalette.accent)
-            .background(EncounterPalette.accentSoft, in: Capsule()).contentShape(Capsule())
+            .background(EncounterPalette.accentSoft, in: shape).contentShape(shape)
+    }
+}
+
+private func discoverCapsuleShape(for size: DynamicTypeSize, corner: CGFloat) -> AnyShape {
+    size.isAccessibilitySize ? AnyShape(RoundedRectangle(cornerRadius: corner, style: .continuous)) : AnyShape(Capsule())
+}
+
+@MainActor
+private struct DiscoverKindBadge: View {
+    let kind: EncounterKind
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @ScaledMetric(relativeTo: .body) private var corner = 16.0
+    private var foreground: Color {
+        switch kind {
+        case .ambient: EncounterPalette.ambientText
+        case .session: EncounterPalette.sessionText
+        case .qr: EncounterPalette.accent
+        }
+    }
+    private var fill: Color {
+        switch kind {
+        case .ambient: EncounterPalette.ambientFill
+        case .session: EncounterPalette.sessionFill
+        case .qr: EncounterPalette.accentSoft
+        }
+    }
+    var body: some View {
+        Text(DiscoverStrings.text(kind.discoverLabel)).font(.caption)
+            .padding(.horizontal, 8).padding(.vertical, 6)
+            .foregroundStyle(foreground)
+            .background(fill, in: discoverCapsuleShape(for: dynamicTypeSize, corner: corner))
+            .fixedSize(horizontal: !dynamicTypeSize.isAccessibilitySize, vertical: true)
+    }
+}
+
+@MainActor
+private struct DiscoverDividedActions<Content: View>: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @ViewBuilder let content: () -> Content
+    var body: some View {
+        if dynamicTypeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: 12, content: content)
+        } else {
+            HStack(spacing: 0, content: content)
+        }
+    }
+}
+
+@MainActor
+private struct DiscoverActionDivider: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @ScaledMetric(relativeTo: .body) private var height = 28.0
+    var body: some View {
+        if !dynamicTypeSize.isAccessibilitySize {
+            Rectangle().fill(EncounterPalette.border).frame(width: 1, height: height).accessibilityHidden(true)
+        }
     }
 }
 
@@ -557,24 +626,29 @@ private struct DiscoverDivider: View {
 
 @MainActor
 struct DiscoverSkeleton: View {
+    var body: some View { DiscoverSurface { DiscoverSkeletonContent() } }
+}
+
+@MainActor
+private struct DiscoverSkeletonContent: View {
     @ScaledMetric(relativeTo: .body) private var avatar = 56.0
     @ScaledMetric(relativeTo: .body) private var line = 14.0
     @ScaledMetric(relativeTo: .body) private var preview = 64.0
     @ScaledMetric(relativeTo: .body) private var corner = 12.0
     var body: some View {
-        DiscoverSurface {
+        VStack(alignment: .leading, spacing: 16) {
             DiscoverAdaptiveRow {
                 EncounterSymbolTile(symbol: "hourglass")
                 EncounterProgress(DiscoverStrings.text(.loading))
             }
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 12) {
-                    Circle().fill(EncounterPalette.neutralFill).frame(width: avatar, height: avatar)
+                    Circle().fill(EncounterPalette.neutralFill).frame(width: min(avatar, 64), height: min(avatar, 64))
                     VStack(alignment: .leading, spacing: 12) {
                         RoundedRectangle(cornerRadius: corner).fill(EncounterPalette.neutralFill)
                             .frame(height: line)
                         RoundedRectangle(cornerRadius: corner).fill(EncounterPalette.neutralFill)
-                            .frame(height: line).padding(.trailing, avatar)
+                            .frame(height: line).padding(.trailing, min(avatar, 64))
                     }
                 }
                 RoundedRectangle(cornerRadius: corner).fill(EncounterPalette.neutralFill).frame(height: preview)
@@ -588,11 +662,15 @@ struct DiscoverSkeleton: View {
 @MainActor
 struct DiscoverFailure: View {
     let retry: @MainActor () async -> Void
+    var body: some View { DiscoverSurface { DiscoverFailureContent(retry: retry) } }
+}
+
+@MainActor
+private struct DiscoverFailureContent: View {
+    let retry: @MainActor () async -> Void
     var body: some View {
-        DiscoverSurface {
-            EncounterInlineError(message: DiscoverStrings.text(.loadError), retryLabel: DiscoverStrings.text(.retry)) {
-                Task { await retry() }
-            }
+        EncounterInlineError(message: DiscoverStrings.text(.loadError), retryLabel: DiscoverStrings.text(.retry)) {
+            Task { await retry() }
         }
     }
 }
@@ -618,18 +696,43 @@ struct DiscoverSessionControls: View {
     let sessionActive: Bool
     let bluetooth: DiscoverBluetoothStatus
     let navigation: DiscoverNavigationActions
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     var body: some View {
-        DiscoverAdaptiveActions {
-            Button {
-                DiscoverSessionDestination.select(sessionActive: sessionActive, bluetooth: bluetooth).open(using: navigation)
-            } label: {
-                DiscoverActionLabel(key: sessionActive ? .viewSession : .startSession,
-                                    symbol: "dot.radiowaves.left.and.right")
-            }.buttonStyle(EncounterButtonStyle(.primary))
-            Button(action: navigation.openQR) {
-                DiscoverActionLabel(key: .qrExchange, symbol: "qrcode")
-            }.buttonStyle(EncounterButtonStyle(.secondary))
+        if dynamicTypeSize.isAccessibilitySize {
+            stackedControls
+        } else {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) {
+                    sessionButton(singleLine: true)
+                    qrButton(fullWidth: false, singleLine: true)
+                }
+                stackedControls
+            }
         }
+    }
+
+    private var stackedControls: some View {
+        VStack(spacing: 12) {
+            sessionButton()
+            qrButton()
+        }
+    }
+
+    private func sessionButton(singleLine: Bool = false) -> some View {
+        Button {
+            DiscoverSessionDestination.select(sessionActive: sessionActive, bluetooth: bluetooth).open(using: navigation)
+        } label: {
+            DiscoverActionLabel(key: sessionActive ? .viewSession : .startSession,
+                                symbol: "dot.radiowaves.left.and.right")
+                .fixedSize(horizontal: singleLine, vertical: true)
+        }.buttonStyle(EncounterButtonStyle(.primary))
+    }
+
+    private func qrButton(fullWidth: Bool = true, singleLine: Bool = false) -> some View {
+        Button(action: navigation.openQR) {
+            DiscoverActionLabel(key: .qrExchange, symbol: "qrcode")
+                .fixedSize(horizontal: singleLine, vertical: true)
+        }.buttonStyle(EncounterButtonStyle(.secondary, fullWidth: fullWidth))
     }
 }
 
@@ -675,8 +778,8 @@ struct DiscoverDayGroups: View {
                                 EncounterIdentity(displayName: card.displayName,
                                                   subtitle: entry.sharedInterests.isEmpty ? nil :
                                                     DiscoverStrings.sharedCount(entry.sharedInterests.count, locale: locale))
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                EncounterBadge(DiscoverStrings.text(card.kind.discoverLabel), style: card.kind.discoverBadgeStyle)
+                                    .frame(maxWidth: .infinity, alignment: .leading).layoutPriority(1)
+                                DiscoverKindBadge(kind: card.kind)
                             }
                             if card.isShell { Text(DiscoverStrings.text(.shell)) }
                             if !entry.sharedInterests.isEmpty {
@@ -724,11 +827,16 @@ struct EncounterIdentity: View {
     init(displayName: String?, subtitle: String?) { self.displayName = displayName; self.subtitle = subtitle }
 
     var body: some View {
-        DiscoverAdaptiveRow {
-            if let displayName { EncounterAvatar(displayName: displayName, decorative: true) }
-            VStack(alignment: .leading, spacing: 4) {
-                if let displayName { Text(displayName).font(.title2.bold()) }
-                if let subtitle { Text(subtitle).font(.callout).foregroundStyle(EncounterPalette.inkSecondary) }
+        if displayName != nil || subtitle != nil {
+            DiscoverAdaptiveRow {
+                if let displayName { EncounterAvatar(displayName: displayName, decorative: true) }
+                VStack(alignment: .leading, spacing: 4) {
+                    if let displayName { Text(displayName).font(.title2.bold()) }
+                    if let subtitle {
+                        Text(subtitle).font(.caption).foregroundStyle(EncounterPalette.inkSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }.layoutPriority(1)
             }
         }
     }
@@ -739,12 +847,14 @@ private struct DiscoverProfileHeader: View {
     let displayName: String?
     let introduction: String?
     var body: some View {
-        DiscoverAdaptiveRow {
-            if let displayName { EncounterAvatar(displayName: displayName, size: 80, decorative: true) }
-            VStack(alignment: .leading, spacing: 12) {
-                if let displayName { Text(displayName).font(.title2.bold()) }
-                if let introduction { Text(introduction).fixedSize(horizontal: false, vertical: true) }
-            }.frame(maxWidth: .infinity, alignment: .leading)
+        if displayName != nil || introduction != nil {
+            DiscoverAdaptiveRow {
+                if let displayName { EncounterAvatar(displayName: displayName, size: 80, decorative: true) }
+                VStack(alignment: .leading, spacing: 12) {
+                    if let displayName { Text(displayName).font(.title2.bold()) }
+                    if let introduction { Text(introduction).fixedSize(horizontal: false, vertical: true) }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 }
@@ -770,7 +880,10 @@ struct DiscoverInterestChips: View {
                             EncounterChip(label: interest.label(language: locale.identifier), selected: false, action: action)
                         }
                     }
-                }.scrollIndicators(.hidden)
+                }
+                .contentMargins(.horizontal, 20, for: .scrollContent)
+                .padding(.horizontal, -20)
+                .scrollIndicators(.hidden)
             }
         } else {
             DiscoverInterestTags(interests: interests, tone: .accent)
@@ -879,34 +992,39 @@ struct EncounterLinkView: View {
                 }
                 EncounterVerification(verified: link.verified)
             }
+            if !link.verified {
+                Text(DiscoverStrings.text(.unverifiedExplanation)).font(.caption).foregroundStyle(EncounterPalette.inkSecondary)
+            }
             if !link.title.isEmpty { Text(link.title).font(.headline) }
             if let description = link.description { Text(description) }
             EncounterTextChips(values: link.tags)
             if let language = link.mainLanguage { Text(language).font(.callout).foregroundStyle(EncounterPalette.inkSecondary) }
             if let opening = link.openingText { Text(opening) }
-            if !link.verified {
-                Text(DiscoverStrings.text(.unverifiedExplanation)).font(.caption).foregroundStyle(EncounterPalette.inkSecondary)
-            }
             DiscoverDivider()
-            DiscoverAdaptiveActions {
+            DiscoverDividedActions {
                 Link(destination: link.url) {
                     DiscoverActionLabel(key: .openOriginal, symbol: "arrow.up.right.square")
+                        .font(.subheadline.weight(.semibold))
                 }.buttonStyle(EncounterButtonStyle(.tertiary)).disabled(disabled)
-                if let viewEncounter {
-                    Button(DiscoverStrings.text(.viewEncounter), action: viewEncounter)
-                        .buttonStyle(EncounterButtonStyle(.tertiary))
-                }
                 if !isSample {
+                    DiscoverActionDivider()
                     Button(action: toggleSaved) {
                         DiscoverActionLabel(key: saved ? .unsaveLink : .saveLink,
                                             symbol: saved ? "bookmark.fill" : "bookmark")
+                            .font(.subheadline.weight(.semibold))
                     }.buttonStyle(EncounterButtonStyle(.tertiary)).disabled(disabled)
                 }
             }
+            if let viewEncounter {
+                Button(action: viewEncounter) {
+                    Text(DiscoverStrings.text(.viewEncounter)).font(.footnote)
+                }.buttonStyle(EncounterButtonStyle(.tertiary, fullWidth: false))
+            }
             if !isSample {
                 if let reportImpersonation {
-                    Button(DiscoverStrings.text(.reportImpersonation), action: reportImpersonation)
-                        .buttonStyle(EncounterButtonStyle(.tertiary)).disabled(disabled)
+                    Button(action: reportImpersonation) {
+                        Text(DiscoverStrings.text(.reportImpersonation)).font(.footnote)
+                    }.buttonStyle(EncounterButtonStyle(.tertiary, fullWidth: false)).disabled(disabled)
                 }
             }
         }
@@ -929,9 +1047,5 @@ private extension EncounterLinkCard {
 extension EncounterKind {
     var discoverLabel: DiscoverString {
         switch self { case .ambient: .ambient; case .session: .session; case .qr: .qrKind }
-    }
-
-    fileprivate var discoverBadgeStyle: EncounterBadge.Style {
-        switch self { case .ambient: .ambient; case .session: .session; case .qr: .qr }
     }
 }
