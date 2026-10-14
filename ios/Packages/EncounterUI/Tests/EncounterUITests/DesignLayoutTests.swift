@@ -3,6 +3,12 @@ import SwiftUI
 @testable import EncounterUI
 
 final class DesignLayoutTests: XCTestCase {
+    func testSegmentReselectionDoesNotRequestABindingWrite() {
+        XCTAssertFalse(EncounterSegmentedControl<String>.shouldChangeSelection(from: "scan", to: "scan"))
+        XCTAssertTrue(EncounterSegmentedControl<String>.shouldChangeSelection(from: "scan", to: "code"))
+        XCTAssertTrue(EncounterSegmentedControl<String>.shouldChangeSelection(from: "code", to: "scan"))
+    }
+
     func testWrapsAtAvailableWidthAndUsesTallestItemInEachRow() {
         let result = EncounterFlowLayout.arrange([
             CGSize(width: 60, height: 20), CGSize(width: 40, height: 30), CGSize(width: 40, height: 10)

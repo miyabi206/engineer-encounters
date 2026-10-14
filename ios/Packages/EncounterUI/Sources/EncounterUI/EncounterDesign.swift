@@ -1,6 +1,10 @@
 import SwiftUI
 import UIKit
 
+private func encounterCapsuleShape(for size: DynamicTypeSize) -> AnyShape {
+    size.isAccessibilitySize ? AnyShape(RoundedRectangle(cornerRadius: 16, style: .continuous)) : AnyShape(Capsule())
+}
+
 /// Semantic colours shared by every Encounter screen. UIKit tokens retain trait resolution.
 public enum EncounterPalette {
     private static func rgb(_ hex: UInt32) -> UIColor {
@@ -158,7 +162,7 @@ public struct EncounterSurfaceCard<Content: View>: View {
 
 @MainActor
 public struct EncounterButtonStyle: ButtonStyle {
-    public enum Kind { case primary, secondary, tertiary, destructive }
+    public enum Kind { case primary, secondary, tertiary, destructive, destructiveText }
     private let kind: Kind
     private let fullWidth: Bool
     @Environment(\.isEnabled) private var isEnabled
@@ -173,7 +177,7 @@ public struct EncounterButtonStyle: ButtonStyle {
         return switch kind {
         case .primary: EncounterPalette.onAccent
         case .secondary, .tertiary: EncounterPalette.accent
-        case .destructive: EncounterPalette.destructive
+        case .destructive, .destructiveText: EncounterPalette.destructive
         }
     }
     private func fill(for kind: Kind) -> Color {
@@ -181,12 +185,12 @@ public struct EncounterButtonStyle: ButtonStyle {
         return switch kind {
         case .primary: EncounterPalette.accent
         case .secondary, .destructive: EncounterPalette.surface
-        case .tertiary: .clear
+        case .tertiary, .destructiveText: .clear
         }
     }
 
     public func makeBody(configuration: Configuration) -> some View {
-        let kind = configuration.role == .destructive ? Kind.destructive : self.kind
+        let kind = configuration.role == .destructive && self.kind != .destructiveText ? Kind.destructive : self.kind
         let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
         return configuration.label.font(.headline).multilineTextAlignment(.center)
             .padding(.horizontal, 16).padding(.vertical, 10)
@@ -221,6 +225,7 @@ public struct EncounterChip: View {
     private let tone: TagTone
     private let action: (@MainActor () -> Void)?
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ScaledMetric(relativeTo: .body) private var height = 44.0
 
     public init(label: String, selected: Bool, action: @escaping @MainActor () -> Void) {
@@ -231,7 +236,8 @@ public struct EncounterChip: View {
     }
 
     private var chip: some View {
-        HStack(spacing: 8) {
+        let shape = encounterCapsuleShape(for: dynamicTypeSize)
+        return HStack(spacing: 8) {
             Text(label).multilineTextAlignment(.leading)
             if selected { Image(systemName: "checkmark").accessibilityHidden(true) }
         }
@@ -241,9 +247,9 @@ public struct EncounterChip: View {
             action == nil && tone == .accent ? EncounterPalette.accent : EncounterPalette.ink)
         .background(!isEnabled ? EncounterPalette.neutralFill : selected ? EncounterPalette.accent :
             action == nil && tone == .accent ? EncounterPalette.accentSoft : EncounterPalette.neutralFill,
-                    in: Capsule())
-        .overlay(Capsule().stroke(EncounterPalette.border, lineWidth: 1))
-        .contentShape(Capsule())
+                    in: shape)
+        .overlay(shape.stroke(EncounterPalette.border, lineWidth: 1))
+        .contentShape(shape)
     }
     public var body: some View {
         if let action {
@@ -387,6 +393,7 @@ public struct EncounterBadge: View {
     private let label: String
     private let style: Style
     private let symbol: String?
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     public init(_ label: String, style: Style, symbol: String? = nil) {
         self.label = label; self.style = style; self.symbol = symbol
     }
@@ -421,7 +428,7 @@ public struct EncounterBadge: View {
             Image(systemName: symbol ?? defaultSymbol).accessibilityHidden(true)
             Text(label)
         }.font(.footnote).padding(.horizontal, 10).padding(.vertical, 6)
-            .foregroundStyle(foreground).background(fill, in: Capsule())
+            .foregroundStyle(foreground).background(fill, in: encounterCapsuleShape(for: dynamicTypeSize))
     }
 }
 
@@ -514,21 +521,39 @@ public struct EncounterSegmentedControl<Value: Hashable>: View {
         public init(_ id: Value, label: String, symbol: String? = nil) { self.id = id; self.label = label; self.symbol = symbol }
     }
     private let segments: [Segment]
+    private let label: String?
     @Binding private var selection: Value
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ScaledMetric(relativeTo: .body) private var target = 44.0
-    public init(segments: [Segment], selection: Binding<Value>) { self.segments = segments; _selection = selection }
+    public init(segments: [Segment], selection: Binding<Value>, label: String? = nil) {
+        self.segments = segments; _selection = selection; self.label = label
+    }
+
+    nonisolated static func shouldChangeSelection(from current: Value, to proposed: Value) -> Bool {
+        current != proposed
+    }
+
     private var segmentShape: AnyShape {
-        dynamicTypeSize.isAccessibilitySize ? AnyShape(RoundedRectangle(cornerRadius: 16, style: .continuous)) : AnyShape(Capsule())
+        encounterCapsuleShape(for: dynamicTypeSize)
     }
     private var trackShape: AnyShape {
-        dynamicTypeSize.isAccessibilitySize ? AnyShape(RoundedRectangle(cornerRadius: 20, style: .continuous)) : AnyShape(Capsule())
+        encounterCapsuleShape(for: dynamicTypeSize)
     }
     public var body: some View {
+        if let label {
+            control.accessibilityElement(children: .contain).accessibilityLabel(label)
+        } else {
+            control
+        }
+    }
+
+    private var control: some View {
         let layout = dynamicTypeSize.isAccessibilitySize ? AnyLayout(VStackLayout(spacing: 4)) : AnyLayout(HStackLayout(spacing: 4))
-        layout {
+        return layout {
             ForEach(segments) { segment in
-                Button { selection = segment.id } label: {
+                Button {
+                    if Self.shouldChangeSelection(from: selection, to: segment.id) { selection = segment.id }
+                } label: {
                     HStack(spacing: 8) {
                         if let symbol = segment.symbol { Image(systemName: symbol).accessibilityHidden(true) }
                         Text(segment.label).multilineTextAlignment(.center)
@@ -624,16 +649,17 @@ public struct EncounterField: View {
     @Binding private var text: String
     @FocusState private var isFocused: Bool
     @Environment(\.isEnabled) private var isEnabled
-    @ScaledMetric(relativeTo: .body) private var height = 52.0
-    @ScaledMetric(relativeTo: .body) private var multilineHeight = 120.0
+    @ScaledMetric private var height: CGFloat
     public init(_ label: String, text: Binding<String>, multiline: Bool = false, counter: String? = nil,
                 error: String? = nil, textContentType: UITextContentType? = nil,
                 keyboardType: UIKeyboardType? = nil, autocapitalization: TextInputAutocapitalization? = nil,
-                autocorrectionDisabled: Bool? = nil, submitLabel: SubmitLabel? = nil, lineLimit: ClosedRange<Int>? = nil) {
+                autocorrectionDisabled: Bool? = nil, submitLabel: SubmitLabel? = nil, lineLimit: ClosedRange<Int>? = nil,
+                minHeight: CGFloat? = nil) {
         self.label = label; _text = text; self.multiline = multiline; self.counter = counter
         self.error = error; self.textContentType = textContentType
         self.keyboardType = keyboardType; self.autocapitalization = autocapitalization
         self.autocorrectionDisabled = autocorrectionDisabled; self.submitLabel = submitLabel; self.lineLimit = lineLimit
+        _height = ScaledMetric(wrappedValue: minHeight ?? (multiline ? 120 : 52), relativeTo: .body)
     }
     public var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -646,7 +672,7 @@ public struct EncounterField: View {
                 .encounterInputOption(autocorrectionDisabled) { $0.autocorrectionDisabled($1) }
                 .encounterInputOption(submitLabel) { $0.submitLabel($1) }
                 .encounterInputOption(lineLimit) { $0.lineLimit($1) }
-                .padding(16).frame(maxWidth: .infinity, minHeight: multiline ? multilineHeight : max(44, height), alignment: .topLeading)
+                .padding(16).frame(maxWidth: .infinity, minHeight: max(44, height), alignment: .topLeading)
                 .background(EncounterPalette.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(EncounterPalette.controlOutline, lineWidth: 1))
                 .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -673,12 +699,14 @@ public struct EncounterStepper: View {
     private let decreaseLabel: String
     private let increaseLabel: String
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ScaledMetric(relativeTo: .body) private var target = 44.0
     public init(_ label: String, value: Binding<Int>, in range: ClosedRange<Int>, decreaseLabel: String, increaseLabel: String) {
         self.label = label; _value = value; self.range = range
         self.decreaseLabel = decreaseLabel; self.increaseLabel = increaseLabel
     }
     public var body: some View {
+        let shape = encounterCapsuleShape(for: dynamicTypeSize)
         HStack(spacing: 12) {
             Button { if value > range.lowerBound { value -= 1 } } label: {
                 Image(systemName: "minus").accessibilityHidden(true).frame(width: max(44, target), height: max(44, target))
@@ -690,7 +718,7 @@ public struct EncounterStepper: View {
                     .contentShape(Rectangle())
             }.accessibilityLabel(increaseLabel).disabled(value >= range.upperBound)
         }.buttonStyle(EncounterPlainButtonStyle()).foregroundStyle(EncounterPalette.accent)
-            .background(EncounterPalette.surface, in: Capsule()).overlay(Capsule().stroke(EncounterPalette.border, lineWidth: 1))
+            .background(EncounterPalette.surface, in: shape).overlay(shape.stroke(EncounterPalette.border, lineWidth: 1))
             .accessibilityElement(children: .ignore).accessibilityLabel(label).accessibilityValue(Text(value, format: .number))
             .accessibilityAdjustableAction { direction in
                 guard isEnabled else { return }
@@ -736,6 +764,15 @@ public struct EncounterMark: View {
             EncounterFigureBody().frame(width: width * 0.56, height: width * 0.28)
         }.foregroundStyle(EncounterPalette.accent.opacity(opacity))
     }
+
+    private func updatePulse() {
+        if pulseRings && !reduceMotion {
+            withAnimation(.easeInOut(duration: 2).repeatForever(autoreverses: true)) { pulsing = true }
+        } else {
+            pulsing = false
+        }
+    }
+
     public var body: some View {
         ZStack {
             if pulseRings {
@@ -758,16 +795,8 @@ public struct EncounterMark: View {
             }
         }.frame(width: width, height: width * (signals || pulseRings ? 1.05 : 0.7))
             .accessibilityHidden(true)
-            .onAppear {
-                if pulseRings && !reduceMotion {
-                    withAnimation(.easeInOut(duration: 2).repeatForever(autoreverses: true)) { pulsing = true }
-                }
-            }
-            .onChange(of: reduceMotion) { _, reduced in
-                if reduced { pulsing = false }
-                else if pulseRings {
-                    withAnimation(.easeInOut(duration: 2).repeatForever(autoreverses: true)) { pulsing = true }
-                }
-            }
+            .onAppear(perform: updatePulse)
+            .onChange(of: reduceMotion) { _, _ in updatePulse() }
+            .onChange(of: pulseRings) { _, _ in updatePulse() }
     }
 }
