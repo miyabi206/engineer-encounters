@@ -19,36 +19,38 @@ public struct SettingsListView<AdditionalRows: View>: View {
     }
 
     public var body: some View {
-        List {
-            ForEach(AccountSettingsListComposition.entries(destinations: destinations), id: \.self) { entry in
-                switch entry {
-                case .discovery: row(.discoveryMatching, action: navigation.discovery)
-                case .visibility: row(.visibility, action: navigation.visibility)
-                case .dailyReport: row(.dailyReportTitle, action: destinations.dailyReport)
-                case .blockedUsers: row(.blockedUsers, action: destinations.blockedUsers)
-                case .account: row(.account, action: destinations.account)
-                case .legal: row(.legal, action: destinations.legal)
-                case .diagnostics:
-                    if let diagnostics = destinations.diagnostics { row(.diagnostics, action: diagnostics) }
+        EncounterScreen {
+            EncounterSurfaceCard {
+                let entries = AccountSettingsListComposition.entries(destinations: destinations)
+                ForEach(entries, id: \.self) { entry in
+                    let divider = entry != entries.last
+                    switch entry {
+                    case .discovery: row(.discoveryMatching, symbol: "person.2.fill", divider: divider, action: navigation.discovery)
+                    case .visibility: row(.visibility, symbol: "globe", divider: divider, action: navigation.visibility)
+                    case .dailyReport: row(.dailyReportTitle, symbol: "chart.bar.fill", divider: divider, action: destinations.dailyReport)
+                    case .blockedUsers: row(.blockedUsers, symbol: "nosign", divider: divider, action: destinations.blockedUsers)
+                    case .account: row(.account, symbol: "person.fill", divider: divider, action: destinations.account)
+                    case .legal: row(.legal, symbol: "questionmark.circle", divider: divider, action: destinations.legal)
+                    case .diagnostics:
+                        if let diagnostics = destinations.diagnostics {
+                            row(.diagnostics, symbol: "stethoscope", divider: divider, action: diagnostics)
+                        }
+                    }
                 }
             }
             additionalRows
         }
-        .listStyle(.plain)
         .navigationTitle(SettingsStrings.text(.settings))
-        .background(Color(uiColor: .systemGroupedBackground))
-        .tint(.teal)
+        .navigationBarTitleDisplayMode(.large)
     }
 
-    private func row(_ title: SettingsString, action: @escaping @MainActor () -> Void) -> some View {
+    private func row(_ title: SettingsString, symbol: String, divider: Bool,
+                     action: @escaping @MainActor () -> Void) -> some View {
         Button(action: action) {
-            HStack {
-                Text(SettingsStrings.text(title)).foregroundStyle(.primary)
-                Spacer()
-                Image(systemName: "chevron.right").foregroundStyle(.secondary).accessibilityHidden(true)
-            }
-            .frame(minHeight: 44)
+            EncounterIconRow(symbol: symbol, title: SettingsStrings.text(title), showsDivider: divider)
+                .font(.headline)
         }
+        .buttonStyle(EncounterPlainButtonStyle())
         .accessibilityLabel(SettingsStrings.text(title))
     }
 }
@@ -65,6 +67,8 @@ public struct EditProfileView: View {
     @Environment(\.locale) private var locale
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     private let navigation: SettingsNavigationActions
+    @ScaledMetric(relativeTo: .body) private var inputHeight = 52.0
+    @ScaledMetric(relativeTo: .body) private var introductionHeight = 120.0
 
     public init(model: SettingsModel, navigation: SettingsNavigationActions) {
         self.model = model; self.navigation = navigation
@@ -87,28 +91,25 @@ public struct EditProfileView: View {
                     }
                 } else if model.shouldRetryInterestLoad {
                     if model.hasLoadedInterests {
-                        Text(SettingsStrings.text(.emptyInterests)).foregroundStyle(.secondary)
+                        Text(SettingsStrings.text(.emptyInterests)).foregroundStyle(EncounterPalette.inkSecondary)
                     }
                     Button(SettingsStrings.text(.retry)) { Task { await model.loadInterests() } }
-                        .disabled(model.isBusy)
+                        .buttonStyle(EncounterButtonStyle(.secondary, fullWidth: false)).disabled(model.isBusy)
                 }
-                LazyVGrid(columns: dynamicTypeSize.isAccessibilitySize ? [GridItem(.flexible())] :
-                          [GridItem(.adaptive(minimum: 140))], alignment: .leading) {
+                EncounterFlowLayout(isAccessibilitySize: dynamicTypeSize.isAccessibilitySize) {
                     ForEach(model.interests) { interest in
-                        SelectionControl(label: interest.label(language: locale.identifier),
-                                         selected: model.selectedInterestIDs.contains(interest.id)) {
+                        EncounterChip(label: interest.label(language: locale.identifier),
+                                      selected: model.selectedInterestIDs.contains(interest.id)) {
                             model.toggleInterest(interest.id)
                         }
-                        .background(model.selectedInterestIDs.contains(interest.id) ? Color.teal.opacity(0.15) : .clear,
-                                    in: RoundedRectangle(cornerRadius: 16))
                         .disabled(model.isSaving || !ProfileValidation.canToggleInterest(interest.id, selected: model.selectedInterestIDs))
                     }
                 }
                 Text(String(format: SettingsStrings.text(.interestCounter), locale: locale,
                             model.selectedInterestIDs.count, ProfileValidation.interestLimit))
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(EncounterPalette.inkSecondary)
                 Text(String(format: SettingsStrings.text(.interestLimit), locale: locale, ProfileValidation.interestLimit))
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(EncounterPalette.inkSecondary)
                 selectionFeedback(.interests)
             }
             OnboardingCard {
@@ -117,12 +118,17 @@ public struct EditProfileView: View {
             }
             OnboardingCard {
                 textInput(.contactDetail, value: $model.contactDetail, limit: ProfileValidation.contactDetailLimit)
-                Text(SettingsStrings.text(.contactPrivate)).font(.caption).foregroundStyle(.secondary)
+                Text(SettingsStrings.text(.contactPrivate)).font(.caption).foregroundStyle(EncounterPalette.inkSecondary)
             }.disabled(model.isSaving)
-            Button(SettingsStrings.text(.visibility), action: navigation.visibility).disabled(model.isSaving)
+            EncounterSurfaceCard {
+                Button(action: navigation.visibility) {
+                    EncounterIconRow(symbol: "eye", title: SettingsStrings.text(.visibility))
+                }.buttonStyle(EncounterPlainButtonStyle()).disabled(model.isSaving)
+            }
             if !model.removedPrerequisites.isEmpty || model.errors[.profile]?.code == .prerequisiteMissing {
-                Text(SettingsStrings.text(model.profile.discoveryOn ? .discoveryRequired : .requiredInformation)).foregroundStyle(.red)
-                Button(SettingsStrings.text(.discoveryMatching), action: navigation.discovery).disabled(model.isSaving)
+                Text(SettingsStrings.text(model.profile.discoveryOn ? .discoveryRequired : .requiredInformation)).foregroundStyle(EncounterPalette.destructive)
+                Button(SettingsStrings.text(.discoveryMatching), action: navigation.discovery)
+                    .buttonStyle(EncounterButtonStyle(.secondary)).disabled(model.isSaving)
             }
         }
         .task { if !model.hasLoadedInterests { await model.loadInterests() } }
@@ -132,6 +138,7 @@ public struct EditProfileView: View {
         Task { if await model.saveProfile() { navigation.back() } }
     }
 
+    // Compose the shared field appearance while retaining the existing heading accessibility trait.
     @ViewBuilder
     private func textInput(_ field: ProfileField, value: Binding<String>, limit: Int) -> some View {
         let label = SettingsStrings.text(field == .contactDetail ? .optionalContact : field.settingsLabel)
@@ -139,21 +146,27 @@ public struct EditProfileView: View {
             Text(label).font(.headline).accessibilityAddTraits(.isHeader)
             if field == .introduction {
                 TextField(label, text: value, axis: .vertical).lineLimit(4...10)
-                    .textFieldStyle(.roundedBorder).accessibilityLabel(label)
+                    .textFieldStyle(.plain).accessibilityLabel(label)
+                    .padding(16).frame(minHeight: introductionHeight, alignment: .topLeading)
+                    .background(EncounterPalette.surface, in: RoundedRectangle(cornerRadius: 16))
+                    .overlay(RoundedRectangle(cornerRadius: 16).stroke(EncounterPalette.controlOutline, lineWidth: 1))
             } else {
                 TextField(label, text: value)
                     .textContentType(field == .displayName ? .nickname : nil)
-                    .textFieldStyle(.roundedBorder).accessibilityLabel(label)
+                    .textFieldStyle(.plain).accessibilityLabel(label)
+                    .padding(16).frame(minHeight: max(44, inputHeight))
+                    .background(EncounterPalette.surface, in: RoundedRectangle(cornerRadius: 16))
+                    .overlay(RoundedRectangle(cornerRadius: 16).stroke(EncounterPalette.controlOutline, lineWidth: 1))
             }
-            Text(SettingsStrings.counter(value.wrappedValue, limit: limit)).font(.caption).foregroundStyle(.secondary)
+            Text(SettingsStrings.counter(value.wrappedValue, limit: limit)).font(.caption).foregroundStyle(EncounterPalette.inkSecondary)
             if SettingsValidation.textCount(value.wrappedValue) > limit {
-                Text(String(format: SettingsStrings.text(.tooLong), limit)).foregroundStyle(.red)
+                Text(String(format: SettingsStrings.text(.tooLong), limit)).foregroundStyle(EncounterPalette.destructive)
             } else if model.removedPrerequisites.contains(field) {
-                Text(SettingsStrings.text(.discoveryRequired)).foregroundStyle(.red)
+                Text(SettingsStrings.text(.discoveryRequired)).foregroundStyle(EncounterPalette.destructive)
             } else if model.profile.discoveryOn && field != .contactDetail && SettingsValidation.textCount(value.wrappedValue) == 0 {
-                Text(SettingsStrings.text(.requiredField)).foregroundStyle(.red)
+                Text(SettingsStrings.text(.requiredField)).foregroundStyle(EncounterPalette.destructive)
             } else if SettingsErrorPresentation.affects(model.errors[.profile], field: field) {
-                Text(SettingsStrings.text(.invalidField)).foregroundStyle(.red)
+                Text(SettingsStrings.text(.invalidField)).foregroundStyle(EncounterPalette.destructive)
             }
         }
     }
@@ -161,11 +174,11 @@ public struct EditProfileView: View {
     @ViewBuilder
     private func selectionFeedback(_ field: ProfileField) -> some View {
         if model.removedPrerequisites.contains(field) {
-            Text(SettingsStrings.text(.discoveryRequired)).foregroundStyle(.red)
+            Text(SettingsStrings.text(.discoveryRequired)).foregroundStyle(EncounterPalette.destructive)
         } else if model.invalidProfileFields.contains(field) {
-            Text(SettingsStrings.text(field == .purposes ? .purposeRequired : .selectionGuidance)).foregroundStyle(.red)
+            Text(SettingsStrings.text(field == .purposes ? .purposeRequired : .selectionGuidance)).foregroundStyle(EncounterPalette.destructive)
         } else if SettingsErrorPresentation.affects(model.errors[.profile], field: field) {
-            Text(SettingsStrings.text(.invalidField)).foregroundStyle(.red)
+            Text(SettingsStrings.text(.invalidField)).foregroundStyle(EncounterPalette.destructive)
         }
     }
 
@@ -177,6 +190,8 @@ public struct EditProfileView: View {
 @MainActor
 public struct DiscoveryAndMatchingView: View {
     @ObservedObject private var model: SettingsModel
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @ScaledMetric(relativeTo: .body) private var checklistTarget = 44.0
     private let navigation: SettingsNavigationActions
 
     public init(model: SettingsModel, navigation: SettingsNavigationActions) {
@@ -184,7 +199,7 @@ public struct DiscoveryAndMatchingView: View {
     }
 
     public var body: some View {
-        SettingsPage(model: model, screen: .discovery, title: .discoveryMatching, navigation: navigation) {
+        SettingsPage(model: model, screen: .discovery, title: .discoveryMatching, navigation: navigation, retry: retry) {
             OnboardingCard {
                 Toggle(SettingsStrings.text(.discovery), isOn: Binding(
                     get: { model.profile.discoveryOn }, set: { enabled in
@@ -192,68 +207,74 @@ public struct DiscoveryAndMatchingView: View {
                     }))
                     .disabled(model.isSaving || (!model.profile.discoveryOn && !model.canEnableDiscovery))
                     .accessibilityLabel(SettingsStrings.text(.discovery))
-                Text(SettingsStrings.text(.discoveryOffExplanation)).font(.caption).foregroundStyle(.secondary)
+                    .tint(EncounterPalette.accent).font(.headline)
+                Text(SettingsStrings.text(.discoveryOffExplanation)).font(.caption).foregroundStyle(EncounterPalette.inkSecondary)
                 if model.showsDiscoveryExplanation && !model.profile.discoveryOn {
                     ForEach([SettingsString.promise, .background, .dailyReport, .alternatives,
                              .forceQuit, .firstUnlock, .oneSided], id: \.self) { key in
-                        Text(SettingsStrings.text(key)).font(.callout)
+                        EncounterIconRow(symbol: explanationSymbol(key), title: SettingsStrings.text(key),
+                                         showsChevron: false, showsDivider: key != .oneSided)
+                            .font(.callout)
                     }
                 }
             }
             OnboardingCard {
                 Text(SettingsStrings.text(.checklist)).font(.headline).accessibilityAddTraits(.isHeader)
                 if !model.profile.prerequisites.canEnableDiscovery {
-                    Text(SettingsStrings.text(.requiredInformation)).foregroundStyle(.secondary)
+                    Text(SettingsStrings.text(.requiredInformation)).foregroundStyle(EncounterPalette.inkSecondary)
                 }
                 ForEach(DiscoveryPrerequisite.allCases, id: \.self) { prerequisite in
                     checklistRow(prerequisite)
                 }
                 if !model.profile.prerequisites.link {
-                    Text(SettingsStrings.text(.linkRequired)).foregroundStyle(.secondary)
+                    Text(SettingsStrings.text(.linkRequired)).foregroundStyle(EncounterPalette.inkSecondary)
                 }
             }
             OnboardingCard {
+                EncounterSymbolTile(symbol: "dot.radiowaves.left.and.right")
                 Text(SettingsStrings.text(.bluetoothPurpose))
-                Text(SettingsStrings.text(bluetoothLabel))
+                Text(SettingsStrings.text(bluetoothLabel)).font(.caption).foregroundStyle(EncounterPalette.inkSecondary)
                 if model.bluetooth.needsRecovery {
                     Button(SettingsStrings.text(.bluetoothRecovery), action: navigation.bluetoothRecovery)
-                        .disabled(model.isSaving)
+                        .buttonStyle(EncounterButtonStyle(.secondary, fullWidth: false)).disabled(model.isSaving)
                 } else if model.allowsDiscoveryActivation && model.bluetooth == .notRequested {
                     Button(SettingsStrings.text(.allowBluetooth)) {
                         requestBluetooth()
-                    }.disabled(model.isSaving)
+                    }.buttonStyle(EncounterButtonStyle(.secondary, fullWidth: false)).disabled(model.isSaving)
                 }
             }
             OnboardingCard {
                 SettingsPurposes(model: model, screen: .discovery)
                 if model.matchingPurposes.isEmpty {
-                    Text(SettingsStrings.text(.purposeRequired)).foregroundStyle(.red)
+                    Text(SettingsStrings.text(.purposeRequired)).foregroundStyle(EncounterPalette.destructive)
                 } else if SettingsErrorPresentation.affects(model.errors[.discovery], field: .purposes) {
-                    Text(SettingsStrings.text(.invalidField)).foregroundStyle(.red)
+                    Text(SettingsStrings.text(.invalidField)).foregroundStyle(EncounterPalette.destructive)
                 }
             }
             OnboardingCard {
                 Text(SettingsStrings.text(.threshold)).font(.headline).accessibilityAddTraits(.isHeader)
-                Stepper(SettingsStrings.threshold(model.minimumSharedInterests), value: $model.minimumSharedInterests,
-                        in: ProfileValidation.sharedInterestRange)
-                    .disabled(model.isSaving)
-                    .accessibilityLabel(SettingsStrings.text(.threshold))
-                    .accessibilityValue(SettingsStrings.threshold(model.minimumSharedInterests))
+                let layout = dynamicTypeSize.isAccessibilitySize ?
+                    AnyLayout(VStackLayout(alignment: .leading, spacing: 16)) :
+                    AnyLayout(HStackLayout(spacing: 16))
+                layout {
+                    EncounterStepper(SettingsStrings.text(.threshold), value: $model.minimumSharedInterests,
+                        in: ProfileValidation.sharedInterestRange,
+                        decreaseLabel: SettingsStrings.threshold(model.minimumSharedInterests - 1),
+                        increaseLabel: SettingsStrings.threshold(model.minimumSharedInterests + 1))
+                        .disabled(model.isSaving)
+                        .accessibilityLabel(SettingsStrings.text(.threshold))
+                        .accessibilityValue(SettingsStrings.threshold(model.minimumSharedInterests))
+                    Text(SettingsStrings.threshold(model.minimumSharedInterests))
+                }
                 if !ProfileValidation.sharedInterestRange.contains(model.minimumSharedInterests) ||
                     SettingsErrorPresentation.affectsThreshold(model.errors[.discovery]) {
-                    Text(SettingsStrings.text(.invalidField)).foregroundStyle(.red)
+                    Text(SettingsStrings.text(.invalidField)).foregroundStyle(EncounterPalette.destructive)
                 }
-                Text(SettingsStrings.text(.matchingExplanation)).foregroundStyle(.secondary)
             }
-            if model.isSaving { SettingsProgress() }
-            if let error = model.errors[.discovery] {
-                SettingsFailure(error: error, screen: .discovery, discoveryOn: model.profile.discoveryOn,
-                                disabled: !model.canRetry(.discovery), fallback: model.errorFallback(.discovery), retry: retry)
-                SettingsAppliedChanges(model: model, screen: .discovery)
-            }
+            Text(SettingsStrings.text(.matchingExplanation)).font(.caption).foregroundStyle(EncounterPalette.inkSecondary)
             Button(SettingsStrings.text(.saveMatching)) {
                 Task { await model.saveMatching() }
-            }.buttonStyle(.borderedProminent).disabled(!model.canSaveMatching)
+            }.buttonStyle(EncounterButtonStyle(.primary)).disabled(!model.canSaveMatching)
         }
     }
 
@@ -277,12 +298,35 @@ public struct DiscoveryAndMatchingView: View {
             Button {
                 if prerequisite == .link { navigation.links?() } else { navigation.editProfile() }
             } label: {
-                Label(label, systemImage: "square").multilineTextAlignment(.leading)
-            }.disabled(model.isSaving)
+                checklistContent(label: label, met: met, actionable: true)
+            }.buttonStyle(EncounterPlainButtonStyle()).disabled(model.isSaving)
         } else {
-            Label(label, systemImage: met ? "checkmark.square" : "square")
+            checklistContent(label: label, met: met, actionable: false)
         }
-        if hasError { Text(SettingsStrings.text(.requiredInformation)).foregroundStyle(.red) }
+        if hasError { Text(SettingsStrings.text(.requiredInformation)).foregroundStyle(EncounterPalette.destructive) }
+    }
+
+    private func checklistContent(label: String, met: Bool, actionable: Bool) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: met ? "checkmark.circle.fill" : "circle")
+                .foregroundStyle(met ? EncounterPalette.accent : EncounterPalette.inkSecondary).accessibilityHidden(true)
+            Text(label).frame(maxWidth: .infinity, alignment: .leading).fixedSize(horizontal: false, vertical: true)
+            if actionable {
+                Image(systemName: "chevron.right").foregroundStyle(EncounterPalette.inkSecondary).accessibilityHidden(true)
+            }
+        }.frame(minHeight: max(44, checklistTarget)).contentShape(Rectangle())
+    }
+
+    private func explanationSymbol(_ key: SettingsString) -> String {
+        switch key {
+        case .promise: "iphone"
+        case .background: "clock"
+        case .dailyReport: "chart.bar.fill"
+        case .alternatives: "qrcode"
+        case .forceQuit: "exclamationmark.circle"
+        case .firstUnlock: "lock.open"
+        default: "person.2.fill"
+        }
     }
 
     private func changeDiscovery(_ enabled: Bool) {
@@ -320,26 +364,28 @@ public struct VisibilitySettingsView: View {
 
     public var body: some View {
         SettingsPage(model: model, screen: .visibility, title: .visibility, navigation: navigation) {
-            OnboardingCard {
-                ForEach(ProfileField.allCases, id: \.self) { field in
-                    VStack(alignment: .leading, spacing: 8) {
-                        let label = SettingsStrings.text(field == .interests ? .visibilityInterests : field.settingsLabel)
-                        Text(label).font(.headline).accessibilityAddTraits(.isHeader)
-                        ForEach(VisibilityLevel.allCases, id: \.self) { level in
-                            SelectionControl(label: SettingsStrings.text(level.settingsLabel),
-                                             selected: SettingsValidation.visibility(field, in: model.visibility) == level) {
-                                model.visibility[field] = level
-                            }.accessibilityLabel(SettingsStrings.fieldMessage(label, SettingsStrings.text(level.settingsLabel)))
-                        }
-                        if SettingsErrorPresentation.affects(model.errors[.visibility], field: field) {
-                            Text(SettingsStrings.text(.invalidField)).foregroundStyle(.red)
-                        }
+            ForEach(ProfileField.allCases, id: \.self) { field in
+                OnboardingCard {
+                    let label = SettingsStrings.text(field == .interests ? .visibilityInterests : field.settingsLabel)
+                    Text(label).font(.headline).accessibilityAddTraits(.isHeader)
+                    ForEach(VisibilityLevel.allCases, id: \.self) { level in
+                        EncounterRadioRow(label: SettingsStrings.text(level.settingsLabel),
+                                         selected: SettingsValidation.visibility(field, in: model.visibility) == level) {
+                            model.visibility[field] = level
+                        }.accessibilityLabel(SettingsStrings.fieldMessage(label, SettingsStrings.text(level.settingsLabel)))
                     }
-                }
-                if let links = navigation.links {
-                    Button(SettingsStrings.text(.linkVisibility), action: links)
-                }
-            }.disabled(model.isSaving)
+                    if SettingsErrorPresentation.affects(model.errors[.visibility], field: field) {
+                        Text(SettingsStrings.text(.invalidField)).foregroundStyle(EncounterPalette.destructive)
+                    }
+                }.disabled(model.isSaving)
+            }
+            if let links = navigation.links {
+                EncounterSurfaceCard {
+                    Button(action: links) {
+                        EncounterIconRow(symbol: "link", title: SettingsStrings.text(.linkVisibility))
+                    }.buttonStyle(EncounterPlainButtonStyle())
+                }.disabled(model.isSaving)
+            }
             OnboardingCard {
                 ForEach([VisibilityLevel.everyoneEligible, .compatibleOnly, .private], id: \.self) { level in
                     VStack(alignment: .leading, spacing: 4) {
@@ -349,14 +395,8 @@ public struct VisibilitySettingsView: View {
                 }
                 Text(SettingsStrings.text(.appliesToPast))
             }
-            if model.isSaving { SettingsProgress() }
-            if let error = model.errors[.visibility] {
-                SettingsFailure(error: error, screen: .visibility, discoveryOn: model.profile.discoveryOn,
-                                disabled: !model.canRetry(.visibility)) { Task { await model.retry(.visibility) } }
-                SettingsAppliedChanges(model: model, screen: .visibility)
-            }
             Button(SettingsStrings.text(.saveVisibility)) { Task { await model.saveVisibility() } }
-                .buttonStyle(.borderedProminent).disabled(model.isSaving)
+                .buttonStyle(EncounterButtonStyle(.primary)).disabled(model.isSaving)
         }
     }
 
@@ -373,14 +413,17 @@ public struct VisibilitySettingsView: View {
 private struct SettingsPurposes: View {
     @ObservedObject var model: SettingsModel
     let screen: SettingsScreen
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         Text(SettingsStrings.text(.purposes)).font(.headline).accessibilityAddTraits(.isHeader)
-        ForEach(ProfilePurpose.allCases, id: \.self) { purpose in
-            SelectionControl(label: SettingsStrings.text(purpose == .discovery ? .discoveryPurpose : .collaborationPurpose),
-                             selected: (screen == .profile ? model.selectedPurposes : model.matchingPurposes).contains(purpose)) {
-                model.togglePurpose(purpose, screen: screen)
-            }.disabled(model.isSaving)
+        EncounterFlowLayout(isAccessibilitySize: dynamicTypeSize.isAccessibilitySize) {
+            ForEach(ProfilePurpose.allCases, id: \.self) { purpose in
+                EncounterChip(label: SettingsStrings.text(purpose == .discovery ? .discoveryPurpose : .collaborationPurpose),
+                              selected: (screen == .profile ? model.selectedPurposes : model.matchingPurposes).contains(purpose)) {
+                    model.togglePurpose(purpose, screen: screen)
+                }.disabled(model.isSaving)
+            }
         }
     }
 }
@@ -393,35 +436,44 @@ private struct SettingsPage<Content: View>: View {
     let navigation: SettingsNavigationActions
     var save: (@MainActor () -> Void)?
     var canSave = false
+    var retry: (@MainActor () -> Void)? = nil
     @ViewBuilder let content: Content
     @SettingsViewState private var confirmsDiscard = false
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                HStack {
-                    Button(SettingsStrings.text(screen == .profile ? .cancel : .back), action: leave)
-                        .disabled(model.isSaving)
-                    Spacer()
-                    if let save {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Button(SettingsStrings.text(.save), action: save).disabled(!canSave)
-                            if model.isSaving { SettingsProgress() }
-                            if let error = model.errors[screen] {
-                                SettingsFailure(error: error, screen: screen, discoveryOn: model.profile.discoveryOn,
-                                    disabled: !model.canRetry(screen), fallback: model.errorFallback(screen)) {
-                                    Task { if await model.retry(screen) { navigation.back() } }
-                                }
-                                SettingsAppliedChanges(model: model, screen: screen)
-                            }
-                        }
-                    }
+        EncounterScreen {
+            let headerLayout = dynamicTypeSize.isAccessibilitySize ?
+                AnyLayout(VStackLayout(alignment: .leading, spacing: 12)) : AnyLayout(HStackLayout(spacing: 12))
+            headerLayout {
+                if screen == .profile {
+                    Button(SettingsStrings.text(.cancel), action: leave)
+                        .buttonStyle(EncounterButtonStyle(.tertiary, fullWidth: false)).disabled(model.isSaving)
+                } else {
+                    EncounterBackButton(label: SettingsStrings.text(.back), action: leave).disabled(model.isSaving)
                 }
-                Text(SettingsStrings.text(title)).font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
-                content
-            }.frame(maxWidth: .infinity, alignment: .leading).padding()
+                if !dynamicTypeSize.isAccessibilitySize { Spacer() }
+                if let save {
+                    Button(action: save) { Text(SettingsStrings.text(.save)).bold() }
+                        .buttonStyle(EncounterButtonStyle(.tertiary, fullWidth: false)).disabled(!canSave)
+                }
+            }
+            Text(SettingsStrings.text(title)).font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
+            if save != nil || screen != .profile {
+                if model.isSaving { SettingsProgress() }
+                if let error = model.errors[screen] {
+                    SettingsFailure(error: error, screen: screen, discoveryOn: model.profile.discoveryOn,
+                        disabled: !model.canRetry(screen), fallback: screen == .visibility ? .saveError : model.errorFallback(screen)) {
+                        if let retry { retry() }
+                        else if screen == .visibility { Task { await model.retry(.visibility) } }
+                        else { Task { if await model.retry(screen) { navigation.back() } } }
+                    }
+                    SettingsAppliedChanges(model: model, screen: screen)
+                }
+            }
+            content
         }
-        .background(Color(uiColor: .systemGroupedBackground)).tint(.teal)
+        .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(true)
         .onDisappear { model.leave(screen) }
         .onChange(of: model.isSaving) { _, saving in
@@ -455,7 +507,7 @@ private struct SettingsPage<Content: View>: View {
 @MainActor
 private struct SettingsProgress: View {
     var body: some View {
-        ProgressView(SettingsStrings.text(.loading)).accessibilityLabel(SettingsStrings.text(.loading))
+        EncounterProgress(SettingsStrings.text(.loading))
     }
 }
 
@@ -469,14 +521,12 @@ private struct SettingsFailure: View {
     let retry: @MainActor () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(SettingsStrings.text(error.code == .unavailable ? fallback :
-                SettingsErrorPresentation.message(error, screen: screen, discoveryOn: discoveryOn)))
-                .foregroundStyle(.red)
+        EncounterInlineError(message: SettingsStrings.text(error.code == .unavailable ? fallback :
+            SettingsErrorPresentation.message(error, screen: screen, discoveryOn: discoveryOn)),
+            retryLabel: SettingsStrings.text(.retry), disabled: disabled, retry: retry) {
             if error.code == .prerequisiteMissing && error.fields.contains("link") {
-                Text(SettingsStrings.text(.linkRequired)).foregroundStyle(.red)
+                Text(SettingsStrings.text(.linkRequired)).foregroundStyle(EncounterPalette.destructive)
             }
-            Button(SettingsStrings.text(.retry), action: retry).disabled(disabled)
         }
     }
 }
@@ -490,8 +540,13 @@ struct SettingsAppliedChanges: View {
     var body: some View {
         let messages = Self.messages(model: model, screen: screen, language: locale.identifier)
         if !messages.isEmpty {
-            Text(SettingsStrings.text(.partialSave)).font(.headline).accessibilityAddTraits(.isHeader)
-            ForEach(Array(messages.enumerated()), id: \.offset) { _, message in Text(message) }
+            EncounterSurfaceCard {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "info.circle.fill").foregroundStyle(EncounterPalette.accent).accessibilityHidden(true)
+                    Text(SettingsStrings.text(.partialSave)).font(.headline).accessibilityAddTraits(.isHeader)
+                }
+                ForEach(Array(messages.enumerated()), id: \.offset) { _, message in Text(message) }
+            }
         }
     }
 
