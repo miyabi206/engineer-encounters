@@ -87,6 +87,7 @@ public struct EncounterScreen<Content: View>: View {
     private let onBack: (@MainActor () -> Void)?
     private let content: Content
     private let bottomBar: AnyView?
+    private let maximumContentWidth: CGFloat = 640
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     public init(title: String? = nil, subtitle: String? = nil,
@@ -127,13 +128,15 @@ public struct EncounterScreen<Content: View>: View {
                 content
                 if dynamicTypeSize.isAccessibilitySize, let bottomBar { bottomBar }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: maximumContentWidth, alignment: .leading)
             .padding(.horizontal, 20)
             .padding(.vertical, 16)
+            .frame(maxWidth: .infinity)
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if !dynamicTypeSize.isAccessibilitySize, let bottomBar {
-                bottomBar.padding(.horizontal, 20).padding(.vertical, 12)
+                bottomBar.frame(maxWidth: maximumContentWidth)
+                    .padding(.horizontal, 20).padding(.vertical, 12)
                     .frame(maxWidth: .infinity).background(EncounterPalette.background)
             }
         }
@@ -548,25 +551,39 @@ public struct EncounterSegmentedControl<Value: Hashable>: View {
     }
 
     private var control: some View {
-        let layout = dynamicTypeSize.isAccessibilitySize ? AnyLayout(VStackLayout(spacing: 4)) : AnyLayout(HStackLayout(spacing: 4))
-        return layout {
-            ForEach(segments) { segment in
-                Button {
-                    if Self.shouldChangeSelection(from: selection, to: segment.id) { selection = segment.id }
-                } label: {
-                    HStack(spacing: 8) {
-                        if let symbol = segment.symbol { Image(systemName: symbol).accessibilityHidden(true) }
-                        Text(segment.label).multilineTextAlignment(.center)
-                        if selection == segment.id { Image(systemName: "checkmark").accessibilityHidden(true) }
-                    }.padding(.horizontal, 12).padding(.vertical, 8)
-                        .frame(maxWidth: .infinity, minHeight: max(44, target))
-                        .foregroundStyle(selection == segment.id ? EncounterPalette.onAccent : EncounterPalette.ink)
-                        .background(selection == segment.id ? EncounterPalette.accent : .clear, in: segmentShape)
-                        .contentShape(segmentShape)
-                }.buttonStyle(.plain).accessibilityLabel(segment.label)
-                    .accessibilityAddTraits(selection == segment.id ? .isSelected : [])
+        Group {
+            if dynamicTypeSize.isAccessibilitySize {
+                VStack(spacing: 4) { segmentButtons(singleLine: false) }
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 4) { segmentButtons(singleLine: true) }
+                    VStack(spacing: 4) { segmentButtons(singleLine: false) }
+                }
             }
         }.padding(4).background(EncounterPalette.neutralFill, in: trackShape)
+    }
+
+    private func segmentButtons(singleLine: Bool) -> some View {
+        ForEach(segments) { segment in
+            Button {
+                if Self.shouldChangeSelection(from: selection, to: segment.id) { selection = segment.id }
+            } label: {
+                HStack(spacing: 4) {
+                    if let symbol = segment.symbol { Image(systemName: symbol).accessibilityHidden(true) }
+                    Text(segment.label).multilineTextAlignment(.center).lineLimit(singleLine ? 1 : nil)
+                    if selection == segment.id {
+                        Image(systemName: "checkmark").font(.caption.weight(.bold)).accessibilityHidden(true)
+                    }
+                }.font(.subheadline.weight(.semibold))
+                    .fixedSize(horizontal: singleLine, vertical: true)
+                    .padding(.horizontal, 6).padding(.vertical, 8)
+                    .frame(maxWidth: .infinity, minHeight: max(44, target))
+                    .foregroundStyle(selection == segment.id ? EncounterPalette.onAccent : EncounterPalette.ink)
+                    .background(selection == segment.id ? EncounterPalette.accent : .clear, in: segmentShape)
+                    .contentShape(segmentShape)
+            }.buttonStyle(.plain).accessibilityLabel(segment.label)
+                .accessibilityAddTraits(selection == segment.id ? .isSelected : [])
+        }
     }
 }
 
