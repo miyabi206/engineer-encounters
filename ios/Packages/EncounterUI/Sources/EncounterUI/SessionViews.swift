@@ -98,8 +98,10 @@ public struct SessionView<RevealedEncounters: View>: View {
     @ViewBuilder private var status: some View {
         if model.lifecycle.hasEnded {
             EncounterNotice(SessionStrings.text(.ended))
+                .multilineTextAlignment(.leading)
             if model.lifecycle.stopPending {
                 EncounterNotice(SessionStrings.text(.stopPending))
+                    .multilineTextAlignment(.leading)
                 if model.lifecycle.stopFailed { retry }
             }
         } else {
@@ -107,6 +109,7 @@ public struct SessionView<RevealedEncounters: View>: View {
             case .active:
                 Text(SessionStrings.text(.active)).font(.title2.bold())
                 Text(SessionStrings.text(.timeRemaining)).font(.caption).foregroundStyle(EncounterPalette.inkSecondary)
+                    .accessibilityHidden(true)
                 Text(SessionCountdown.text(seconds: model.remainingSeconds))
                     .font(.system(size: countdownSize, weight: .bold, design: .rounded)).monospacedDigit()
                     .foregroundStyle(EncounterPalette.accent)
@@ -134,7 +137,7 @@ public struct SessionView<RevealedEncounters: View>: View {
     private func sessionError(_ key: SessionString) -> some View {
         EncounterInlineError(message: SessionStrings.text(key), retryLabel: SessionStrings.text(.retry)) {
             Task { await model.retry() }
-        }
+        }.multilineTextAlignment(.leading)
     }
 }
 

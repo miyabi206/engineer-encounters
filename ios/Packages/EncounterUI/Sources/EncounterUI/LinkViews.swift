@@ -94,22 +94,10 @@ private struct LinkOwnedList: View {
                     LinkPreviewCard(draft: LinkPreviewDraft(link: link))
                     Divider().overlay(EncounterPalette.border)
                     let actions = dynamicTypeSize.isAccessibilitySize
-                        ? AnyLayout(VStackLayout(alignment: .trailing, spacing: 8))
+                        ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
                         : AnyLayout(HStackLayout(spacing: 8))
                     actions {
-                        Button(LinkStrings.text(.edit)) { model.beginEdit(link) }
-                            .buttonStyle(EncounterButtonStyle(.tertiary, fullWidth: false))
-                            .disabled(model.isBusy)
-                            .accessibilityLabel(LinkStrings.label(LinkStrings.text(.edit), value: link.title))
-                        SwiftUI.Link(LinkStrings.text(.openOriginal), destination: link.url)
-                            .buttonStyle(EncounterButtonStyle(.tertiary, fullWidth: false))
-                            .accessibilityLabel(LinkStrings.label(LinkStrings.text(.openOriginal), value: link.title))
-                    }.frame(maxWidth: .infinity, alignment: .trailing)
-                    if allowsReordering && model.links.count > 1 {
-                        let moves = dynamicTypeSize.isAccessibilitySize
-                            ? AnyLayout(VStackLayout(alignment: .trailing, spacing: 8))
-                            : AnyLayout(HStackLayout(spacing: 8))
-                        moves {
+                        if allowsReordering && model.links.count > 1 {
                             Button { Task { await model.move(link.id, offset: -1) } } label: {
                                 Image(systemName: "arrow.up").accessibilityHidden(true)
                             }
@@ -122,8 +110,16 @@ private struct LinkOwnedList: View {
                             .buttonStyle(EncounterButtonStyle(.tertiary, fullWidth: false))
                             .disabled(model.isBusy || model.links.last?.id == link.id)
                             .accessibilityLabel(LinkStrings.label(link.title, value: LinkStrings.text(.moveDown)))
-                        }.frame(maxWidth: .infinity, alignment: .trailing)
-                    }
+                        }
+                        if !dynamicTypeSize.isAccessibilitySize { Spacer(minLength: 0) }
+                        Button(LinkStrings.text(.edit)) { model.beginEdit(link) }
+                            .buttonStyle(EncounterButtonStyle(.tertiary, fullWidth: false))
+                            .disabled(model.isBusy)
+                            .accessibilityLabel(LinkStrings.label(LinkStrings.text(.edit), value: link.title))
+                        SwiftUI.Link(LinkStrings.text(.openOriginal), destination: link.url)
+                            .buttonStyle(EncounterButtonStyle(.tertiary, fullWidth: false))
+                            .accessibilityLabel(LinkStrings.label(LinkStrings.text(.openOriginal), value: link.title))
+                    }.frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }
@@ -322,7 +318,8 @@ public struct LinkEditView: View {
     private func textField(_ label: LinkString, field: LinkField, value: Binding<String>,
                            limit: Int? = nil, required: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            EncounterField(LinkStrings.text(label), text: value, multiline: true)
+            EncounterField(LinkStrings.text(label), text: value, multiline: true,
+                           minHeight: field == .title || field == .mainLanguage ? 52 : nil)
             if let limit {
                 Text(LinkStrings.counter(LinkValidation.count(value.wrappedValue), limit: limit))
                     .font(.caption).foregroundStyle(EncounterPalette.inkSecondary)
@@ -421,9 +418,11 @@ struct LinkPreviewCard: View {
             }
             if !draft.description.isEmpty { Text(draft.description).foregroundStyle(EncounterPalette.inkSecondary) }
             if let language = draft.mainLanguage, !language.isEmpty { Text(language).font(.caption) }
-            EncounterFlowLayout(isAccessibilitySize: dynamicTypeSize.isAccessibilitySize) {
-                ForEach(Array(draft.tags.enumerated()), id: \.offset) { _, tag in
-                    EncounterChip(label: tag)
+            if !draft.tags.isEmpty {
+                EncounterFlowLayout(isAccessibilitySize: dynamicTypeSize.isAccessibilitySize) {
+                    ForEach(Array(draft.tags.enumerated()), id: \.offset) { _, tag in
+                        EncounterChip(label: tag)
+                    }
                 }
             }
             if !draft.openingText.isEmpty { Text(draft.openingText) }
