@@ -41,6 +41,7 @@ struct ProductRootView: View {
             root(tab)
                 .navigationDestination(for: ProductRoute.self) { route in destination(route, tab: tab) }
         }
+        .tint(EncounterPalette.accent)
     }
 
     @ViewBuilder private func root(_ tab: ProductTab) -> some View {
@@ -52,8 +53,10 @@ struct ProductRootView: View {
                         ScrollView {
                             DiscoverDiscoveryOffPanel(sample: composition.sampleEncounter, prerequisites: settings.profile.prerequisites,
                                 state: presentation.ownState, navigation: presentation.discoverNavigation(.discover),
-                                retry: { await presentation.retryOwnState() }).padding()
+                                retry: { await presentation.retryOwnState() })
+                                .padding(.horizontal, 20).padding(.vertical, 16)
                         }
+                        .background(EncounterPalette.background.ignoresSafeArea())
                         .navigationTitle(AccountStrings.text("discoverTab"))
                         .task { await model.loadFeed() }
                     } else {
@@ -139,6 +142,7 @@ struct ProductRootView: View {
 
 @MainActor
 private struct ProductSessionView: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @StateObject private var presentation = ProductSessionPresentation()
     @ObservedObject var discover: DiscoverModel
     let navigation: SessionNavigationActions
@@ -154,13 +158,20 @@ private struct ProductSessionView: View {
         Group {
             if let failure = adapter.controlStartFailure {
                 VStack(spacing: 16) {
-                    Text(SessionSurfaceStrings.text(failure == .offline ? "startOffline" : "startFailed"))
-                    Button(AccountStrings.text("retry")) { Task { await retryStart() } }
-                        .disabled(adapter.controlStartInProgress)
-                    Button(AccountStrings.text("back"), action: navigation.close)
+                    EncounterSurfaceCard {
+                        Text(SessionSurfaceStrings.text(failure == .offline ? "startOffline" : "startFailed"))
+                            .foregroundStyle(EncounterPalette.destructive)
+                        Button(AccountStrings.text("retry")) { Task { await retryStart() } }
+                            .buttonStyle(EncounterButtonStyle(.secondary))
+                            .disabled(adapter.controlStartInProgress)
+                        Button(AccountStrings.text("back"), action: navigation.close)
+                            .buttonStyle(EncounterButtonStyle(.tertiary))
+                    }
                     if adapter.state == .stopping || adapter.state == .starting { sessionContent }
                 }
-                .padding()
+                .padding(.horizontal, 20).padding(.vertical, 16)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(EncounterPalette.background.ignoresSafeArea())
                 .navigationTitle(SessionSurfaceStrings.text("session"))
             } else { sessionContent }
         }
@@ -179,13 +190,32 @@ private struct ProductSessionView: View {
             SessionView(model: model, navigation: navigation, hasRevealedEncounters: !cards.isEmpty) {
                 ForEach(cards) { item in
                     Button { navigation.openEncounter(item.id) } label: {
-                        VStack(alignment: .leading) {
-                            if let name = item.card.displayName { Text(name) }
-                            if let introduction = item.card.introduction { Text(introduction) }
-                            if let link = item.card.links.first { Text(link.title) }
-                            Text(item.day.formatted(locale: .current))
+                        EncounterSurfaceCard {
+                            let layout = dynamicTypeSize.isAccessibilitySize ?
+                                AnyLayout(VStackLayout(alignment: .leading, spacing: 12)) :
+                                AnyLayout(HStackLayout(alignment: .top, spacing: 16))
+                            layout {
+                                if let name = item.card.displayName {
+                                    EncounterAvatar(displayName: name, decorative: true)
+                                }
+                                VStack(alignment: .leading, spacing: 8) {
+                                    if let name = item.card.displayName { Text(name).font(.headline) }
+                                    if let introduction = item.card.introduction {
+                                        Text(introduction).foregroundStyle(EncounterPalette.inkSecondary)
+                                    }
+                                    if let link = item.card.links.first {
+                                        Text(link.title).font(.headline).foregroundStyle(EncounterPalette.accent)
+                                    }
+                                    Text(item.day.formatted(locale: .current)).font(.caption)
+                                        .foregroundStyle(EncounterPalette.inkSecondary)
+                                }.frame(maxWidth: .infinity, alignment: .leading)
+                                Image(systemName: "chevron.right").foregroundStyle(EncounterPalette.inkSecondary)
+                                    .accessibilityHidden(true)
+                            }
                         }
-                    }
+                        .multilineTextAlignment(.leading)
+                        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    }.buttonStyle(.plain)
                 }
             }
         } else { ProgressView() }
@@ -272,12 +302,15 @@ struct ProductTabContainer<Discover: View, Profile: View, Settings: View>: UIVie
     func makeUIViewController(context: Context) -> UITabBarController {
         let controller = UITabBarController()
         controller.delegate = context.coordinator
+        controller.tabBar.tintColor = EncounterPalette.accentUIColor
         let discoverHost = UIHostingController(rootView: AnyView(discover.environment(\.scenePhase, lifecycle.phase)))
         let profileHost = UIHostingController(rootView: AnyView(profile.environment(\.scenePhase, lifecycle.phase)))
         let settingsHost = UIHostingController(rootView: AnyView(settings.environment(\.scenePhase, lifecycle.phase)))
-        discoverHost.tabBarItem = UITabBarItem(title: AccountStrings.text("discoverTab"), image: UIImage(systemName: "sparkles"), tag: 0)
-        profileHost.tabBarItem = UITabBarItem(title: AccountStrings.text("profileTab"), image: UIImage(systemName: "person.crop.circle"), tag: 1)
-        settingsHost.tabBarItem = UITabBarItem(title: AccountStrings.text("settingsTab"), image: UIImage(systemName: "gearshape"), tag: 2)
+        discoverHost.tabBarItem = UITabBarItem(title: AccountStrings.text("discoverTab"), image: UIImage(systemName: "magnifyingglass"), tag: 0)
+        profileHost.tabBarItem = UITabBarItem(title: AccountStrings.text("profileTab"), image: UIImage(systemName: "person"), selectedImage: UIImage(systemName: "person.fill"))
+        settingsHost.tabBarItem = UITabBarItem(title: AccountStrings.text("settingsTab"), image: UIImage(systemName: "gearshape"), selectedImage: UIImage(systemName: "gearshape.fill"))
+        profileHost.tabBarItem.tag = 1
+        settingsHost.tabBarItem.tag = 2
         controller.viewControllers = [discoverHost, profileHost, settingsHost]
         return controller
     }
@@ -343,10 +376,15 @@ struct ProductDiscoverAccessView<Content: View>: View {
     @ViewBuilder let content: () -> Content
     var body: some View {
         if adapter.needsAuthorizationRetry, adapter.model?.discoveryOn == true {
-            VStack(spacing: 16) {
-                Text(AccountStrings.text("profileError"))
+            EncounterSurfaceCard {
+                EncounterSymbolTile(symbol: "exclamationmark.shield")
+                Text(AccountStrings.text("profileError")).font(.headline)
                 Button(AccountStrings.text("retry")) { Task { await adapter.retryAuthorization() } }
-            }.padding()
+                    .buttonStyle(EncounterButtonStyle(.primary))
+            }
+            .padding(.horizontal, 20).padding(.vertical, 16)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(EncounterPalette.background.ignoresSafeArea())
         } else { content() }
     }
 }
@@ -358,12 +396,18 @@ private struct ProductBluetoothPermissionPanel: View {
     let tab: ProductTab
     let navigation: DiscoverNavigationActions
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        EncounterSurfaceCard {
+            EncounterSymbolTile(symbol: "antenna.radiowaves.left.and.right.slash")
             Text(AccountStrings.text("bluetoothUnavailable")).font(.headline)
-            Text(AccountStrings.text("bluetoothCheckGuidance"))
+            Text(AccountStrings.text("bluetoothCheckGuidance")).foregroundStyle(EncounterPalette.inkSecondary)
             Button(AccountStrings.text("checkBluetooth")) { Task { await presentation.requestBluetooth(in: tab) } }
-            if presentation.discoveryOn { Button(AccountStrings.text("qrExchange"), action: navigation.openQR) }
+                .buttonStyle(EncounterButtonStyle(.primary))
+            if presentation.discoveryOn {
+                Button(AccountStrings.text("qrExchange"), action: navigation.openQR)
+                    .buttonStyle(EncounterButtonStyle(.secondary))
+            }
             Button(AccountStrings.text("discoverySettings"), action: navigation.openDiscoverySettings)
-        }.frame(maxWidth: .infinity, alignment: .leading)
+                .buttonStyle(EncounterButtonStyle(.tertiary))
+        }
     }
 }

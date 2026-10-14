@@ -27,32 +27,47 @@ struct AccountRootView: View {
         ZStack {
             VStack(spacing: 16) {
                 if account.sessionCleanupFailed {
-                    Text(AccountStrings.text("cleanupError"))
-                    Button(AccountStrings.text("retry")) { Task { await flow.refresh() } }
+                    EncounterSurfaceCard {
+                        EncounterNotice(AccountStrings.text("cleanupError"), kind: .warning)
+                        Button(AccountStrings.text("retry")) { Task { await flow.refresh() } }
+                            .buttonStyle(EncounterButtonStyle(.secondary))
+                    }.padding(.horizontal, 20)
                 }
                 if flow.savedWithStaleProfile {
-                    Text(AccountStrings.text("savedStale"))
-                    Button(AccountStrings.text("retry")) { Task { await flow.refresh() } }
+                    EncounterSurfaceCard {
+                        EncounterNotice(AccountStrings.text("savedStale"), kind: .warning)
+                        Button(AccountStrings.text("retry")) { Task { await flow.refresh() } }
+                            .buttonStyle(EncounterButtonStyle(.secondary))
+                    }.padding(.horizontal, 20)
                 }
                 switch flow.root {
                 case .restoring:
-                    ProgressView(AccountStrings.text("restoring"))
+                    loadingState("restoring")
                 case .welcome:
                     NavigationStack { welcome }
                 case .loadingProfile:
                     NavigationStack {
                         VStack(spacing: 16) {
-                            ProgressView(AccountStrings.text("loadingProfile"))
+                            EncounterMark()
+                            EncounterProgress(AccountStrings.text("loadingProfile"))
                             diagnosticsLink
                         }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(EncounterPalette.background.ignoresSafeArea())
                     }
                 case .profileUnavailable:
                     NavigationStack {
                         VStack(spacing: 16) {
-                            Text(AccountStrings.text("profileError"))
-                            Button(AccountStrings.text("retry")) { Task { await flow.refresh() } }
+                            EncounterSurfaceCard {
+                                EncounterNotice(AccountStrings.text("profileError"), kind: .warning)
+                                Button(AccountStrings.text("retry")) { Task { await flow.refresh() } }
+                                    .buttonStyle(EncounterButtonStyle(.secondary))
+                            }
                             diagnosticsLink
-                        }.padding()
+                        }
+                        .padding(.horizontal, 20).padding(.vertical, 16)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(EncounterPalette.background.ignoresSafeArea())
                     }
                 case .onboarding:
                     if let model = flow.onboarding { OnboardingView(model: model) }
@@ -64,6 +79,8 @@ struct AccountRootView: View {
             .accessibilityHidden(composition.deletionSuspended)
             if composition.deletionSuspended { AccountDeletionRecoveryView(composition: composition) }
         }
+        .tint(EncounterPalette.accent)
+        .background(EncounterPalette.background.ignoresSafeArea())
         .background(ScenePrivacyAttachment(cover: composition.productLifecycle.privacyCover))
         .task { await flow.start() }
         .onOpenURL { url in
@@ -75,6 +92,15 @@ struct AccountRootView: View {
                 await flow.refresh()
             }
         }
+    }
+
+    private func loadingState(_ key: String) -> some View {
+        VStack(spacing: 16) {
+            EncounterMark()
+            EncounterProgress(AccountStrings.text(key))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(EncounterPalette.background.ignoresSafeArea())
     }
 
     @ViewBuilder
@@ -92,6 +118,7 @@ struct AccountRootView: View {
     private var welcomeTrailing: some View {
         if flow.canResumeOnboarding {
             Button(AccountStrings.text("continueSetup")) { flow.resumeOnboarding() }
+                .buttonStyle(EncounterButtonStyle(.secondary))
         }
         #if DEVELOPMENT_BUILD
         DevelopmentDiagnosticsEntry(composition: composition)
@@ -122,25 +149,38 @@ struct AccountLinksView: View {
     var body: some View {
         VStack {
             LinkListView(model: model, back: back, discoverySettings: discovery)
-            if adapter.needsGitHubSync { Text(AccountStrings.text("githubSyncPending")) }
-            if model.route == .list {
-                if adapter.connection.isConnected {
-                    Button(AccountStrings.text("disconnectGitHub"), role: .destructive) { confirmDisconnect = true }
-                        .disabled(model.isBusy || disconnecting)
-                }
-                if adapter.needsGitHubSync {
-                    Button(AccountStrings.text("retry")) { Task { await model.connectGitHub() } }
-                        .disabled(model.isBusy || disconnecting)
-                }
-                if adapter.connectionError != nil {
-                    Text(AccountStrings.text("connectError"))
-                }
-                if let error = adapter.disconnectError {
-                    Text(AccountStrings.text(error.isLastLink ? "disconnectLastLink" : "disconnectError"))
-                    if error.isLastLink { Button(AccountStrings.text("discoverySettings"), action: discovery) }
+            if adapter.needsGitHubSync || (model.route == .list &&
+                (adapter.connection.isConnected || adapter.connectionError != nil || adapter.disconnectError != nil)) {
+                ScrollView {
+                    EncounterSurfaceCard {
+                        if adapter.needsGitHubSync { EncounterNotice(AccountStrings.text("githubSyncPending")) }
+                        if model.route == .list {
+                            if adapter.connection.isConnected {
+                                Button(AccountStrings.text("disconnectGitHub"), role: .destructive) { confirmDisconnect = true }
+                                    .buttonStyle(EncounterButtonStyle(.destructive))
+                                    .disabled(model.isBusy || disconnecting)
+                            }
+                            if adapter.needsGitHubSync {
+                                Button(AccountStrings.text("retry")) { Task { await model.connectGitHub() } }
+                                    .buttonStyle(EncounterButtonStyle(.secondary))
+                                    .disabled(model.isBusy || disconnecting)
+                            }
+                            if adapter.connectionError != nil {
+                                EncounterNotice(AccountStrings.text("connectError"), kind: .warning)
+                            }
+                            if let error = adapter.disconnectError {
+                                EncounterNotice(AccountStrings.text(error.isLastLink ? "disconnectLastLink" : "disconnectError"), kind: .warning)
+                                if error.isLastLink {
+                                    Button(AccountStrings.text("discoverySettings"), action: discovery)
+                                        .buttonStyle(EncounterButtonStyle(.secondary))
+                                }
+                            }
+                        }
+                    }.padding(.horizontal, 20).padding(.vertical, 16)
                 }
             }
         }
+        .background(EncounterPalette.background.ignoresSafeArea())
         .task {
             // Read the identity without starting a repository-list request.
             _ = try? await adapter.actions().loadConnection()
