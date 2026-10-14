@@ -489,8 +489,9 @@ private struct DiscoverPanelHeader: View {
 private struct DiscoverActionLabel: View {
     let key: DiscoverString
     let symbol: String
+    var spacing: CGFloat = 8
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: spacing) {
             Image(systemName: symbol).accessibilityHidden(true)
             Text(DiscoverStrings.text(key)).fixedSize(horizontal: false, vertical: true)
         }
@@ -585,6 +586,27 @@ private struct DiscoverActionDivider: View {
     var body: some View {
         if !dynamicTypeSize.isAccessibilitySize {
             Rectangle().fill(EncounterPalette.border).frame(width: 1, height: height).accessibilityHidden(true)
+        }
+    }
+}
+
+private struct DiscoverEqualWidthActionRow: Layout {
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let minimumWidth = (subviews.map { $0.sizeThatFits(.unspecified).width }.max() ?? 0)
+            * CGFloat(subviews.count)
+        let width = max(proposal.width ?? minimumWidth, minimumWidth)
+        let cellWidth = width / CGFloat(max(1, subviews.count))
+        let height = subviews.map {
+            $0.sizeThatFits(ProposedViewSize(width: cellWidth, height: nil)).height
+        }.max() ?? 0
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let cellWidth = bounds.width / CGFloat(max(1, subviews.count))
+        for (index, subview) in subviews.enumerated() {
+            subview.place(at: CGPoint(x: bounds.minX + cellWidth * (CGFloat(index) + 0.5), y: bounds.midY),
+                          anchor: .center, proposal: ProposedViewSize(width: cellWidth, height: bounds.height))
         }
     }
 }
@@ -982,6 +1004,7 @@ struct EncounterLinkView: View {
     var viewEncounter: (@MainActor () -> Void)? = nil
     var reportImpersonation: (@MainActor () -> Void)? = nil
     let toggleSaved: @MainActor () -> Void
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     var body: some View {
         DiscoverSurface {
             DiscoverAdaptiveRow {
@@ -1001,24 +1024,18 @@ struct EncounterLinkView: View {
             if let language = link.mainLanguage { Text(language).font(.callout).foregroundStyle(EncounterPalette.inkSecondary) }
             if let opening = link.openingText { Text(opening) }
             DiscoverDivider()
-            DiscoverDividedActions {
-                Link(destination: link.url) {
-                    DiscoverActionLabel(key: .openOriginal, symbol: "arrow.up.right.square")
-                        .font(.subheadline.weight(.semibold))
-                }.buttonStyle(EncounterButtonStyle(.tertiary)).disabled(disabled)
-                if !isSample {
-                    DiscoverActionDivider()
-                    Button(action: toggleSaved) {
-                        DiscoverActionLabel(key: saved ? .unsaveLink : .saveLink,
-                                            symbol: saved ? "bookmark.fill" : "bookmark")
-                            .font(.subheadline.weight(.semibold))
-                    }.buttonStyle(EncounterButtonStyle(.tertiary)).disabled(disabled)
+            if dynamicTypeSize.isAccessibilitySize {
+                stackedLinkActions
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    DiscoverEqualWidthActionRow {
+                        linkActions(font: .subheadline.weight(.semibold), singleLine: true)
+                    }
+                    DiscoverEqualWidthActionRow {
+                        linkActions(font: .footnote.weight(.semibold), singleLine: true)
+                    }
+                    stackedLinkActions
                 }
-            }
-            if let viewEncounter {
-                Button(action: viewEncounter) {
-                    Text(DiscoverStrings.text(.viewEncounter)).font(.footnote)
-                }.buttonStyle(EncounterButtonStyle(.tertiary, fullWidth: false))
             }
             if !isSample {
                 if let reportImpersonation {
@@ -1027,6 +1044,43 @@ struct EncounterLinkView: View {
                     }.buttonStyle(EncounterButtonStyle(.tertiary, fullWidth: false)).disabled(disabled)
                 }
             }
+        }
+    }
+
+    private var stackedLinkActions: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            linkActions(font: .subheadline.weight(.semibold), singleLine: false)
+        }
+    }
+
+    @ViewBuilder
+    private func linkActions(font: Font, singleLine: Bool) -> some View {
+        Link(destination: link.url) {
+            DiscoverActionLabel(key: .openOriginal, symbol: "arrow.up.right.square", spacing: 4)
+                .font(font).fixedSize(horizontal: singleLine, vertical: true)
+                .padding(.horizontal, singleLine ? -8 : 0)
+        }.buttonStyle(EncounterButtonStyle(.tertiary)).disabled(disabled)
+            .overlay(alignment: .trailing) {
+                if singleLine && (!isSample || viewEncounter != nil) { DiscoverActionDivider() }
+            }
+        if !isSample {
+            Button(action: toggleSaved) {
+                DiscoverActionLabel(key: saved ? .unsaveLink : .saveLink,
+                                    symbol: saved ? "bookmark.fill" : "bookmark", spacing: 4)
+                    .font(font).fixedSize(horizontal: singleLine, vertical: true)
+                    .padding(.horizontal, singleLine ? -8 : 0)
+            }.buttonStyle(EncounterButtonStyle(.tertiary)).disabled(disabled)
+                .overlay(alignment: .trailing) {
+                    if singleLine && viewEncounter != nil { DiscoverActionDivider() }
+                }
+        }
+        if let viewEncounter {
+            Button(action: viewEncounter) {
+                Text(DiscoverStrings.text(.viewEncounter))
+                    .font(singleLine ? font : .footnote)
+                    .fixedSize(horizontal: singleLine, vertical: true)
+                    .padding(.horizontal, singleLine ? -8 : 0)
+            }.buttonStyle(EncounterButtonStyle(.tertiary, fullWidth: singleLine))
         }
     }
 }
