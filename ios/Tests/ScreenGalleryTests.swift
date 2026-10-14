@@ -30,13 +30,13 @@ final class ScreenGalleryTests: XCTestCase {
     private func render(_ content: GalleryContent, screen: GalleryScreen, variant: GalleryVariant,
                         scene: UIWindowScene, directory: URL) async throws {
         let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
-        let size = CGSize(width: 393, height: variant == .full ? 2400 : 852)
+        let size = CGSize(width: 393, height: variant == .axfull ? 3600 : (variant == .full ? 2400 : 852))
         let root = Group {
             if screen.navigation { NavigationStack { content.view } }
             else { content.view }
         }
         .environment(\.colorScheme, variant == .dark ? .dark : .light)
-        .environment(\.dynamicTypeSize, variant == .ax ? .accessibility2 : .large)
+        .environment(\.dynamicTypeSize, variant == .ax || variant == .axfull ? .accessibility2 : .large)
         let host = UIHostingController(rootView: root)
         let window = UIWindow(windowScene: scene)
         window.overrideUserInterfaceStyle = variant == .dark ? .dark : .light
@@ -186,7 +186,7 @@ final class ScreenGalleryTests: XCTestCase {
     }
 }
 
-private enum GalleryVariant: String, CaseIterable { case light, dark, ax, full }
+private enum GalleryVariant: String, CaseIterable { case light, dark, ax, full, axfull }
 
 @MainActor
 private struct GalleryScreen {
