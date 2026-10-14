@@ -26,31 +26,19 @@ public struct ProfileBasicsView: View {
     public init(model: OnboardingModel) { self.model = model }
 
     public var body: some View {
-        OnboardingPage(title: .basicsTitle, isBusy: model.isBusy, back: model.back) {
-            Text(OnboardingStrings.text(.basicsSubtitle))
+        OnboardingPage(title: .basicsTitle, subtitle: .basicsSubtitle, isBusy: model.isBusy, back: model.back) {
             OnboardingCard {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(OnboardingStrings.text(.displayName)).font(.headline)
-                    TextField(OnboardingStrings.text(.displayName), text: $model.displayName)
-                        .textContentType(.nickname)
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityLabel(OnboardingStrings.text(.displayName))
-                    fieldFeedback(value: model.displayName, field: .displayName,
-                                  limit: ProfileValidation.displayNameLimit)
-                }
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(OnboardingStrings.text(.introduction)).font(.headline)
-                    TextField(OnboardingStrings.text(.introduction), text: $model.introduction, axis: .vertical)
-                        .lineLimit(4...10)
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityLabel(OnboardingStrings.text(.introduction))
-                    fieldFeedback(value: model.introduction, field: .introduction,
-                                  limit: ProfileValidation.introductionLimit)
-                }
+                EncounterField(OnboardingStrings.text(.displayName), text: $model.displayName,
+                    counter: OnboardingStrings.counter(model.displayName, limit: ProfileValidation.displayNameLimit),
+                    error: fieldError(value: model.displayName, field: .displayName, limit: ProfileValidation.displayNameLimit),
+                    textContentType: .nickname)
+                EncounterField(OnboardingStrings.text(.introduction), text: $model.introduction, multiline: true,
+                    counter: OnboardingStrings.counter(model.introduction, limit: ProfileValidation.introductionLimit),
+                    error: fieldError(value: model.introduction, field: .introduction, limit: ProfileValidation.introductionLimit))
             }
             .disabled(model.isBusy)
             if !model.canContinueBasics && !model.isBusy {
-                Text(OnboardingStrings.text(.basicsGuidance)).foregroundStyle(.secondary)
+                Text(OnboardingStrings.text(.basicsGuidance)).foregroundStyle(EncounterPalette.inkSecondary)
             }
             if model.isSaving { OnboardingProgress() }
             if let error = model.actionError {
@@ -58,27 +46,23 @@ public struct ProfileBasicsView: View {
                     Task { await model.saveBasics() }
                 }
             }
+        } bottomBar: {
             Button(OnboardingStrings.text(.continueAction)) {
                 Task { await model.saveBasics() }
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(EncounterButtonStyle(.primary))
             .disabled(!model.canContinueBasics)
         }
     }
 
-    @ViewBuilder
-    private func fieldFeedback(value: String, field: ProfileField, limit: Int) -> some View {
-        Text(OnboardingStrings.counter(value, limit: limit))
-            .font(.caption)
-            .foregroundStyle(.secondary)
+    private func fieldError(value: String, field: ProfileField, limit: Int) -> String? {
         if ProfileValidation.characterCount(value) > limit {
-            Text(String(format: OnboardingStrings.text(.tooLong), limit))
-                .foregroundStyle(.red)
+            String(format: OnboardingStrings.text(.tooLong), limit)
         } else if !value.isEmpty && ProfileValidation.trimmed(value).isEmpty {
-            Text(OnboardingStrings.text(.requiredField)).foregroundStyle(.red)
+            OnboardingStrings.text(.requiredField)
         } else if model.actionError?.affects(field) == true {
-            Text(OnboardingStrings.text(.invalidField)).foregroundStyle(.red)
-        }
+            OnboardingStrings.text(.invalidField)
+        } else { nil }
     }
 }
 
@@ -93,8 +77,7 @@ public struct InterestsAndPurposesView: View {
     public var body: some View {
         OnboardingPage(title: .interestsTitle, isBusy: model.isBusy, back: model.back) {
             OnboardingCard {
-                Text(OnboardingStrings.text(.interests))
-                    .font(.headline).accessibilityAddTraits(.isHeader)
+                EncounterSectionHeader(OnboardingStrings.text(.interests))
                 if model.isLoadingInterests { OnboardingProgress() }
                 if let error = model.interestLoadError {
                     OnboardingActionError(error: error, disabled: model.isBusy, fallback: .listError) {
@@ -102,14 +85,13 @@ public struct InterestsAndPurposesView: View {
                     }
                 } else if model.shouldRetryInterestLoad {
                     if model.hasLoadedInterests {
-                        Text(OnboardingStrings.text(.emptyInterests)).foregroundStyle(.secondary)
+                        Text(OnboardingStrings.text(.emptyInterests)).foregroundStyle(EncounterPalette.inkSecondary)
                     }
                     Button(OnboardingStrings.text(.retry)) {
                         Task { await model.loadInterests() }
-                    }.disabled(model.isBusy)
+                    }.buttonStyle(EncounterButtonStyle(.secondary, fullWidth: false)).disabled(model.isBusy)
                 }
-                LazyVGrid(columns: dynamicTypeSize.isAccessibilitySize ?
-                          [GridItem(.flexible())] : [GridItem(.adaptive(minimum: 140))], alignment: .leading) {
+                EncounterFlowLayout(isAccessibilitySize: dynamicTypeSize.isAccessibilitySize) {
                     ForEach(model.interests) { interest in
                         InterestChip(label: interest.label(language: locale.identifier),
                                      selected: model.selectedInterestIDs.contains(interest.id)) {
@@ -121,12 +103,12 @@ public struct InterestsAndPurposesView: View {
                 }
                 Text(String(format: OnboardingStrings.text(.interestCounter), locale: locale,
                             model.selectedInterestIDs.count, ProfileValidation.interestLimit))
-                    .font(.caption).foregroundStyle(.secondary)
-                Text(String(format: OnboardingStrings.text(.interestLimit), locale: locale, ProfileValidation.interestLimit)).font(.caption).foregroundStyle(.secondary)
+                    .font(.footnote).foregroundStyle(EncounterPalette.inkSecondary)
+                Text(String(format: OnboardingStrings.text(.interestLimit), locale: locale, ProfileValidation.interestLimit))
+                    .font(.footnote).foregroundStyle(EncounterPalette.inkSecondary)
             }
             OnboardingCard {
-                Text(OnboardingStrings.text(.purposes))
-                    .font(.headline).accessibilityAddTraits(.isHeader)
+                EncounterSectionHeader(OnboardingStrings.text(.purposes))
                 ForEach(ProfilePurpose.allCases, id: \.self) { purpose in
                     SelectionControl(label: OnboardingStrings.text(
                         purpose == .discovery ? .discoveryPurpose : .collaborationPurpose),
@@ -136,7 +118,7 @@ public struct InterestsAndPurposesView: View {
                 }
             }
             if !model.canContinueInterests && !model.isBusy {
-                Text(OnboardingStrings.text(.selectionGuidance)).foregroundStyle(.secondary)
+                Text(OnboardingStrings.text(.selectionGuidance)).foregroundStyle(EncounterPalette.inkSecondary)
             }
             if model.isSaving { OnboardingProgress() }
             if let error = model.actionError {
@@ -144,10 +126,11 @@ public struct InterestsAndPurposesView: View {
                     Task { await model.saveSelections() }
                 }
             }
+        } bottomBar: {
             Button(OnboardingStrings.text(.continueAction)) {
                 Task { await model.saveSelections() }
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(EncounterButtonStyle(.primary))
             .disabled(!model.canContinueInterests)
         }
         .task {
@@ -159,41 +142,57 @@ public struct InterestsAndPurposesView: View {
 @MainActor
 public struct DiscoveryPermissionsView: View {
     @ObservedObject private var model: OnboardingModel
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @ScaledMetric(relativeTo: .body) private var checklistTarget = 44.0
     public init(model: OnboardingModel) { self.model = model }
 
     public var body: some View {
         OnboardingPage(title: .enableDiscovery, isBusy: model.isBusy, back: model.back) {
+            EncounterMark(signals: true).frame(maxWidth: .infinity)
             OnboardingCard {
                 ForEach([OnboardingString.promise, .background, .dailyReport, .alternatives,
                          .forceQuit, .firstUnlock, .oneSided], id: \.self) { key in
-                    Text(OnboardingStrings.text(key))
+                    EncounterIconRow(symbol: explanationSymbol(key), title: OnboardingStrings.text(key),
+                        showsChevron: false, showsDivider: key != .oneSided)
                 }
             }
             OnboardingCard {
-                Text(OnboardingStrings.text(.checklist))
-                    .font(.headline).accessibilityAddTraits(.isHeader)
+                EncounterSectionHeader(OnboardingStrings.text(.checklist))
                 ForEach(DiscoveryPrerequisite.allCases, id: \.self) { prerequisite in
                     checklistRow(prerequisite)
                 }
                 if !model.profile.prerequisites.link {
-                    Text(OnboardingStrings.text(.linkRequired)).foregroundStyle(.secondary)
+                    Text(OnboardingStrings.text(.linkRequired)).foregroundStyle(EncounterPalette.inkSecondary)
                     if model.canAddLink {
                         Button(OnboardingStrings.text(.addLink)) { model.edit(.link) }
+                            .buttonStyle(EncounterButtonStyle(.secondary, fullWidth: false))
                     }
                 }
             }
             OnboardingCard {
-                Text(OnboardingStrings.text(.bluetoothPurpose))
-                Text(OnboardingStrings.text(bluetoothLabel))
+                let layout = dynamicTypeSize.isAccessibilitySize ?
+                    AnyLayout(VStackLayout(alignment: .leading, spacing: 16)) :
+                    AnyLayout(HStackLayout(alignment: .top, spacing: 16))
+                layout {
+                    HStack(alignment: .top, spacing: 12) {
+                        EncounterSymbolTile(symbol: "dot.radiowaves.left.and.right")
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(OnboardingStrings.text(.bluetoothPurpose))
+                            Text(OnboardingStrings.text(bluetoothLabel)).font(.footnote)
+                                .foregroundStyle(EncounterPalette.inkSecondary)
+                        }.frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    Button(OnboardingStrings.text(.allowBluetooth)) {
+                        Task { await model.requestBluetooth() }
+                    }
+                    .buttonStyle(EncounterButtonStyle(.secondary, fullWidth: false))
+                    .disabled(model.isBusy || model.bluetooth == .available)
+                }
                 if model.bluetooth.needsRecovery {
                     Button(OnboardingStrings.text(.bluetoothRecovery)) { model.recoverBluetooth() }
+                        .buttonStyle(EncounterButtonStyle(.secondary, fullWidth: false))
                         .disabled(model.isBusy)
                 }
-                Button(OnboardingStrings.text(.allowBluetooth)) {
-                    Task { await model.requestBluetooth() }
-                }
-                .buttonStyle(.bordered)
-                .disabled(model.isBusy || model.bluetooth == .available)
             }
             if !model.profile.discoveryOn { Text(OnboardingStrings.text(.discoveryOff)) }
             if model.isSaving { OnboardingProgress() }
@@ -204,16 +203,31 @@ public struct DiscoveryPermissionsView: View {
                     Task { await model.retry() }
                 }
             }
-            Button(OnboardingStrings.text(.enableDiscovery)) {
-                Task { await model.finish(discovery: true) }
+        } bottomBar: {
+            VStack(spacing: 8) {
+                Button(OnboardingStrings.text(.enableDiscovery)) {
+                    Task { await model.finish(discovery: true) }
+                }
+                .buttonStyle(EncounterButtonStyle(.primary))
+                .disabled(!model.canEnableDiscovery)
+                Button(OnboardingStrings.text(.notNow)) {
+                    Task { await model.finish(discovery: false) }
+                }
+                .buttonStyle(EncounterButtonStyle(.tertiary))
+                .disabled(model.isBusy)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(!model.canEnableDiscovery)
-            Button(OnboardingStrings.text(.notNow)) {
-                Task { await model.finish(discovery: false) }
-            }
-            .buttonStyle(.bordered)
-            .disabled(model.isBusy)
+        }
+    }
+
+    private func explanationSymbol(_ key: OnboardingString) -> String {
+        switch key {
+        case .promise: "iphone"
+        case .background: "clock"
+        case .dailyReport: "chart.bar"
+        case .alternatives: "qrcode"
+        case .forceQuit: "exclamationmark.circle"
+        case .firstUnlock: "lock.open"
+        default: "person.2"
         }
     }
 
@@ -234,14 +248,22 @@ public struct DiscoveryPermissionsView: View {
         let status = OnboardingStrings.text(met ? .met : .missing)
         if !met && (prerequisite != .link || model.linkModel != nil) {
             Button { model.edit(prerequisite) } label: {
-                Label(OnboardingStrings.labelStatus(label, status), systemImage: "square")
-            }.disabled(model.isBusy)
+                prerequisiteContent(label: label, status: status, met: met, actionable: true)
+            }.buttonStyle(.plain).disabled(model.isBusy)
         } else {
-            Label(OnboardingStrings.labelStatus(label, status), systemImage: met ? "checkmark.square" : "square")
+            prerequisiteContent(label: label, status: status, met: met, actionable: false)
         }
     }
 
-
+    private func prerequisiteContent(label: String, status: String, met: Bool, actionable: Bool) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: met ? "checkmark.circle.fill" : "circle")
+                .foregroundStyle(met ? EncounterPalette.accent : EncounterPalette.inkSecondary).accessibilityHidden(true)
+            Text(OnboardingStrings.labelStatus(label, status)).frame(maxWidth: .infinity, alignment: .leading)
+            if actionable { Image(systemName: "chevron.right").foregroundStyle(EncounterPalette.inkSecondary).accessibilityHidden(true) }
+        }.frame(minHeight: max(44, checklistTarget)).foregroundStyle(EncounterPalette.ink)
+            .contentShape(Rectangle())
+    }
 }
 
 extension DiscoveryPrerequisite {
@@ -262,20 +284,7 @@ private struct InterestChip: View {
     let action: @MainActor () -> Void
 
     var body: some View {
-        Button(action: action) {
-            HStack {
-                if selected { Image(systemName: "checkmark").accessibilityHidden(true) }
-                Text(label).multilineTextAlignment(.leading)
-            }
-            .frame(maxWidth: .infinity, minHeight: 44)
-            .padding(.horizontal, 8)
-            .background(selected ? Color.teal.opacity(0.15) : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 16))
-        }
-        .buttonStyle(.bordered)
-        .buttonBorderShape(.roundedRectangle(radius: 16))
-        .accessibilityLabel(label)
-        .accessibilityAddTraits(selected ? .isSelected : [])
+        EncounterChip(label: label, selected: selected, action: action)
     }
 }
 
@@ -286,18 +295,7 @@ struct SelectionControl: View {
     let action: @MainActor () -> Void
 
     var body: some View {
-        Button(action: action) {
-            HStack(alignment: .firstTextBaseline) {
-                Image(systemName: selected ? "checkmark.square.fill" : "square")
-                    .accessibilityHidden(true)
-                Text(label).multilineTextAlignment(.leading)
-                Spacer(minLength: 0)
-            }
-            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-        }
-        .buttonStyle(.bordered)
-        .accessibilityLabel(label)
-        .accessibilityAddTraits(selected ? .isSelected : [])
+        EncounterCheckRow(label: label, selected: selected, action: action)
     }
 }
 
@@ -306,21 +304,37 @@ struct OnboardingPage<Content: View>: View {
     let title: OnboardingString
     let isBusy: Bool
     let back: @MainActor () -> Void
-    @ViewBuilder let content: Content
+    let content: Content
+    private let subtitle: OnboardingString?
+    private let bottomBar: AnyView?
+
+    init(title: OnboardingString, isBusy: Bool, back: @escaping @MainActor () -> Void,
+         @ViewBuilder content: () -> Content) {
+        self.title = title; self.isBusy = isBusy; self.back = back; self.content = content()
+        subtitle = nil; bottomBar = nil
+    }
+
+    init<BottomBar: View>(title: OnboardingString, subtitle: OnboardingString? = nil,
+         isBusy: Bool, back: @escaping @MainActor () -> Void,
+         @ViewBuilder content: () -> Content, @ViewBuilder bottomBar: () -> BottomBar) {
+        self.title = title; self.subtitle = subtitle; self.isBusy = isBusy; self.back = back
+        self.content = content(); self.bottomBar = AnyView(bottomBar())
+    }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                Button(OnboardingStrings.text(.back), action: back).disabled(isBusy)
-                Text(OnboardingStrings.text(title))
-                    .font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
-                content
+        if let bottomBar {
+            EncounterScreen(title: OnboardingStrings.text(title), subtitle: subtitle.map(OnboardingStrings.text),
+                alignment: .centered, backLabel: OnboardingStrings.text(.back), backDisabled: isBusy, onBack: back) {
+                    content
+            } bottomBar: {
+                bottomBar
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding()
+        } else {
+            EncounterScreen(title: OnboardingStrings.text(title), alignment: .centered,
+                backLabel: OnboardingStrings.text(.back), backDisabled: isBusy, onBack: back) {
+                    content
+            }
         }
-        .background(Color(uiColor: .systemGroupedBackground))
-        .tint(.teal)
     }
 }
 
@@ -329,20 +343,14 @@ struct OnboardingCard<Content: View>: View {
     @ViewBuilder let content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) { content }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding()
-            .background(Color(uiColor: .secondarySystemGroupedBackground),
-                        in: RoundedRectangle(cornerRadius: 16))
-            .overlay(RoundedRectangle(cornerRadius: 16).stroke(.secondary.opacity(0.2)))
+        EncounterSurfaceCard { content }
     }
 }
 
 @MainActor
 struct OnboardingProgress: View {
     var body: some View {
-        ProgressView(OnboardingStrings.text(.loading))
-            .accessibilityLabel(OnboardingStrings.text(.loading))
+        EncounterProgress(OnboardingStrings.text(.loading))
     }
 }
 
@@ -354,17 +362,15 @@ struct OnboardingActionError: View {
     let retry: @MainActor () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(error.code == .unavailable ? OnboardingStrings.text(fallback) : OnboardingStrings.error(error))
-                .foregroundStyle(.red)
+        EncounterInlineError(message: error.code == .unavailable ? OnboardingStrings.text(fallback) : OnboardingStrings.error(error),
+            retryLabel: OnboardingStrings.text(.retry), disabled: disabled, retry: retry) {
             ForEach(ProfileField.allCases.filter { error.affects($0) }, id: \.self) { field in
                 Text(OnboardingStrings.fieldMessage(OnboardingStrings.text(field.labelKey), OnboardingStrings.text(.invalidField)))
-                    .foregroundStyle(.red)
+                    .foregroundStyle(EncounterPalette.destructive)
             }
             if error.fields.contains("link") {
-                Text(OnboardingStrings.text(.linkRequired)).foregroundStyle(.red)
+                Text(OnboardingStrings.text(.linkRequired)).foregroundStyle(EncounterPalette.destructive)
             }
-            Button(OnboardingStrings.text(.retry), action: retry).disabled(disabled)
         }
     }
 }

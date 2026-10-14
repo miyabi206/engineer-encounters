@@ -10,6 +10,11 @@ public struct WelcomeView<Trailing: View>: View {
     private let onTerms: (@MainActor () -> Void)?
     private let onPrivacy: (@MainActor () -> Void)?
     private let onRetry: (@MainActor () -> Void)?
+    @Environment(\.locale) private var locale
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @ScaledMetric(relativeTo: .largeTitle) private var topSpacing = 32.0
+    @ScaledMetric(relativeTo: .body) private var linkTarget = 44.0
+    @ScaledMetric(relativeTo: .body) private var dividerHeight = 20.0
 
     /// Existing trailing content remains independently available.
     public init(@ViewBuilder trailing: () -> Trailing) {
@@ -46,15 +51,23 @@ public struct WelcomeView<Trailing: View>: View {
     var showsPrivacy: Bool { showsSignInControls && onPrivacy != nil }
 
     public var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
+        EncounterScreen {
+            VStack(spacing: 24) {
+                EncounterMark().padding(.top, topSpacing)
                 Text("welcome.title", bundle: .module)
                     .font(.largeTitle.bold())
+                    .multilineTextAlignment(.center)
                     .accessibilityAddTraits(.isHeader)
+                if let otherName {
+                    Text(otherName).font(.title3).foregroundStyle(EncounterPalette.inkSecondary)
+                        .multilineTextAlignment(.center)
+                }
                 Text("welcome.introduction", bundle: .module)
                     .font(.body)
+                    .foregroundStyle(EncounterPalette.inkSecondary)
+                    .multilineTextAlignment(.center)
                 if let declarations = suppliedDeclarations, let signIn {
-                    OnboardingCard {
+                    VStack(spacing: 12) {
                         SelectionControl(label: OnboardingStrings.text(.age),
                                          selected: declarations.wrappedValue.isAdult) {
                             declarations.wrappedValue.isAdult.toggle()
@@ -64,11 +77,32 @@ public struct WelcomeView<Trailing: View>: View {
                             declarations.wrappedValue.acceptsTermsAndPrivacy.toggle()
                         }
                     }.disabled(isSigningIn)
-                    VStack(alignment: .leading, spacing: 12) {
-                        if let onTerms { Button(OnboardingStrings.text(.terms), action: onTerms) }
-                        if let onPrivacy { Button(OnboardingStrings.text(.privacy), action: onPrivacy) }
+                    let linksLayout = dynamicTypeSize.isAccessibilitySize ?
+                        AnyLayout(VStackLayout(spacing: 8)) : AnyLayout(HStackLayout(spacing: 16))
+                    linksLayout {
+                        if let onTerms {
+                            Button(action: onTerms) {
+                                Text(OnboardingStrings.text(.terms)).underline()
+                                    .frame(minWidth: max(44, linkTarget), minHeight: max(44, linkTarget))
+                                    .contentShape(Rectangle())
+                            }
+                        }
+                        if onTerms != nil && onPrivacy != nil && !dynamicTypeSize.isAccessibilitySize {
+                            Rectangle().fill(EncounterPalette.border).frame(width: 1, height: dividerHeight)
+                                .accessibilityHidden(true)
+                        }
+                        if let onPrivacy {
+                            Button(action: onPrivacy) {
+                                Text(OnboardingStrings.text(.privacy)).underline()
+                                    .frame(minWidth: max(44, linkTarget), minHeight: max(44, linkTarget))
+                                    .contentShape(Rectangle())
+                            }
+                        }
                     }
-                    signIn.disabled(!declarations.wrappedValue.canSignIn || isSigningIn)
+                    .buttonStyle(.plain).foregroundStyle(EncounterPalette.accent)
+                    .frame(maxWidth: .infinity)
+                    signIn.frame(maxWidth: .infinity)
+                        .disabled(!declarations.wrappedValue.canSignIn || isSigningIn)
                     if isSigningIn { OnboardingProgress() }
                     if let signInError {
                         OnboardingActionError(error: signInError,
@@ -78,11 +112,14 @@ public struct WelcomeView<Trailing: View>: View {
                 }
                 trailing
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding()
+            .frame(maxWidth: .infinity)
         }
-        .background(Color(uiColor: .systemGroupedBackground))
-        .tint(.teal)
+    }
+
+    private var otherName: String? {
+        let language = locale.language.languageCode?.identifier == "ja" ? "ja" : "en"
+        let name = WelcomeStrings.localized("welcome.title", language: language == "ja" ? "en" : "ja")
+        return name == WelcomeStrings.localized("welcome.title", language: language) ? nil : name
     }
 }
 
