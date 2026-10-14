@@ -30,7 +30,7 @@ final class ScreenGalleryTests: XCTestCase {
     private func render(_ content: GalleryContent, screen: GalleryScreen, variant: GalleryVariant,
                         scene: UIWindowScene, directory: URL) async throws {
         let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
-        let size = CGSize(width: 393, height: variant == .axfull ? 3600 : (variant == .full ? 2400 : 852))
+        let size = CGSize(width: 393, height: variant == .axfull ? 2700 : (variant == .full ? 2400 : 852))
         let root = Group {
             if screen.navigation { NavigationStack { content.view } }
             else { content.view }
