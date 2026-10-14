@@ -13,8 +13,7 @@ public struct MyCardView: View {
             EncounterSegmentedControl(segments: [
                 .init(MyCardAudience.everyoneEligible, label: SettingsStrings.text(.everyoneEligible)),
                 .init(MyCardAudience.compatibleOnly, label: SettingsStrings.text(.compatibleOnly))
-            ], selection: $model.audience)
-                .accessibilityLabel(MyCardStrings.text(.audience))
+            ], selection: $model.audience, label: MyCardStrings.text(.audience))
             if model.isLoading { EncounterProgress(SettingsStrings.text(.loading)) }
             if model.failed {
                 SafetyFailure(fallback: .listError) { await model.load() }

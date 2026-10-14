@@ -7,12 +7,14 @@ public struct LegalView: View {
     public init(model: LegalModel) { self.model = model }
     public var body: some View {
         SafetyPage(title: LegalStrings.text(.title)) {
-            EncounterSurfaceCard {
-                ForEach(model.data.entries, id: \.self) { entry in
-                    Button { Task { await model.open(entry) } } label: {
-                        EncounterIconRow(symbol: symbol(entry), title: LegalStrings.text(entry.stringKey),
-                                         showsDivider: entry != model.data.entries.last)
-                    }.buttonStyle(EncounterPlainButtonStyle()).disabled(model.isBusy)
+            if !model.data.entries.isEmpty {
+                EncounterSurfaceCard {
+                    ForEach(model.data.entries, id: \.self) { entry in
+                        Button { Task { await model.open(entry) } } label: {
+                            EncounterIconRow(symbol: symbol(entry), title: LegalStrings.text(entry.stringKey),
+                                             showsDivider: entry != model.data.entries.last)
+                        }.buttonStyle(EncounterPlainButtonStyle()).disabled(model.isBusy)
+                    }
                 }
             }
             if let contact = model.data.contact {

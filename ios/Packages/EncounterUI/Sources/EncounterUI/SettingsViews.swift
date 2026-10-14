@@ -37,8 +37,8 @@ public struct SettingsListView<AdditionalRows: View>: View {
                         }
                     }
                 }
+                additionalRows
             }
-            additionalRows
         }
         .navigationTitle(SettingsStrings.text(.settings))
         .navigationBarTitleDisplayMode(.large)
@@ -66,6 +66,7 @@ public struct EditProfileView: View {
     @ObservedObject private var model: SettingsModel
     @Environment(\.locale) private var locale
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @FocusState private var focusedField: ProfileField?
     private let navigation: SettingsNavigationActions
     @ScaledMetric(relativeTo: .body) private var inputHeight = 52.0
     @ScaledMetric(relativeTo: .body) private var introductionHeight = 120.0
@@ -146,17 +147,23 @@ public struct EditProfileView: View {
             Text(label).font(.headline).accessibilityAddTraits(.isHeader)
             if field == .introduction {
                 TextField(label, text: value, axis: .vertical).lineLimit(4...10)
+                    .focused($focusedField, equals: field)
                     .textFieldStyle(.plain).accessibilityLabel(label)
-                    .padding(16).frame(minHeight: introductionHeight, alignment: .topLeading)
+                    .padding(16).frame(maxWidth: .infinity, minHeight: introductionHeight, alignment: .topLeading)
                     .background(EncounterPalette.surface, in: RoundedRectangle(cornerRadius: 16))
                     .overlay(RoundedRectangle(cornerRadius: 16).stroke(EncounterPalette.controlOutline, lineWidth: 1))
+                    .contentShape(RoundedRectangle(cornerRadius: 16))
+                    .simultaneousGesture(TapGesture().onEnded { if !model.isSaving { focusedField = field } })
             } else {
                 TextField(label, text: value)
+                    .focused($focusedField, equals: field)
                     .textContentType(field == .displayName ? .nickname : nil)
                     .textFieldStyle(.plain).accessibilityLabel(label)
-                    .padding(16).frame(minHeight: max(44, inputHeight))
+                    .padding(16).frame(maxWidth: .infinity, minHeight: max(44, inputHeight))
                     .background(EncounterPalette.surface, in: RoundedRectangle(cornerRadius: 16))
                     .overlay(RoundedRectangle(cornerRadius: 16).stroke(EncounterPalette.controlOutline, lineWidth: 1))
+                    .contentShape(RoundedRectangle(cornerRadius: 16))
+                    .simultaneousGesture(TapGesture().onEnded { if !model.isSaving { focusedField = field } })
             }
             Text(SettingsStrings.counter(value.wrappedValue, limit: limit)).font(.caption).foregroundStyle(EncounterPalette.inkSecondary)
             if SettingsValidation.textCount(value.wrappedValue) > limit {
@@ -265,6 +272,7 @@ public struct DiscoveryAndMatchingView: View {
                         .accessibilityLabel(SettingsStrings.text(.threshold))
                         .accessibilityValue(SettingsStrings.threshold(model.minimumSharedInterests))
                     Text(SettingsStrings.threshold(model.minimumSharedInterests))
+                        .accessibilityHidden(true)
                 }
                 if !ProfileValidation.sharedInterestRange.contains(model.minimumSharedInterests) ||
                     SettingsErrorPresentation.affectsThreshold(model.errors[.discovery]) {
@@ -272,9 +280,6 @@ public struct DiscoveryAndMatchingView: View {
                 }
             }
             Text(SettingsStrings.text(.matchingExplanation)).font(.caption).foregroundStyle(EncounterPalette.inkSecondary)
-            Button(SettingsStrings.text(.saveMatching)) {
-                Task { await model.saveMatching() }
-            }.buttonStyle(EncounterButtonStyle(.primary)).disabled(!model.canSaveMatching)
         }
     }
 
@@ -395,8 +400,6 @@ public struct VisibilitySettingsView: View {
                 }
                 Text(SettingsStrings.text(.appliesToPast))
             }
-            Button(SettingsStrings.text(.saveVisibility)) { Task { await model.saveVisibility() } }
-                .buttonStyle(EncounterButtonStyle(.primary)).disabled(model.isSaving)
         }
     }
 
@@ -425,6 +428,7 @@ private struct SettingsPurposes: View {
                 }.disabled(model.isSaving)
             }
         }
+        .font(screen == .discovery ? .subheadline : .body)
     }
 }
 
@@ -442,36 +446,12 @@ private struct SettingsPage<Content: View>: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
-        EncounterScreen {
-            let headerLayout = dynamicTypeSize.isAccessibilitySize ?
-                AnyLayout(VStackLayout(alignment: .leading, spacing: 12)) : AnyLayout(HStackLayout(spacing: 12))
-            headerLayout {
-                if screen == .profile {
-                    Button(SettingsStrings.text(.cancel), action: leave)
-                        .buttonStyle(EncounterButtonStyle(.tertiary, fullWidth: false)).disabled(model.isSaving)
-                } else {
-                    EncounterBackButton(label: SettingsStrings.text(.back), action: leave).disabled(model.isSaving)
-                }
-                if !dynamicTypeSize.isAccessibilitySize { Spacer() }
-                if let save {
-                    Button(action: save) { Text(SettingsStrings.text(.save)).bold() }
-                        .buttonStyle(EncounterButtonStyle(.tertiary, fullWidth: false)).disabled(!canSave)
-                }
+        Group {
+            if screen == .profile {
+                EncounterScreen { pageContent }
+            } else {
+                EncounterScreen { pageContent } bottomBar: { bottomActions }
             }
-            Text(SettingsStrings.text(title)).font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
-            if save != nil || screen != .profile {
-                if model.isSaving { SettingsProgress() }
-                if let error = model.errors[screen] {
-                    SettingsFailure(error: error, screen: screen, discoveryOn: model.profile.discoveryOn,
-                        disabled: !model.canRetry(screen), fallback: screen == .visibility ? .saveError : model.errorFallback(screen)) {
-                        if let retry { retry() }
-                        else if screen == .visibility { Task { await model.retry(.visibility) } }
-                        else { Task { if await model.retry(screen) { navigation.back() } } }
-                    }
-                    SettingsAppliedChanges(model: model, screen: screen)
-                }
-            }
-            content
         }
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(true)
@@ -490,6 +470,60 @@ private struct SettingsPage<Content: View>: View {
                 navigation.back()
             }
             Button(SettingsStrings.text(.cancel), role: .cancel) {}
+        }
+    }
+
+    private var pageContent: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            let headerLayout = dynamicTypeSize.isAccessibilitySize ?
+                AnyLayout(VStackLayout(alignment: .leading, spacing: 12)) : AnyLayout(HStackLayout(spacing: 12))
+            headerLayout {
+                if screen == .profile {
+                    Button(SettingsStrings.text(.cancel), action: leave)
+                        .buttonStyle(EncounterButtonStyle(.tertiary, fullWidth: false)).disabled(model.isSaving)
+                } else {
+                    EncounterBackButton(label: SettingsStrings.text(.back), action: leave).disabled(model.isSaving)
+                }
+                if !dynamicTypeSize.isAccessibilitySize { Spacer() }
+                if let save {
+                    Button(action: save) { Text(SettingsStrings.text(.save)).bold() }
+                        .buttonStyle(EncounterButtonStyle(.tertiary, fullWidth: false)).disabled(!canSave)
+                }
+            }
+            Text(SettingsStrings.text(title)).font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
+            if save != nil { saveFeedback }
+            content
+        }
+        .frame(maxWidth: 640, alignment: .leading)
+        .frame(maxWidth: .infinity)
+    }
+
+    private var bottomActions: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            saveFeedback
+            if screen == .discovery {
+                Button(SettingsStrings.text(.saveMatching)) { Task { await model.saveMatching() } }
+                    .buttonStyle(EncounterButtonStyle(.primary)).disabled(!model.canSaveMatching)
+            } else {
+                Button(SettingsStrings.text(.saveVisibility)) { Task { await model.saveVisibility() } }
+                    .buttonStyle(EncounterButtonStyle(.primary)).disabled(model.isSaving)
+            }
+        }
+        .frame(maxWidth: 640, alignment: .leading)
+        .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private var saveFeedback: some View {
+        if model.isSaving { SettingsProgress() }
+        if let error = model.errors[screen] {
+            SettingsFailure(error: error, screen: screen, discoveryOn: model.profile.discoveryOn,
+                disabled: !model.canRetry(screen), fallback: screen == .visibility ? .saveError : model.errorFallback(screen)) {
+                if let retry { retry() }
+                else if screen == .visibility { Task { await model.retry(.visibility) } }
+                else { Task { if await model.retry(screen) { navigation.back() } } }
+            }
+            SettingsAppliedChanges(model: model, screen: screen)
         }
     }
 

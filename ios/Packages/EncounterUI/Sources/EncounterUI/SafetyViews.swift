@@ -19,10 +19,13 @@ extension EnvironmentValues {
 struct SafetyPage<Content: View>: View {
     let title: String
     @ViewBuilder let content: Content
-    @Environment(\.safetyPageIsPushed) private var isPushed
     var body: some View {
-        EncounterScreen(title: isPushed ? title : nil) { content }
-            .navigationTitle(title).navigationBarTitleDisplayMode(isPushed ? .inline : .large)
+        EncounterScreen {
+            VStack(alignment: .leading, spacing: 24) { content }
+                .frame(maxWidth: 640, alignment: .leading)
+                .frame(maxWidth: .infinity)
+        }
+        .navigationTitle(title).navigationBarTitleDisplayMode(.large)
     }
 }
 
@@ -78,7 +81,7 @@ public struct SafetyBlockedUsersView: View {
                 SafetyFailure(error: error, fallback: model.failedBlockID == nil ? .listError : .saveError,
                               disabled: model.isBusy) { await model.retry() }
             }
-            Text(SafetyStrings.text(.notRestored)).foregroundStyle(EncounterPalette.inkSecondary)
+            Text(SafetyStrings.text(.notRestored)).font(.footnote).foregroundStyle(EncounterPalette.inkSecondary)
         }
         .navigationBarBackButtonHidden(true)
         .environment(\.safetyPageIsPushed, true)
@@ -113,22 +116,22 @@ public struct SafetyReportSheet: View {
                     OnboardingCard {
                         Image(systemName: "checkmark.circle.fill").font(.title).foregroundStyle(EncounterPalette.accent).accessibilityHidden(true)
                         Text(SafetyStrings.text(.submitted)).font(.headline)
-                        Text(SafetyStrings.text(.acceptedHidden)).font(.caption).foregroundStyle(EncounterPalette.inkSecondary)
+                        Text(SafetyStrings.text(.acceptedHidden)).font(.footnote).foregroundStyle(EncounterPalette.inkSecondary)
                     }
                 } else {
                     reportForm
                 }
                 if model.isBusy { EncounterProgress(SettingsStrings.text(.loading)) }
-                if model.isPendingHide { Text(SafetyStrings.text(.pending)).font(.caption).foregroundStyle(EncounterPalette.inkSecondary) }
+                if model.isPendingHide { Text(SafetyStrings.text(.pending)).font(.footnote).foregroundStyle(EncounterPalette.inkSecondary) }
                 if model.isBlockUnavailable {
-                    Text(SafetyStrings.text(.blockUnavailable)).font(.caption).foregroundStyle(EncounterPalette.inkSecondary)
+                    Text(SafetyStrings.text(.blockUnavailable)).font(.footnote).foregroundStyle(EncounterPalette.inkSecondary)
                 } else if let error = model.error {
                     SafetyFailure(error: error, disabled: model.isBusy) { await model.retry() }
                 }
                 Button(SafetyStrings.text(model.acceptedReport == nil ? .block : .blockAlso), role: .destructive) {
                     confirmsBlock = true
                 }.buttonStyle(EncounterButtonStyle(.destructive)).disabled(!model.canBlock)
-                Text(SafetyStrings.text(.blockExplanation)).font(.caption).foregroundStyle(EncounterPalette.inkSecondary)
+                Text(SafetyStrings.text(.blockExplanation)).font(.footnote).foregroundStyle(EncounterPalette.inkSecondary)
                 Text(SafetyStrings.text(.review)).font(.callout).foregroundStyle(EncounterPalette.inkSecondary)
                 if model.acceptedReport != nil {
                     Button(SafetyStrings.text(.done)) { model.done() }
@@ -139,7 +142,8 @@ public struct SafetyReportSheet: View {
                 if model.acceptedReport == nil {
                     ToolbarItem(placement: .topBarLeading) {
                         Button(SettingsStrings.text(.cancel)) { Task { await model.cancel() } }
-                            .buttonStyle(EncounterButtonStyle(.tertiary, fullWidth: false)).disabled(model.isBusy)
+                            .buttonStyle(EncounterPlainButtonStyle()).foregroundStyle(EncounterPalette.accent)
+                            .disabled(model.isBusy)
                     }
                 }
             }
@@ -161,11 +165,11 @@ public struct SafetyReportSheet: View {
                 }.disabled(model.state != .idle || model.isBusy)
             }
             if model.reason == .impersonation && model.link == nil {
-                Text(SafetyStrings.text(.impersonationGuidance)).font(.caption).foregroundStyle(EncounterPalette.inkSecondary)
+                Text(SafetyStrings.text(.impersonationGuidance)).font(.footnote).foregroundStyle(EncounterPalette.inkSecondary)
             }
             Button(SafetyStrings.text(.submit)) { Task { await model.submit() } }
                 .buttonStyle(EncounterButtonStyle(.primary)).disabled(!model.canSubmit)
-            Text(SafetyStrings.text(.hidden)).font(.caption).foregroundStyle(EncounterPalette.inkSecondary)
+            Text(SafetyStrings.text(.hidden)).font(.footnote).foregroundStyle(EncounterPalette.inkSecondary)
         }
     }
 }

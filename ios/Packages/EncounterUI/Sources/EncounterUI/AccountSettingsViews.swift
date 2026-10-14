@@ -46,13 +46,14 @@ public struct AccountSettingsView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             Text(AccountSettingsStrings.text(.github)).font(.headline)
                             EncounterBadge(AccountSettingsStrings.text(data.githubConnected ? .connected : .notConnected),
-                                           style: data.githubConnected ? .verified : .unverified)
+                                           style: data.githubConnected ? .verified : .unverified,
+                                           symbol: data.githubConnected ? "link" : "minus.circle")
                             if data.githubConnected, let handle = data.githubHandle { Text(handle) }
                         }.frame(maxWidth: .infinity, alignment: .leading)
                     }
                     if data.githubConnected {
                         Button(AccountSettingsStrings.text(.disconnect), role: .destructive) { confirmation = .disconnect }
-                            .buttonStyle(AccountDestructiveTertiaryStyle()).disabled(!model.canDismiss)
+                            .buttonStyle(EncounterButtonStyle(.destructiveText, fullWidth: false)).disabled(!model.canDismiss)
                     }
                 }
                 if model.allowsSignOut {
@@ -61,7 +62,7 @@ public struct AccountSettingsView: View {
                 }
                 Button(AccountSettingsStrings.text(.delete), role: .destructive) { confirmation = .delete }
                     .buttonStyle(EncounterButtonStyle(.destructive)).disabled(!model.canDismiss)
-                Text(AccountSettingsStrings.text(.permanent)).font(.caption).foregroundStyle(EncounterPalette.inkSecondary)
+                Text(AccountSettingsStrings.text(.permanent)).font(.footnote).foregroundStyle(EncounterPalette.inkSecondary)
             }
             if model.isBusy {
                 EncounterProgress(model.failedOperation == .checkAccount ?
@@ -124,7 +125,7 @@ public struct AccountSettingsView: View {
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
                         Button(SettingsStrings.text(.cancel)) { confirmation = nil }
-                            .buttonStyle(EncounterButtonStyle(.tertiary, fullWidth: false))
+                            .buttonStyle(EncounterPlainButtonStyle()).foregroundStyle(EncounterPalette.accent)
                     }
                 }
             }.presentationDetents([.large])
@@ -132,17 +133,5 @@ public struct AccountSettingsView: View {
         .task { await model.load() }
         .onAppear { model.appear() }
         .onDisappear { model.disappear() }
-    }
-}
-
-/// The shared destructive style is bordered; disconnect uses the same palette in a text action.
-private struct AccountDestructiveTertiaryStyle: ButtonStyle {
-    @Environment(\.isEnabled) private var isEnabled
-    @ScaledMetric(relativeTo: .body) private var target = 44.0
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label.font(.headline).multilineTextAlignment(.leading)
-            .padding(.vertical, 8).frame(minHeight: max(44, target), alignment: .leading)
-            .foregroundStyle(isEnabled ? EncounterPalette.destructive : EncounterPalette.inkSecondary)
-            .contentShape(Rectangle()).opacity(configuration.isPressed ? 0.8 : 1)
     }
 }
