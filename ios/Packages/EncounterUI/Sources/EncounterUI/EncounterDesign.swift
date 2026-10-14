@@ -1,8 +1,8 @@
 import SwiftUI
 import UIKit
 
-private func encounterCapsuleShape(for size: DynamicTypeSize) -> AnyShape {
-    size.isAccessibilitySize ? AnyShape(RoundedRectangle(cornerRadius: 16, style: .continuous)) : AnyShape(Capsule())
+private func encounterCapsuleShape(for size: DynamicTypeSize, radius: CGFloat = 16) -> AnyShape {
+    size.isAccessibilitySize ? AnyShape(RoundedRectangle(cornerRadius: radius, style: .continuous)) : AnyShape(Capsule())
 }
 
 /// Semantic colours shared by every Encounter screen. UIKit tokens retain trait resolution.
@@ -192,8 +192,12 @@ public struct EncounterButtonStyle: ButtonStyle {
         }
     }
 
+    nonisolated static func resolvedKind(for role: ButtonRole?, kind: Kind) -> Kind {
+        role == .destructive && kind != .destructiveText ? .destructive : kind
+    }
+
     public func makeBody(configuration: Configuration) -> some View {
-        let kind = configuration.role == .destructive && self.kind != .destructiveText ? Kind.destructive : self.kind
+        let kind = Self.resolvedKind(for: configuration.role, kind: self.kind)
         let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
         return configuration.label.font(.headline).multilineTextAlignment(.center)
             .padding(.horizontal, 16).padding(.vertical, 10)
@@ -536,11 +540,15 @@ public struct EncounterSegmentedControl<Value: Hashable>: View {
         current != proposed
     }
 
+    static func updateSelection(_ selection: Binding<Value>, to proposed: Value) {
+        if shouldChangeSelection(from: selection.wrappedValue, to: proposed) { selection.wrappedValue = proposed }
+    }
+
     private var segmentShape: AnyShape {
         encounterCapsuleShape(for: dynamicTypeSize)
     }
     private var trackShape: AnyShape {
-        encounterCapsuleShape(for: dynamicTypeSize)
+        encounterCapsuleShape(for: dynamicTypeSize, radius: 20)
     }
     public var body: some View {
         if let label {
@@ -566,7 +574,7 @@ public struct EncounterSegmentedControl<Value: Hashable>: View {
     private func segmentButtons(singleLine: Bool) -> some View {
         ForEach(segments) { segment in
             Button {
-                if Self.shouldChangeSelection(from: selection, to: segment.id) { selection = segment.id }
+                Self.updateSelection($selection, to: segment.id)
             } label: {
                 HStack(spacing: 4) {
                     if let symbol = segment.symbol { Image(systemName: symbol).accessibilityHidden(true) }
@@ -813,6 +821,7 @@ public struct EncounterMark: View {
         }.frame(width: width, height: width * (signals || pulseRings ? 1.05 : 0.7))
             .accessibilityHidden(true)
             .onAppear(perform: updatePulse)
+            .onDisappear { pulsing = false }
             .onChange(of: reduceMotion) { _, _ in updatePulse() }
             .onChange(of: pulseRings) { _, _ in updatePulse() }
     }

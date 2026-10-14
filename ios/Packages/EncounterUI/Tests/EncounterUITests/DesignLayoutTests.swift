@@ -3,10 +3,35 @@ import SwiftUI
 @testable import EncounterUI
 
 final class DesignLayoutTests: XCTestCase {
+    @MainActor
     func testSegmentReselectionDoesNotRequestABindingWrite() {
-        XCTAssertFalse(EncounterSegmentedControl<String>.shouldChangeSelection(from: "scan", to: "scan"))
-        XCTAssertTrue(EncounterSegmentedControl<String>.shouldChangeSelection(from: "scan", to: "code"))
-        XCTAssertTrue(EncounterSegmentedControl<String>.shouldChangeSelection(from: "code", to: "scan"))
+        var selected = "scan"
+        var writes = 0
+        let selection = Binding(get: { selected }, set: { selected = $0; writes += 1 })
+
+        EncounterSegmentedControl<String>.updateSelection(selection, to: "scan")
+        XCTAssertEqual(writes, 0)
+        XCTAssertEqual(selected, "scan")
+
+        EncounterSegmentedControl<String>.updateSelection(selection, to: "code")
+        XCTAssertEqual(writes, 1)
+        XCTAssertEqual(selected, "code")
+
+        EncounterSegmentedControl<String>.updateSelection(selection, to: "code")
+        XCTAssertEqual(writes, 1)
+        XCTAssertEqual(selected, "code")
+    }
+
+    func testButtonRoleResolvesKindAndPreservesDestructiveText() {
+        let cases: [(EncounterButtonStyle.Kind, EncounterButtonStyle.Kind)] = [
+            (.primary, .destructive), (.secondary, .destructive), (.tertiary, .destructive),
+            (.destructive, .destructive), (.destructiveText, .destructiveText)
+        ]
+        for (kind, destructiveKind) in cases {
+            XCTAssertEqual(EncounterButtonStyle.resolvedKind(for: nil, kind: kind), kind)
+            XCTAssertEqual(EncounterButtonStyle.resolvedKind(for: .cancel, kind: kind), kind)
+            XCTAssertEqual(EncounterButtonStyle.resolvedKind(for: .destructive, kind: kind), destructiveKind)
+        }
     }
 
     func testWrapsAtAvailableWidthAndUsesTallestItemInEachRow() {

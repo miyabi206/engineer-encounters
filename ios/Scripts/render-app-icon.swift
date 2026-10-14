@@ -1,3 +1,5 @@
+// Regenerate from the repository root:
+// swift ios/Scripts/render-app-icon.swift ios/App/Assets.xcassets/AppIcon.appiconset
 import CoreGraphics
 import Foundation
 import ImageIO
