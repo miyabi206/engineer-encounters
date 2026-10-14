@@ -60,19 +60,26 @@ struct ProductRootView: View {
                         .navigationTitle(AccountStrings.text("discoverTab"))
                         .task { await model.loadFeed() }
                     } else {
-                        VStack(spacing: 0) {
-                            if presentation.requiresBluetoothCheck {
-                                ProductBluetoothPermissionPanel(presentation: presentation, tab: .discover,
-                                    navigation: presentation.discoverNavigation(.discover)).padding()
+                        GeometryReader { geometry in
+                            VStack(spacing: 0) {
+                                if presentation.requiresBluetoothCheck {
+                                    ScrollView {
+                                        ProductBluetoothPermissionPanel(presentation: presentation, tab: .discover,
+                                            navigation: presentation.discoverNavigation(.discover))
+                                            .padding(.horizontal, 20).padding(.vertical, 16)
+                                    }
+                                    .frame(maxHeight: geometry.size.height / 2)
+                                }
+                                DiscoverFeedView(model: model, sample: composition.sampleEncounter, navigation: presentation.discoverNavigation(.discover),
+                                    interests: ownInterests, sessionActive: presentation.sessionActive, bluetooth: presentation.feedBluetooth,
+                                    prerequisites: settings.profile.prerequisites, ownState: presentation.ownState,
+                                    retryOwnState: { await presentation.retryOwnState() }, retryBluetooth: { await presentation.retryBluetooth(in: .discover) })
                             }
-                            DiscoverFeedView(model: model, sample: composition.sampleEncounter, navigation: presentation.discoverNavigation(.discover),
-                                interests: ownInterests, sessionActive: presentation.sessionActive, bluetooth: presentation.feedBluetooth,
-                                prerequisites: settings.profile.prerequisites, ownState: presentation.ownState,
-                                retryOwnState: { await presentation.retryOwnState() }, retryBluetooth: { await presentation.retryBluetooth(in: .discover) })
                         }
+                        .background(EncounterPalette.background.ignoresSafeArea())
                     }
                 }
-            } else { ProgressView() }
+            } else { ProgressView().tint(EncounterPalette.accent) }
         case .profile:
             ProductMyCardView(adapter: safetyAdapter, navigation: presentation.myCardNavigation(.profile))
         case .settings:
@@ -124,14 +131,18 @@ struct ProductRootView: View {
         case .diagnostics: ProductDiagnosticsDestination(composition: composition)
         #endif
         case .bluetooth:
-            Group {
-                if presentation.requiresBluetoothCheck {
-                    ProductBluetoothPermissionPanel(presentation: presentation, tab: tab, navigation: presentation.discoverNavigation(tab)).padding()
-                } else {
-                    DiscoverBluetoothUnavailablePanel(status: presentation.bluetooth, discoveryOn: presentation.discoveryOn,
-                        navigation: presentation.discoverNavigation(tab), retry: { await presentation.retryBluetooth(in: tab) })
+            ScrollView {
+                VStack(spacing: 16) {
+                    if presentation.requiresBluetoothCheck {
+                        ProductBluetoothPermissionPanel(presentation: presentation, tab: tab, navigation: presentation.discoverNavigation(tab))
+                    } else {
+                        DiscoverBluetoothUnavailablePanel(status: presentation.bluetooth, discoveryOn: presentation.discoveryOn,
+                            navigation: presentation.discoverNavigation(tab), retry: { await presentation.retryBluetooth(in: tab) })
+                    }
                 }
+                .padding(.horizontal, 20).padding(.vertical, 16)
             }
+            .background(EncounterPalette.background.ignoresSafeArea())
             .onChange(of: presentation.bluetooth) { _, _ in presentation.bluetoothDidChange(in: tab) }
         }
     }
@@ -158,18 +169,19 @@ private struct ProductSessionView: View {
         Group {
             if let failure = adapter.controlStartFailure {
                 VStack(spacing: 16) {
-                    EncounterSurfaceCard {
-                        Text(SessionSurfaceStrings.text(failure == .offline ? "startOffline" : "startFailed"))
-                            .foregroundStyle(EncounterPalette.destructive)
-                        Button(AccountStrings.text("retry")) { Task { await retryStart() } }
-                            .buttonStyle(EncounterButtonStyle(.secondary))
-                            .disabled(adapter.controlStartInProgress)
-                        Button(AccountStrings.text("back"), action: navigation.close)
-                            .buttonStyle(EncounterButtonStyle(.tertiary))
+                    ScrollView {
+                        EncounterSurfaceCard {
+                            EncounterNotice(SessionSurfaceStrings.text(failure == .offline ? "startOffline" : "startFailed"), kind: .warning)
+                            Button(AccountStrings.text("retry")) { Task { await retryStart() } }
+                                .buttonStyle(EncounterButtonStyle(.secondary))
+                                .disabled(adapter.controlStartInProgress)
+                            Button(AccountStrings.text("back"), action: navigation.close)
+                                .buttonStyle(EncounterButtonStyle(.tertiary))
+                        }
+                        .padding(.horizontal, 20).padding(.vertical, 16)
                     }
                     if adapter.state == .stopping || adapter.state == .starting { sessionContent }
                 }
-                .padding(.horizontal, 20).padding(.vertical, 16)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(EncounterPalette.background.ignoresSafeArea())
                 .navigationTitle(SessionSurfaceStrings.text("session"))
@@ -189,8 +201,9 @@ private struct ProductSessionView: View {
         if let model = presentation.model {
             SessionView(model: model, navigation: navigation, hasRevealedEncounters: !cards.isEmpty) {
                 ForEach(cards) { item in
+                    if item.id != cards.first?.id { Divider().overlay(EncounterPalette.border) }
                     Button { navigation.openEncounter(item.id) } label: {
-                        EncounterSurfaceCard {
+                        VStack(alignment: .leading, spacing: 16) {
                             let layout = dynamicTypeSize.isAccessibilitySize ?
                                 AnyLayout(VStackLayout(alignment: .leading, spacing: 12)) :
                                 AnyLayout(HStackLayout(alignment: .top, spacing: 16))
@@ -213,12 +226,14 @@ private struct ProductSessionView: View {
                                     .accessibilityHidden(true)
                             }
                         }
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        .foregroundStyle(EncounterPalette.ink)
                         .multilineTextAlignment(.leading)
                         .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                     }.buttonStyle(.plain)
                 }
             }
-        } else { ProgressView() }
+        } else { ProgressView().tint(EncounterPalette.accent) }
     }
     private var cards: [EncounterFeedCard] { discover.feed.filter { $0.card.kind == .session } }
 }
@@ -260,7 +275,7 @@ struct ProductQRView: View {
     var body: some View {
         Group {
             if presentation.ready { QRView(model: model, navigation: navigation) }
-            else { ProgressView() }
+            else { ProgressView().tint(EncounterPalette.accent) }
         }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
@@ -376,13 +391,15 @@ struct ProductDiscoverAccessView<Content: View>: View {
     @ViewBuilder let content: () -> Content
     var body: some View {
         if adapter.needsAuthorizationRetry, adapter.model?.discoveryOn == true {
-            EncounterSurfaceCard {
-                EncounterSymbolTile(symbol: "exclamationmark.shield")
-                Text(AccountStrings.text("profileError")).font(.headline)
-                Button(AccountStrings.text("retry")) { Task { await adapter.retryAuthorization() } }
-                    .buttonStyle(EncounterButtonStyle(.primary))
+            ScrollView {
+                EncounterSurfaceCard {
+                    EncounterSymbolTile(symbol: "exclamationmark.shield")
+                    Text(AccountStrings.text("profileError")).font(.headline)
+                    Button(AccountStrings.text("retry")) { Task { await adapter.retryAuthorization() } }
+                        .buttonStyle(EncounterButtonStyle(.primary))
+                }
+                .padding(.horizontal, 20).padding(.vertical, 16)
             }
-            .padding(.horizontal, 20).padding(.vertical, 16)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(EncounterPalette.background.ignoresSafeArea())
         } else { content() }

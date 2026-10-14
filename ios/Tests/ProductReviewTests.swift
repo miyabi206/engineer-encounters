@@ -13,6 +13,33 @@ import XCTest
 
 @MainActor
 final class ProductReviewTests: XCTestCase {
+    func testHostedTabBarUsesEncounterTitlesSymbolsTagsAndAccent() async throws {
+        let navigation = ProductNavigationModel()
+        let lifecycle = ProductSceneLifecycle(phase: .active, notifications: NotificationCenter())
+        let container = ProductTabContainer(navigation: navigation, lifecycle: lifecycle,
+            discover: Text("Discover"), profile: Text("Profile"), settings: Text("Settings"))
+        let host = UIHostingController(rootView: container)
+        let window = UIWindow(windowScene: try appBackendWindowScene())
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil }
+        try await appBackendEventually {
+            reviewPump(window)
+            return host.children.contains { $0 is UITabBarController }
+        }
+        let tabs = try XCTUnwrap(host.children.first as? UITabBarController)
+        let items = try XCTUnwrap(tabs.tabBar.items)
+        XCTAssertEqual(items.count, 3)
+        XCTAssertEqual(items.map(\.title), ["discoverTab", "profileTab", "settingsTab"].map { AccountStrings.text($0) })
+        XCTAssertEqual(items.map(\.tag), [0, 1, 2])
+        for (item, symbol) in zip(items, ["magnifyingglass", "person", "gearshape"]) {
+            XCTAssertEqual(item.image, try XCTUnwrap(UIImage(systemName: symbol)), symbol)
+        }
+        for (item, symbol) in zip(items.dropFirst(), ["person.fill", "gearshape.fill"]) {
+            XCTAssertEqual(item.selectedImage, try XCTUnwrap(UIImage(systemName: symbol)), symbol)
+        }
+        XCTAssertEqual(tabs.tabBar.tintColor, EncounterPalette.accentUIColor)
+    }
+
     func testDiscoverStatesAndSessionRoutesFollowTheContracts() {
         XCTAssertEqual(ProductDiscoverState.bluetoothStatus(permission: .notRequested, requested: false), .failed)
         XCTAssertEqual(ProductDiscoverState.bluetoothStatus(permission: .notRequested, requested: true), .checking)

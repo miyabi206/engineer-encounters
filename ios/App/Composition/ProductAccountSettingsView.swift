@@ -47,7 +47,7 @@ struct ProductAccountSettingsView: View {
                         }
                         if data.githubConnected {
                             Button(AccountStrings.text("accountSettingsDisconnect"), role: .destructive) { confirmation = .disconnect }
-                                .buttonStyle(EncounterButtonStyle(.destructive))
+                                .buttonStyle(EncounterButtonStyle(.destructiveText, fullWidth: false))
                         }
                     }
                     Button(AccountStrings.text("accountSettingsSignOut")) { confirmation = .signOut }
@@ -113,7 +113,6 @@ struct ProductAccountSettingsView: View {
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
                         Button(AccountStrings.text("cancel")) { confirmation = nil }
-                            .buttonStyle(EncounterButtonStyle(.tertiary, fullWidth: false))
                     }
                 }
             }.presentationDetents([.large])

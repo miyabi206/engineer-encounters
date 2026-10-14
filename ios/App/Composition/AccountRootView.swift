@@ -25,54 +25,65 @@ struct AccountRootView: View {
 
     var body: some View {
         ZStack {
-            VStack(spacing: 16) {
-                if account.sessionCleanupFailed {
-                    EncounterSurfaceCard {
-                        EncounterNotice(AccountStrings.text("cleanupError"), kind: .warning)
-                        Button(AccountStrings.text("retry")) { Task { await flow.refresh() } }
-                            .buttonStyle(EncounterButtonStyle(.secondary))
-                    }.padding(.horizontal, 20)
-                }
-                if flow.savedWithStaleProfile {
-                    EncounterSurfaceCard {
-                        EncounterNotice(AccountStrings.text("savedStale"), kind: .warning)
-                        Button(AccountStrings.text("retry")) { Task { await flow.refresh() } }
-                            .buttonStyle(EncounterButtonStyle(.secondary))
-                    }.padding(.horizontal, 20)
-                }
-                switch flow.root {
-                case .restoring:
-                    loadingState("restoring")
-                case .welcome:
-                    NavigationStack { welcome }
-                case .loadingProfile:
-                    NavigationStack {
-                        VStack(spacing: 16) {
-                            EncounterMark()
-                            EncounterProgress(AccountStrings.text("loadingProfile"))
-                            diagnosticsLink
+            GeometryReader { geometry in
+                VStack(spacing: 16) {
+                    if account.sessionCleanupFailed || flow.savedWithStaleProfile {
+                        ScrollView {
+                            VStack(spacing: 16) {
+                                if account.sessionCleanupFailed {
+                                    EncounterSurfaceCard {
+                                        EncounterNotice(AccountStrings.text("cleanupError"), kind: .warning)
+                                        Button(AccountStrings.text("retry")) { Task { await flow.refresh() } }
+                                            .buttonStyle(EncounterButtonStyle(.secondary))
+                                    }
+                                }
+                                if flow.savedWithStaleProfile {
+                                    EncounterSurfaceCard {
+                                        EncounterNotice(AccountStrings.text("savedStale"), kind: .warning)
+                                        Button(AccountStrings.text("retry")) { Task { await flow.refresh() } }
+                                            .buttonStyle(EncounterButtonStyle(.secondary))
+                                    }
+                                }
+                            }.padding(.horizontal, 20).padding(.vertical, 16)
                         }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(EncounterPalette.background.ignoresSafeArea())
+                        .frame(maxHeight: geometry.size.height / 2)
                     }
-                case .profileUnavailable:
-                    NavigationStack {
-                        VStack(spacing: 16) {
-                            EncounterSurfaceCard {
-                                EncounterNotice(AccountStrings.text("profileError"), kind: .warning)
-                                Button(AccountStrings.text("retry")) { Task { await flow.refresh() } }
-                                    .buttonStyle(EncounterButtonStyle(.secondary))
+                    switch flow.root {
+                    case .restoring:
+                        loadingState("restoring")
+                    case .welcome:
+                        NavigationStack { welcome }
+                    case .loadingProfile:
+                        NavigationStack {
+                            VStack(spacing: 16) {
+                                EncounterMark()
+                                EncounterProgress(AccountStrings.text("loadingProfile"))
+                                diagnosticsLink
                             }
-                            diagnosticsLink
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(EncounterPalette.background.ignoresSafeArea())
                         }
-                        .padding(.horizontal, 20).padding(.vertical, 16)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(EncounterPalette.background.ignoresSafeArea())
+                    case .profileUnavailable:
+                        NavigationStack {
+                            ScrollView {
+                                VStack(spacing: 16) {
+                                    EncounterSurfaceCard {
+                                        EncounterNotice(AccountStrings.text("profileError"), kind: .warning)
+                                        Button(AccountStrings.text("retry")) { Task { await flow.refresh() } }
+                                            .buttonStyle(EncounterButtonStyle(.secondary))
+                                    }
+                                    diagnosticsLink
+                                }
+                                .padding(.horizontal, 20).padding(.vertical, 16)
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(EncounterPalette.background.ignoresSafeArea())
+                        }
+                    case .onboarding:
+                        if let model = flow.onboarding { OnboardingView(model: model) }
+                    case .settings:
+                        if let model = flow.settings { ProductRootView(settings: model, links: flow.links, composition: composition) }
                     }
-                case .onboarding:
-                    if let model = flow.onboarding { OnboardingView(model: model) }
-                case .settings:
-                    if let model = flow.settings { ProductRootView(settings: model, links: flow.links, composition: composition) }
                 }
             }
             .disabled(composition.deletionSuspended)
@@ -132,6 +143,7 @@ struct AccountRootView: View {
         #if DEVELOPMENT_BUILD || INTERNAL_BUILD
         if flow.offersDiagnostics {
             NavigationLink(DiagnosticsStrings.text("title")) { DiagnosticsView(composition: composition) }
+                .buttonStyle(EncounterButtonStyle(.tertiary))
         }
         #endif
     }
@@ -151,33 +163,32 @@ struct AccountLinksView: View {
             LinkListView(model: model, back: back, discoverySettings: discovery)
             if adapter.needsGitHubSync || (model.route == .list &&
                 (adapter.connection.isConnected || adapter.connectionError != nil || adapter.disconnectError != nil)) {
-                ScrollView {
-                    EncounterSurfaceCard {
-                        if adapter.needsGitHubSync { EncounterNotice(AccountStrings.text("githubSyncPending")) }
-                        if model.route == .list {
-                            if adapter.connection.isConnected {
-                                Button(AccountStrings.text("disconnectGitHub"), role: .destructive) { confirmDisconnect = true }
-                                    .buttonStyle(EncounterButtonStyle(.destructive))
-                                    .disabled(model.isBusy || disconnecting)
-                            }
-                            if adapter.needsGitHubSync {
-                                Button(AccountStrings.text("retry")) { Task { await model.connectGitHub() } }
+                EncounterSurfaceCard {
+                    if adapter.needsGitHubSync { EncounterNotice(AccountStrings.text("githubSyncPending")) }
+                    if model.route == .list {
+                        if adapter.connection.isConnected {
+                            Button(AccountStrings.text("disconnectGitHub"), role: .destructive) { confirmDisconnect = true }
+                                .buttonStyle(EncounterButtonStyle(.destructive))
+                                .disabled(model.isBusy || disconnecting)
+                        }
+                        if adapter.needsGitHubSync {
+                            Button(AccountStrings.text("retry")) { Task { await model.connectGitHub() } }
+                                .buttonStyle(EncounterButtonStyle(.secondary))
+                                .disabled(model.isBusy || disconnecting)
+                        }
+                        if adapter.connectionError != nil {
+                            EncounterNotice(AccountStrings.text("connectError"), kind: .warning)
+                        }
+                        if let error = adapter.disconnectError {
+                            EncounterNotice(AccountStrings.text(error.isLastLink ? "disconnectLastLink" : "disconnectError"), kind: .warning)
+                            if error.isLastLink {
+                                Button(AccountStrings.text("discoverySettings"), action: discovery)
                                     .buttonStyle(EncounterButtonStyle(.secondary))
-                                    .disabled(model.isBusy || disconnecting)
-                            }
-                            if adapter.connectionError != nil {
-                                EncounterNotice(AccountStrings.text("connectError"), kind: .warning)
-                            }
-                            if let error = adapter.disconnectError {
-                                EncounterNotice(AccountStrings.text(error.isLastLink ? "disconnectLastLink" : "disconnectError"), kind: .warning)
-                                if error.isLastLink {
-                                    Button(AccountStrings.text("discoverySettings"), action: discovery)
-                                        .buttonStyle(EncounterButtonStyle(.secondary))
-                                }
                             }
                         }
-                    }.padding(.horizontal, 20).padding(.vertical, 16)
-                }
+                    }
+                }.fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 20).padding(.vertical, 16)
             }
         }
         .background(EncounterPalette.background.ignoresSafeArea())
