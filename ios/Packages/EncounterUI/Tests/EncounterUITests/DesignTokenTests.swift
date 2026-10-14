@@ -2,39 +2,86 @@ import XCTest
 import UIKit
 @testable import EncounterUI
 
+@MainActor
 final class DesignTokenTests: XCTestCase {
-    func testTextTokensMeetWCAGContrastInBothAppearances() {
-        let pairs: [(String, UIColor, UIColor)] = [
-            ("ink/background", EncounterPalette.inkUIColor, EncounterPalette.backgroundUIColor),
-            ("ink/surface", EncounterPalette.inkUIColor, EncounterPalette.surfaceUIColor),
-            ("inkSecondary/background", EncounterPalette.inkSecondaryUIColor, EncounterPalette.backgroundUIColor),
-            ("inkSecondary/surface", EncounterPalette.inkSecondaryUIColor, EncounterPalette.surfaceUIColor),
-            ("accent/background", EncounterPalette.accentUIColor, EncounterPalette.backgroundUIColor),
-            ("accent/surface", EncounterPalette.accentUIColor, EncounterPalette.surfaceUIColor),
-            ("onAccent/accent", EncounterPalette.onAccentUIColor, EncounterPalette.accentUIColor),
-            ("accent/accentSoft", EncounterPalette.accentUIColor, EncounterPalette.accentSoftUIColor),
-            ("ambient badge", EncounterPalette.ambientTextUIColor, EncounterPalette.ambientFillUIColor),
-            ("session badge", EncounterPalette.sessionTextUIColor, EncounterPalette.sessionFillUIColor),
-            ("QR badge", EncounterPalette.accentUIColor, EncounterPalette.accentSoftUIColor),
-            ("verified badge", EncounterPalette.accentUIColor, EncounterPalette.accentSoftUIColor),
-            ("unverified badge", EncounterPalette.inkUIColor, EncounterPalette.neutralFillUIColor),
-            ("visibility badge", EncounterPalette.accentUIColor, EncounterPalette.accentSoftUIColor),
-            ("ink/accentSoft", EncounterPalette.inkUIColor, EncounterPalette.accentSoftUIColor),
-            ("ink/warningFill", EncounterPalette.inkUIColor, EncounterPalette.warningFillUIColor)
+    func testTextTokensMeetWCAGContrastInBothAppearancesAndContrastSettings() {
+        let background = EncounterPalette.backgroundUIColor
+        let surface = EncounterPalette.surfaceUIColor
+        // Each distinct colour pair appears once; the final colour is the actual backing surface.
+        let pairs: [(String, UIColor, UIColor, UIColor)] = [
+            ("ink/background", EncounterPalette.inkUIColor, background, background),
+            ("ink/surface", EncounterPalette.inkUIColor, surface, background),
+            ("inkSecondary/background", EncounterPalette.inkSecondaryUIColor, background, background),
+            ("inkSecondary/surface", EncounterPalette.inkSecondaryUIColor, surface, background),
+            ("accent/background", EncounterPalette.accentUIColor, background, background),
+            ("accent/surface", EncounterPalette.accentUIColor, surface, background),
+            ("onAccent/accent buttons and selected chips", EncounterPalette.onAccentUIColor, EncounterPalette.accentUIColor, surface),
+            ("accent/accentSoft tags, QR, verified and visibility badges", EncounterPalette.accentUIColor, EncounterPalette.accentSoftUIColor, surface),
+            ("ambient badge", EncounterPalette.ambientTextUIColor, EncounterPalette.ambientFillUIColor, surface),
+            ("session badge", EncounterPalette.sessionTextUIColor, EncounterPalette.sessionFillUIColor, surface),
+            ("ink/neutralFill chips, segments and unverified badges", EncounterPalette.inkUIColor, EncounterPalette.neutralFillUIColor, surface),
+            ("inkSecondary/neutralFill disabled chips and rows", EncounterPalette.inkSecondaryUIColor, EncounterPalette.neutralFillUIColor, surface),
+            ("inkSecondary/neutralFill disabled screen buttons", EncounterPalette.inkSecondaryUIColor, EncounterPalette.neutralFillUIColor, background),
+            ("ink/accentSoft notices", EncounterPalette.inkUIColor, EncounterPalette.accentSoftUIColor, surface),
+            ("ink/warningFill notices", EncounterPalette.inkUIColor, EncounterPalette.warningFillUIColor, surface),
+            ("destructive/surface", EncounterPalette.destructiveUIColor, surface, background),
+            ("destructive/background", EncounterPalette.destructiveUIColor, background, background),
+            ("destructive/accentSoft", EncounterPalette.destructiveUIColor, EncounterPalette.accentSoftUIColor, surface)
         ]
-        for style in [UIUserInterfaceStyle.light, .dark] {
-            let traits = UITraitCollection(userInterfaceStyle: style)
-            let canvas = rgba(EncounterPalette.backgroundUIColor, traits: traits)
-            for (name, foreground, background) in pairs {
-                // System fills and secondary labels can have alpha; measure their displayed colour.
-                let fill = composite(rgba(background, traits: traits), over: canvas)
-                let text = composite(rgba(foreground, traits: traits), over: fill)
-                let a = luminance(text)
-                let b = luminance(fill)
-                let ratio = (max(a, b) + 0.05) / (min(a, b) + 0.05)
-                XCTAssertGreaterThanOrEqual(ratio, 4.5, "\(name), \(style): \(ratio):1")
+        for traits in traitVariants {
+            for (name, foreground, fill, backing) in pairs {
+                let ratio = contrast(foreground, on: fill, over: backing, traits: traits)
+                XCTAssertGreaterThanOrEqual(ratio, 4.5, "\(name), \(traits): \(ratio):1")
             }
         }
+    }
+
+    func testFieldBoundaryAndUnselectedIndicatorsHaveThreeToOneContrast() {
+        for traits in traitVariants {
+            for surroundings in [EncounterPalette.surfaceUIColor, EncounterPalette.backgroundUIColor] {
+                let ratio = contrast(EncounterPalette.controlOutlineUIColor, on: surroundings,
+                                     over: EncounterPalette.backgroundUIColor, traits: traits)
+                XCTAssertGreaterThanOrEqual(ratio, 3, "Field boundary and unselected checkbox/radio, \(traits): \(ratio):1")
+            }
+        }
+    }
+
+    func testIncreasedContrastStrengthensAccentAndControlOutline() {
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            let normal = traits(style: style, contrast: .normal)
+            let high = traits(style: style, contrast: .high)
+            for token in [EncounterPalette.accentUIColor, EncounterPalette.controlOutlineUIColor] {
+                let normalRatio = contrast(token, on: EncounterPalette.surfaceUIColor,
+                                           over: EncounterPalette.backgroundUIColor, traits: normal)
+                let highRatio = contrast(token, on: EncounterPalette.surfaceUIColor,
+                                         over: EncounterPalette.backgroundUIColor, traits: high)
+                XCTAssertGreaterThan(highRatio, normalRatio)
+            }
+        }
+    }
+
+    private var traitVariants: [UITraitCollection] {
+        [UIUserInterfaceStyle.light, .dark].flatMap { style in
+            [UIAccessibilityContrast.normal, .high].map { traits(style: style, contrast: $0) }
+        }
+    }
+
+    private func traits(style: UIUserInterfaceStyle, contrast: UIAccessibilityContrast) -> UITraitCollection {
+        UITraitCollection { mutable in
+            mutable.userInterfaceStyle = style
+            mutable.accessibilityContrast = contrast
+        }
+    }
+
+    private func contrast(_ foreground: UIColor, on background: UIColor, over backing: UIColor,
+                          traits: UITraitCollection) -> Double {
+        let canvas = rgba(EncounterPalette.backgroundUIColor, traits: traits)
+        let backingColor = composite(rgba(backing, traits: traits), over: canvas)
+        let fill = composite(rgba(background, traits: traits), over: backingColor)
+        let text = composite(rgba(foreground, traits: traits), over: fill)
+        let a = luminance(text)
+        let b = luminance(fill)
+        return (max(a, b) + 0.05) / (min(a, b) + 0.05)
     }
 
     private struct RGBA {

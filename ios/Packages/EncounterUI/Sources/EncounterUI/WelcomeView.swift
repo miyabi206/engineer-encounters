@@ -10,7 +10,6 @@ public struct WelcomeView<Trailing: View>: View {
     private let onTerms: (@MainActor () -> Void)?
     private let onPrivacy: (@MainActor () -> Void)?
     private let onRetry: (@MainActor () -> Void)?
-    @Environment(\.locale) private var locale
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ScaledMetric(relativeTo: .largeTitle) private var topSpacing = 32.0
     @ScaledMetric(relativeTo: .body) private var linkTarget = 44.0
@@ -116,10 +115,13 @@ public struct WelcomeView<Trailing: View>: View {
         }
     }
 
-    private var otherName: String? {
-        let language = locale.language.languageCode?.identifier == "ja" ? "ja" : "en"
-        let name = WelcomeStrings.localized("welcome.title", language: language == "ja" ? "en" : "ja")
-        return name == WelcomeStrings.localized("welcome.title", language: language) ? nil : name
+    private var otherName: AttributedString? {
+        guard Bundle.module.preferredLocalizations.first == "ja",
+              let name = WelcomeStrings.localized("welcome.title", language: "en"),
+              name != WelcomeStrings.localized("welcome.title", language: "ja") else { return nil }
+        var attributed = AttributedString(name)
+        attributed.languageIdentifier = "en"
+        return attributed
     }
 }
 

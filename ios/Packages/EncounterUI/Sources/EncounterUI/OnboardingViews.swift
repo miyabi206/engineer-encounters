@@ -34,24 +34,27 @@ public struct ProfileBasicsView: View {
                     textContentType: .nickname)
                 EncounterField(OnboardingStrings.text(.introduction), text: $model.introduction, multiline: true,
                     counter: OnboardingStrings.counter(model.introduction, limit: ProfileValidation.introductionLimit),
-                    error: fieldError(value: model.introduction, field: .introduction, limit: ProfileValidation.introductionLimit))
+                    error: fieldError(value: model.introduction, field: .introduction, limit: ProfileValidation.introductionLimit),
+                    lineLimit: 4...10)
             }
             .disabled(model.isBusy)
             if !model.canContinueBasics && !model.isBusy {
                 Text(OnboardingStrings.text(.basicsGuidance)).foregroundStyle(EncounterPalette.inkSecondary)
             }
-            if model.isSaving { OnboardingProgress() }
-            if let error = model.actionError {
-                OnboardingActionError(error: error, disabled: !model.canContinueBasics) {
+        } bottomBar: {
+            VStack(spacing: 12) {
+                if model.isSaving { OnboardingProgress() }
+                if let error = model.actionError {
+                    OnboardingActionError(error: error, disabled: !model.canContinueBasics) {
+                        Task { await model.saveBasics() }
+                    }
+                }
+                Button(OnboardingStrings.text(.continueAction)) {
                     Task { await model.saveBasics() }
                 }
+                .buttonStyle(EncounterButtonStyle(.primary))
+                .disabled(!model.canContinueBasics)
             }
-        } bottomBar: {
-            Button(OnboardingStrings.text(.continueAction)) {
-                Task { await model.saveBasics() }
-            }
-            .buttonStyle(EncounterButtonStyle(.primary))
-            .disabled(!model.canContinueBasics)
         }
     }
 
@@ -120,18 +123,20 @@ public struct InterestsAndPurposesView: View {
             if !model.canContinueInterests && !model.isBusy {
                 Text(OnboardingStrings.text(.selectionGuidance)).foregroundStyle(EncounterPalette.inkSecondary)
             }
-            if model.isSaving { OnboardingProgress() }
-            if let error = model.actionError {
-                OnboardingActionError(error: error, disabled: !model.canContinueInterests) {
+        } bottomBar: {
+            VStack(spacing: 12) {
+                if model.isSaving { OnboardingProgress() }
+                if let error = model.actionError {
+                    OnboardingActionError(error: error, disabled: !model.canContinueInterests) {
+                        Task { await model.saveSelections() }
+                    }
+                }
+                Button(OnboardingStrings.text(.continueAction)) {
                     Task { await model.saveSelections() }
                 }
+                .buttonStyle(EncounterButtonStyle(.primary))
+                .disabled(!model.canContinueInterests)
             }
-        } bottomBar: {
-            Button(OnboardingStrings.text(.continueAction)) {
-                Task { await model.saveSelections() }
-            }
-            .buttonStyle(EncounterButtonStyle(.primary))
-            .disabled(!model.canContinueInterests)
         }
         .task {
             if !model.hasLoadedInterests { await model.loadInterests() }
@@ -174,14 +179,12 @@ public struct DiscoveryPermissionsView: View {
                     AnyLayout(VStackLayout(alignment: .leading, spacing: 16)) :
                     AnyLayout(HStackLayout(alignment: .top, spacing: 16))
                 layout {
-                    HStack(alignment: .top, spacing: 12) {
-                        EncounterSymbolTile(symbol: "dot.radiowaves.left.and.right")
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(OnboardingStrings.text(.bluetoothPurpose))
-                            Text(OnboardingStrings.text(bluetoothLabel)).font(.footnote)
-                                .foregroundStyle(EncounterPalette.inkSecondary)
-                        }.frame(maxWidth: .infinity, alignment: .leading)
-                    }
+                    EncounterSymbolTile(symbol: "dot.radiowaves.left.and.right")
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(OnboardingStrings.text(.bluetoothPurpose))
+                        Text(OnboardingStrings.text(bluetoothLabel)).font(.footnote)
+                            .foregroundStyle(EncounterPalette.inkSecondary)
+                    }.frame(maxWidth: .infinity, alignment: .leading)
                     Button(OnboardingStrings.text(.allowBluetooth)) {
                         Task { await model.requestBluetooth() }
                     }
@@ -195,16 +198,16 @@ public struct DiscoveryPermissionsView: View {
                 }
             }
             if !model.profile.discoveryOn { Text(OnboardingStrings.text(.discoveryOff)) }
-            if model.isSaving { OnboardingProgress() }
-            if let error = model.actionError {
-                OnboardingActionError(error: error, disabled: model.isBusy ||
-                    (model.failedOperation == .finish(discovery: true) && !model.canEnableDiscovery),
-                    fallback: model.errorFallback) {
-                    Task { await model.retry() }
-                }
-            }
         } bottomBar: {
             VStack(spacing: 8) {
+                if model.isSaving { OnboardingProgress() }
+                if let error = model.actionError {
+                    OnboardingActionError(error: error, disabled: model.isBusy ||
+                        (model.failedOperation == .finish(discovery: true) && !model.canEnableDiscovery),
+                        fallback: model.errorFallback) {
+                        Task { await model.retry() }
+                    }
+                }
                 Button(OnboardingStrings.text(.enableDiscovery)) {
                     Task { await model.finish(discovery: true) }
                 }
@@ -249,7 +252,7 @@ public struct DiscoveryPermissionsView: View {
         if !met && (prerequisite != .link || model.linkModel != nil) {
             Button { model.edit(prerequisite) } label: {
                 prerequisiteContent(label: label, status: status, met: met, actionable: true)
-            }.buttonStyle(.plain).disabled(model.isBusy)
+            }.buttonStyle(EncounterPlainButtonStyle()).disabled(model.isBusy)
         } else {
             prerequisiteContent(label: label, status: status, met: met, actionable: false)
         }
