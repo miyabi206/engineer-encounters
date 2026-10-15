@@ -142,7 +142,6 @@ public struct SafetyReportSheet: View {
                 if model.acceptedReport == nil {
                     ToolbarItem(placement: .topBarLeading) {
                         Button(SettingsStrings.text(.cancel)) { Task { await model.cancel() } }
-                            .buttonStyle(EncounterPlainButtonStyle()).foregroundStyle(EncounterPalette.accent)
                             .disabled(model.isBusy)
                     }
                 }

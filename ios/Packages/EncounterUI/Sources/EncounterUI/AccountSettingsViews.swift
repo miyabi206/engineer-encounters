@@ -125,7 +125,6 @@ public struct AccountSettingsView: View {
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
                         Button(SettingsStrings.text(.cancel)) { confirmation = nil }
-                            .buttonStyle(EncounterPlainButtonStyle()).foregroundStyle(EncounterPalette.accent)
                     }
                 }
             }.presentationDetents([.large])
