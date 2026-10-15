@@ -100,7 +100,7 @@ struct ProductRootView: View {
                         .background(EncounterPalette.background.ignoresSafeArea())
                     }
                 }
-            } else { EncounterProgress(AccountStrings.text("loadingProfile")) }
+            } else { ProgressView().tint(EncounterPalette.accent) }
         case .profile:
             ProductMyCardView(adapter: safetyAdapter, navigation: presentation.myCardNavigation(.profile))
         case .settings:
@@ -257,7 +257,7 @@ private struct ProductSessionView: View {
                     }.buttonStyle(.plain)
                 }
             }
-        } else { EncounterProgress(AccountStrings.text("loadingProfile")) }
+        } else { ProgressView().tint(EncounterPalette.accent) }
     }
     private var cards: [EncounterFeedCard] { discover.feed.filter { $0.card.kind == .session } }
 }
@@ -299,7 +299,7 @@ struct ProductQRView: View {
     var body: some View {
         Group {
             if presentation.ready { QRView(model: model, navigation: navigation) }
-            else { EncounterProgress(AccountStrings.text("loadingProfile")) }
+            else { ProgressView().tint(EncounterPalette.accent) }
         }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
