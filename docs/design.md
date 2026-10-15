@@ -1,9 +1,9 @@
 # Design — Engineer Encounters
 
-**Version:** 0.8\
+**Version:** 0.9\
 **Status:** Built Units 1–5 recorded; remaining fixes and release gates labelled\
-**Date:** 2026-10-14\
-**Related:** `decisions.md` v0.8, `specification.md` v0.8, `ui.md` v0.6\
+**Date:** 2026-10-15\
+**Related:** `decisions.md` v0.8, `specification.md` v0.8, `ui.md` v0.7\
 **Platforms:** iOS first, Android later\
 **Languages:** Japanese, English
 
@@ -128,7 +128,17 @@ The owner's Mac has macOS 27.0.1, Xcode 27.0 with the iOS 27.0 SDK and simulator
 env XDG_CACHE_HOME=$PWD/.build/sandbox/xdg CLANG_MODULE_CACHE_PATH=$PWD/.build/sandbox/clang SWIFTPM_MODULECACHE_OVERRIDE=$PWD/.build/sandbox/manifest swift test --disable-sandbox --package-path ios/Packages/<Package> --cache-path $PWD/.build/sandbox/swiftpm-cache --config-path $PWD/.build/sandbox/swiftpm-config --security-path $PWD/.build/sandbox/swiftpm-security --manifest-cache local
 ```
 
-The same cache and sandbox options with `swift build --triple arm64-apple-ios26.0-simulator --sdk <iPhoneSimulator SDK path>` compile iOS-only package code there. **FACT:** `ios/Scripts/typecheck-app.sh` accepts Development, Internal or Release and type-checks the app without `xcodebuild`; Development also type-checks the hosted tests. XcodeGen, `xcodebuild`, app-hosted test execution, `ios/Tests/check-release-artifact.sh` and every Supabase command do not run in that sandbox. Database units cannot be checked by the implementer; they are verified by the tester role. The tester role runs those checks outside it.
+The same cache and sandbox options with `swift build --triple arm64-apple-ios26.0-simulator --sdk <iPhoneSimulator SDK path>` compile iOS-only package code there. **FACT:** `ios/Scripts/typecheck-app.sh` accepts Development, Internal or Release and type-checks the app and hosted tests without `xcodebuild`. The app module's source list excludes `SessionActivityBundle.swift`, as `ios/project.yml` does for the app target. The script separately type-checks the complete SessionActivity extension with `swiftc -typecheck` and `-D SESSION_ACTIVITY_EXTENSION` in every configuration; no extra command is needed. XcodeGen, `xcodebuild`, app-hosted test execution, `ios/Tests/check-release-artifact.sh` and every Supabase command do not run in that sandbox. Database units cannot be checked by the implementer; they are verified by the tester role. The tester role runs those checks outside it.
+
+**FACT — screenshot gallery:** `ios/Tests/ScreenGalleryTests.swift` is opt-in. Pass an absolute output directory to the hosted process with the `TEST_RUNNER_` prefix:
+
+```sh
+env TEST_RUNNER_ENCOUNTERS_SCREEN_GALLERY=/absolute/path/gallery-ja xcodebuild -project ios/EngineerEncounters.xcodeproj -scheme EngineerEncounters -configuration Development -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17' -derivedDataPath /tmp/encounters-gallery-ja -testLanguage ja -testRegion JP -only-testing:EngineerEncountersTests/ScreenGalleryTests CODE_SIGNING_ALLOWED=NO test
+```
+
+Use a separate output and derived-data directory with `-testLanguage en -testRegion US` for English. The gallery renders 37 states in five variants: light, dark and ax at 393 × 852 pt, full at 393 × 2400 pt, and axfull at 393 × 2700 pt; ax and axfull use Dynamic Type `accessibility2`. Each language produces 185 PNGs. An axfull height of 3600 pt failed because the simulator renders at 3× and its render server refused images over about 8192 px. Without the variable, the gallery is skipped, adding one skip to the app-hosted suites.
+
+**FACT — assets:** `ios/project.yml` sets `ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon` and `ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor` for the app target. `ios/App/Assets.xcassets` contains both assets; `ios/Scripts/render-app-icon.swift` reproducibly renders the default, dark and tinted app icons.
 
 ### VS Code and cross-harness
 
@@ -186,7 +196,7 @@ Radio discovery and local receipt persistence do not wait for the network. Uploa
 | `EncounterBluetooth` | `CBCentralManager` and `CBPeripheralManager`, GATT framing, connection limits and restoration. |
 | `EncounterStorage` | `SwiftDataReceiptQueue` model actor and `KeychainTokenBatchStore`; no encounter authorization. |
 | `EncounterBackend` | Auth session establishment/refresh, own-account RPCs, server token issuer, fair receipt uploader and wire types are built. Feed/detail/favorites/saves, GitHub reader/linking, session, QR, report, safety and deletion services are built; Apple sign-in and push registration remain Unit 7. |
-| `EncounterUI` | Localized welcome/declarations, S02/S03/S05 onboarding, S12/S16/S17 and Settings list are built with shared profile states, standard iOS components, teal accent, light/dark modes and Dynamic Type. Units 4/5 add Discover/detail/favorites, sessions/QR, own-card previews, link flows and report/safety/account/legal screens with three product tab roots. |
+| `EncounterUI` | Localized welcome/declarations, S02/S03/S05 onboarding, S12/S16/S17 and Settings list are built with shared profile states. Units 4/5 add Discover/detail/favorites, sessions/QR, own-card previews, link flows and report/safety/account/legal screens with three product tab roots. The shared design system in `ios/Packages/EncounterUI/Sources/EncounterUI/EncounterDesign.swift` supplies semantic palette tokens, reusable components and `EncounterMark`, with light/dark/high-contrast appearances and Dynamic Type; `ui.md`, **Principles and look**, records the built rules. |
 
 **FACT:** Unit 2 changed `BluetoothTransport` from the planned completed-exchange interface to radio primitives. Commands are `startDiscovery`, `stopDiscovery`, `connect`, `read`, `write`, `disconnect`, `answerRead` and `answerWrite`. Its ordered event stream emits `availabilityChanged`, `peerObserved`, `connected`, `connectFailed`, `frameRead`, `readFailed`, `writeAcknowledged`, `writeFailed`, `disconnected`, `incomingRead`, `incomingWrite` and `restored`. Values use provisional local peer handles rather than framework objects. The encounter engine owns the entire exchange; the core returns ordered effects and deadlines, and the actor serializes radio, token and storage I/O.
 
@@ -812,6 +822,12 @@ Use the terminal entry points in **Stack, tools and workflow** for every impleme
 | Database/backend `fce98ab` | `supabase db reset` applies 11 migrations; `supabase test db` passes 19 files / 5536 assertions; `supabase db lint` for `public`, `private`, `service` at warning level is clean; `call private.run_due_reports()` completes; `deno test` on `github_links_test.ts` passes 27 tests and `deno check` passes. `local_http_flow_test.ts` and `unit4_http_flow_test.ts` pass; these live runs precede a test-only correction to `account_deletion_review.test.sql`, with no migration changed afterwards. |
 | iOS `abc795b`, iPhone 17 simulator | Development/Internal/Release type-checks pass. App-hosted Development: 314 executed, 0 failed, 1 skipped; Internal: 302 executed, 0 failed, 1 skipped. The skip in each is the real Keychain round trip. EncounterUI 263 and EncounterBluetooth 73 pass in both simulator runs. The release-artifact check passes. |
 | Packages `31ab0a0` (no package source changed afterwards) | EncounterBackend 124, EncounterDomain 128, EncounterStorage 33 and EncounterBluetooth 73 pass. |
+
+**FACT — UI restyle test pass, 2026-10-15:** supplied executed results at the listed commit; these checks were not rerun by this documentation update.
+
+| Tested tree | Executed result |
+|---|---|
+| iOS `ccbd06b`, iPhone 17 simulator | Development/Internal/Release type-checks pass. App-hosted EngineerEncountersTests: Development 316 executed, 0 failed, 2 skipped; Internal 304 executed, 0 failed, 2 skipped (real Keychain round trip and opt-in gallery in each). EncounterUI 276 and EncounterBluetooth 73 pass in both simulator runs. The release-artifact check passes; all three builds contain `Assets.car` with `AppIcon` and `AccentColor`. Separate gallery runs produce 185 PNGs per language in Japanese (`ja`) and English (`en`). |
 
 **FACT — verification/review limits:** `ce7cc0f`, `fce98ab`, `5dd20e4`, `31ab0a0` and `abc795b` were verified by the tests above, without a further independent review; `9637e81` was reviewed and corrects the demo operation's explicitly typed adapter-list closure that aborted its hosted sign-out test. **FACT — simulator SpringBoard crashes, 2026-10-14:** the iPhone 17 simulator's SpringBoard (iOS 27.0 runtime) aborted three times that day, 35 to 39 s after it started, on an Apple assertion during a wallpaper snapshot (`PBUIPosterVariantViewController` → `-[RBSAssertion dealloc]`; the reports load no app image); the same crash also occurred on 2026-10-12 and 2026-10-13. The three test runs started around those crashes failed with no connected `UIWindowScene`; six runs without a SpringBoard crash had none. **UNVERIFIED:** that these restarts caused the missing scene (a timing match over nine runs, not a traced mechanism); no evidence points to the app. Scene tests wait up to five seconds via `appBackendWindowScene`. **DEFAULT:** boot the simulator and let it settle for about a minute before hosted runs. The unchanged **UNVERIFIED — integration environments** entry below remains binding; none of these checks verifies its environments or satisfies the two-phone demonstration gate.
 

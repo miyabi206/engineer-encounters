@@ -2,8 +2,8 @@
 
 **Version:** 0.8\
 **Status:** Confirmed product decisions; drafting defaults and unverified items labelled\
-**Date:** 2026-10-14\
-**Related:** `specification.md` v0.8, `design.md` v0.8, `ui.md` v0.6\
+**Date:** 2026-10-15\
+**Related:** `specification.md` v0.8, `design.md` v0.9, `ui.md` v0.7\
 **Platforms:** iOS first, Android later\
 **Languages:** Japanese, English
 
@@ -402,7 +402,9 @@ The GitHub, Qiita and Zenn readers call only fixed hosts.
 
 The dated Unit 4/5 owner confirmation, security review before merge and cross-unit build order are recorded once in `design.md`, **Unit 4 and 5 contract**. Its planned navigation/screen allocation extends the historical Unit 3 scope below.
 
-The UI document is `ui.md`, version 0.5. Unit 2 built the welcome/diagnostics base; Unit 3 built the allocated account screens and Settings list. Current UI routing is recorded below.
+The UI document is `ui.md`, version 0.7. Unit 2 built the welcome/diagnostics base; Unit 3 built the allocated account screens and Settings list. Current UI routing is recorded below.
+
+**Owner decision — UI restyle, 2026-10-15:** restyle every screen to the `docs/images` mockups for look only; the documents govern behaviour and wording. Work on `cross-harness/20261015-032458-restyle-the-app-screens-from-the-mockups`, cut from `8748ba5`, with a screenshot gallery test, Live Activity colours and an app icon. **FACT:** built through `ccbd06b`; `ui.md` records the shared design system, deviations, defaults and remaining low items, and `design.md`, **Automatic checks**, records the test pass.
 
 **Owner decision — scope, 2026-10-12 (binding):** Unit 3 will build `S02`, `S03`, `S05`, `S12`, `S16`, `S17`, the Settings list needed to reach `S12`, `S16`, `S17`, and the two declarations plus Development-only temporary sign-in on `S01`. `S04` and all link flows will stay in Unit 5, Sign in with Apple in Unit 7, and sessions, QR, feed, block, report and deletion in Unit 4. Until the owner supplies real values, screens will use a placeholder interest list and a threshold range of 1 to 10; the real list and range remain open.
 
