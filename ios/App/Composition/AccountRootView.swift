@@ -28,7 +28,7 @@ struct AccountRootView: View {
             GeometryReader { geometry in
                 VStack(spacing: 16) {
                     if account.sessionCleanupFailed || flow.savedWithStaleProfile {
-                        ScrollView {
+                        ProductFittingPanel(maxHeight: geometry.size.height / 2) {
                             VStack(spacing: 16) {
                                 if account.sessionCleanupFailed {
                                     EncounterSurfaceCard {
@@ -46,7 +46,6 @@ struct AccountRootView: View {
                                 }
                             }.padding(.horizontal, 20).padding(.vertical, 16)
                         }
-                        .frame(maxHeight: geometry.size.height / 2)
                     }
                     switch flow.root {
                     case .restoring:
@@ -159,36 +158,40 @@ struct AccountLinksView: View {
     @AccountViewState private var disconnecting = false
 
     var body: some View {
-        VStack {
-            LinkListView(model: model, back: back, discoverySettings: discovery)
-            if adapter.needsGitHubSync || (model.route == .list &&
-                (adapter.connection.isConnected || adapter.connectionError != nil || adapter.disconnectError != nil)) {
-                EncounterSurfaceCard {
-                    if adapter.needsGitHubSync { EncounterNotice(AccountStrings.text("githubSyncPending")) }
-                    if model.route == .list {
-                        if adapter.connection.isConnected {
-                            Button(AccountStrings.text("disconnectGitHub"), role: .destructive) { confirmDisconnect = true }
-                                .buttonStyle(EncounterButtonStyle(.destructive))
-                                .disabled(model.isBusy || disconnecting)
-                        }
-                        if adapter.needsGitHubSync {
-                            Button(AccountStrings.text("retry")) { Task { await model.connectGitHub() } }
-                                .buttonStyle(EncounterButtonStyle(.secondary))
-                                .disabled(model.isBusy || disconnecting)
-                        }
-                        if adapter.connectionError != nil {
-                            EncounterNotice(AccountStrings.text("connectError"), kind: .warning)
-                        }
-                        if let error = adapter.disconnectError {
-                            EncounterNotice(AccountStrings.text(error.isLastLink ? "disconnectLastLink" : "disconnectError"), kind: .warning)
-                            if error.isLastLink {
-                                Button(AccountStrings.text("discoverySettings"), action: discovery)
-                                    .buttonStyle(EncounterButtonStyle(.secondary))
+        GeometryReader { geometry in
+            VStack {
+                LinkListView(model: model, back: back, discoverySettings: discovery)
+                if adapter.needsGitHubSync || (model.route == .list &&
+                    (adapter.connection.isConnected || adapter.connectionError != nil || adapter.disconnectError != nil)) {
+                    ProductFittingPanel(maxHeight: geometry.size.height / 2) {
+                        EncounterSurfaceCard {
+                            if adapter.needsGitHubSync { EncounterNotice(AccountStrings.text("githubSyncPending")) }
+                            if model.route == .list {
+                                if adapter.connection.isConnected {
+                                    Button(AccountStrings.text("disconnectGitHub"), role: .destructive) { confirmDisconnect = true }
+                                        .buttonStyle(EncounterButtonStyle(.destructiveText, fullWidth: false))
+                                        .disabled(model.isBusy || disconnecting)
+                                }
+                                if adapter.needsGitHubSync {
+                                    Button(AccountStrings.text("retry")) { Task { await model.connectGitHub() } }
+                                        .buttonStyle(EncounterButtonStyle(.secondary))
+                                        .disabled(model.isBusy || disconnecting)
+                                }
+                                if adapter.connectionError != nil {
+                                    EncounterNotice(AccountStrings.text("connectError"), kind: .warning)
+                                }
+                                if let error = adapter.disconnectError {
+                                    EncounterNotice(AccountStrings.text(error.isLastLink ? "disconnectLastLink" : "disconnectError"), kind: .warning)
+                                    if error.isLastLink {
+                                        Button(AccountStrings.text("discoverySettings"), action: discovery)
+                                            .buttonStyle(EncounterButtonStyle(.secondary))
+                                    }
+                                }
                             }
                         }
+                        .padding(.horizontal, 20).padding(.vertical, 16)
                     }
-                }.fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 20).padding(.vertical, 16)
+                }
             }
         }
         .background(EncounterPalette.background.ignoresSafeArea())

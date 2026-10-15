@@ -38,6 +38,7 @@ struct SessionLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: SessionActivityAttributes.self) { context in
             SessionActivityLockScreen(context: context)
+                .dynamicTypeSize(...DynamicTypeSize.accessibility1)
                 .widgetURL(URL(string: "engineer-encounters://session"))
         } dynamicIsland: { context in
             DynamicIsland {
@@ -79,7 +80,7 @@ private struct SessionActivityLockScreen: View {
                                 in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .accessibilityHidden(true)
                 Text(context.state.displayName).font(.headline)
-                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
+                    .lineLimit(2)
             }
             let layout = dynamicTypeSize.isAccessibilitySize ?
                 AnyLayout(VStackLayout(alignment: .leading, spacing: 8)) :

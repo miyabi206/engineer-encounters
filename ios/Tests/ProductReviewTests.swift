@@ -26,10 +26,13 @@ final class ProductReviewTests: XCTestCase {
             reviewPump(window)
             return host.children.contains { $0 is UITabBarController }
         }
-        let tabs = try XCTUnwrap(host.children.first as? UITabBarController)
+        let tabs = try XCTUnwrap(host.children.first(where: { $0 is UITabBarController }) as? UITabBarController)
         let items = try XCTUnwrap(tabs.tabBar.items)
         XCTAssertEqual(items.count, 3)
         XCTAssertEqual(items.map(\.title), ["discoverTab", "profileTab", "settingsTab"].map { AccountStrings.text($0) })
+        for (item, key) in zip(items, ["discoverTab", "profileTab", "settingsTab"]) {
+            XCTAssertNotEqual(item.title, key)
+        }
         XCTAssertEqual(items.map(\.tag), [0, 1, 2])
         for (item, symbol) in zip(items, ["magnifyingglass", "person", "gearshape"]) {
             XCTAssertEqual(item.image, try XCTUnwrap(UIImage(systemName: symbol)), symbol)
