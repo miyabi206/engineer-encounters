@@ -594,7 +594,7 @@ private struct DiscoverEqualWidthActionRow: Layout {
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let minimumWidth = (subviews.map { $0.sizeThatFits(.unspecified).width }.max() ?? 0)
             * CGFloat(subviews.count)
-        let width = max(proposal.width ?? minimumWidth, minimumWidth)
+        let width = max(proposal.width.flatMap { $0.isFinite ? $0 : nil } ?? minimumWidth, minimumWidth)
         let cellWidth = width / CGFloat(max(1, subviews.count))
         let height = subviews.map {
             $0.sizeThatFits(ProposedViewSize(width: cellWidth, height: nil)).height
