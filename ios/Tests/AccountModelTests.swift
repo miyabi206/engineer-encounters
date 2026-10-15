@@ -27,7 +27,7 @@ final class AccountModelTests: XCTestCase {
         try await queue.enqueue(EncounterSamples.receipt())
         let keychain = AppMemoryKeychain()
         var bluetoothBuilds = 0
-        let composition = AppComposition(configuration: nil, defaults: appBackendDefaults(), keychain: keychain,
+        let composition = AppComposition(configuration: nil, defaults: appBackendDefaults(), notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(), keychain: keychain,
             queueOpener: { queue }, transportFactory: {
                 bluetoothBuilds += 1
                 return await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: ManualEncounterClock())
@@ -72,7 +72,7 @@ final class AccountModelTests: XCTestCase {
         let transport = AppBackendTransport(Array(repeating: HTTPResponse(data: Data(), statusCode: 204), count: 2))
         let store = InMemorySessionStore(session: try appBackendTestSession())
         let zone = AppTestTimeZone("Asia/Tokyo")
-        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(),
+        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(), notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
             transport: transport, keychain: AppMemoryKeychain(), sessionStore: store, serverTokenStore: InMemoryTokenBatchStore(),
             queueOpener: { InMemoryReceiptQueue() }, now: { appBackendTestNow }, timeZone: { zone.value })
         var states: [AccountState] = []
@@ -102,7 +102,7 @@ final class AccountModelTests: XCTestCase {
         let server = KeychainTokenBatchStore(service: service, client: keychain)
         let queue = InMemoryReceiptQueue()
         let store = InMemorySessionStore(session: try appBackendTestSession())
-        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults,
+        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults, notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
             transport: AppBackendTransport([HTTPResponse(data: Data(), statusCode: 204)]), keychain: keychain,
             sessionStore: store, queueOpener: { queue }, now: { appBackendTestNow })
         await composition.waitForRestoration()
@@ -145,7 +145,7 @@ final class AccountModelTests: XCTestCase {
         ParticipationFlag(defaults: defaults).isEnabled = true
         let clock = ManualEncounterClock()
         var builds = 0
-        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults,
+        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults, notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
             transport: AppBackendTransport([HTTPResponse(data: Data(), statusCode: 204)]),
             keychain: AppMemoryKeychain(), sessionStore: InMemorySessionStore(session: try appBackendTestSession()),
             serverTokenStore: InMemoryTokenBatchStore(batch: try EncounterSamples.batch()),
@@ -166,7 +166,7 @@ final class AccountModelTests: XCTestCase {
             HTTPResponse(data: Data(), statusCode: 204), HTTPResponse(data: Data(), statusCode: 204)])
         let queue = InMemoryReceiptQueue()
         let server = InMemoryTokenBatchStore(batch: try EncounterSamples.batch())
-        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(),
+        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(), notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
             transport: transport, keychain: AppMemoryKeychain(), sessionStore: InMemorySessionStore(), serverTokenStore: server,
             queueOpener: { queue }, now: { appBackendTestNow }, timeZone: { "Asia/Tokyo" })
         await composition.waitForRestoration()
@@ -196,7 +196,7 @@ final class AccountModelTests: XCTestCase {
 
     func testDeclarationFailureKeepsEstablishedSessionAndServerIssuer() async throws {
         let sessions = InMemorySessionStore()
-        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(),
+        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(), notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
             transport: AppBackendTransport([appBackendAuthResponse(), HTTPResponse(data: Data(), statusCode: 500)]),
             keychain: AppMemoryKeychain(), sessionStore: sessions, serverTokenStore: InMemoryTokenBatchStore(),
             signedOutTokenStore: InMemoryTokenBatchStore(),

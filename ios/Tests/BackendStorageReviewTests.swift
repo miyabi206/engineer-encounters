@@ -12,7 +12,7 @@ import XCTest
 final class BackendStorageReviewTests: XCTestCase {
     func testLockedMatchingSessionWithEmptyOrUnreadablePreferencesNeverStartsDeletion() async throws {
         for unreadable in [false, true] {
-            let defaults = ReviewDefaults(suiteName: "EngineerEncounters.Review.\(UUID())")!
+            let defaults = ReviewDefaults()
             defaults.setReadable(!unreadable)
             let keychain = AppMemoryKeychain()
             let configuration = appBackendTestConfiguration()
@@ -55,7 +55,7 @@ final class BackendStorageReviewTests: XCTestCase {
 
     func testUnreadablePreferencesWithReadableOrAbsentSessionHaveNoDestructiveStep() async throws {
         for hasSession in [false, true] {
-            let defaults = ReviewDefaults(suiteName: "EngineerEncounters.Review.\(UUID())")!
+            let defaults = ReviewDefaults()
             let keychain = AppMemoryKeychain()
             let store = KeychainSessionStore(backendIdentity: BackendStorageBinding.identity(appBackendTestConfiguration()), client: keychain)
             if hasSession { try await store.save(appBackendTestSession()) }
@@ -74,6 +74,53 @@ final class BackendStorageReviewTests: XCTestCase {
             XCTAssertEqual(composition.account.state, hasSession ? .signedIn(appBackendTestUser) : .signedOut)
             let credentialDeletes = await keychain.sessionDeletionAttempts
             XCTAssertEqual(credentialDeletes, 0)
+        }
+    }
+
+    func testUnreadableDeletionMarkerRetriesStorageBeforePreparingRuntimeOrRecovery() async throws {
+        for hasMarker in [false, true] {
+            let defaults = ReviewDefaults()
+            _ = appBackendDefaults(defaults: defaults)
+            let owner = BackendStorageOwner(backend: BackendStorageBinding.identity(appBackendTestConfiguration()),
+                account: appBackendTestUser, salt: try InstallationStorageSalt.load(defaults: defaults))
+            if hasMarker { try PendingAccountDeletionStore(defaults: defaults).save(owner: owner) }
+            let keychain = AppMemoryKeychain()
+            let store = KeychainSessionStore(backendIdentity: BackendStorageBinding.identity(appBackendTestConfiguration()), client: keychain)
+            try await store.save(appBackendTestSession())
+            defaults.setReadable(false)
+            let transport = ControlledAppBackendTransport(["register_time_zone": [.response(appAccountOK())]])
+            let composition = reviewComposition(defaults: defaults, keychain: keychain, transport: transport)
+            await composition.waitForRestoration()
+            XCTAssertEqual(composition.account.state, .signedInPending(appBackendTestUser))
+            XCTAssertTrue(composition.status.storageUnavailable)
+            XCTAssertNil(composition.runtime)
+            XCTAssertNil(composition.sessionServices)
+            XCTAssertFalse(composition.deletionSuspended)
+            XCTAssertEqual(composition.deletionState, .idle)
+            XCTAssertNil(composition.deletionError)
+            await composition.refreshLocalSummary()
+            await composition.refresh()
+            XCTAssertNil(composition.runtime)
+            do { try await composition.requestBluetooth(); XCTFail("Unreadable marker storage must refuse the radio") }
+            catch { XCTAssertEqual(error as? BackendError, .storageFailure) }
+            let before = await transport.recorded()
+            let deletes = await keychain.deletionAttempts
+            XCTAssertTrue(before.isEmpty)
+            XCTAssertEqual(deletes, 0)
+            defaults.setReadable(true)
+            await composition.refresh()
+            XCTAssertFalse(composition.status.storageUnavailable)
+            XCTAssertEqual(composition.deletionSuspended, hasMarker)
+            XCTAssertEqual(composition.deletionState, hasMarker ? .failed : .idle)
+            XCTAssertEqual(try PendingAccountDeletionStore(defaults: defaults).contains(owner: owner), hasMarker)
+            if hasMarker {
+                XCTAssertNil(composition.runtime)
+                let requests = await transport.recorded()
+                XCTAssertTrue(requests.isEmpty)
+            } else {
+                XCTAssertNotNil(composition.runtime)
+                XCTAssertEqual(composition.account.state, .signedIn(appBackendTestUser))
+            }
         }
     }
 
@@ -242,7 +289,7 @@ final class BackendStorageReviewTests: XCTestCase {
 
     func testEveryCredentialDeleteSeesAnAlreadySynchronizedMarker() async throws {
         for path in ["signIn", "signOut", "mismatch", "refresh"] {
-            let defaults = ReviewDefaults(suiteName: "EngineerEncounters.Review.\(UUID())")!
+            let defaults = ReviewDefaults()
             let keychain = AppMemoryKeychain(beforeSessionDeletion: { defaults.markerWasSynchronized })
             let backend = BackendStorageBinding.identity(appBackendTestConfiguration())
             let store = KeychainSessionStore(backendIdentity: path == "mismatch" ? "https://other.example:443" : backend, client: keychain)
@@ -279,7 +326,7 @@ final class BackendStorageReviewTests: XCTestCase {
             "register_time_zone": [.response(appAccountOK()), .response(appAccountOK())]
         ])
         // Intentionally omit queueOpener: exercise the actual file-backed app path.
-        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults,
+        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults, notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
             transport: transport, keychain: keychain, signedOutTokenStore: InMemoryTokenBatchStore(),
             uploadScheduler: ManualReceiptUploadScheduler(), now: { appBackendTestNow })
         await composition.waitForRestoration()
@@ -334,7 +381,7 @@ final class BackendStorageReviewTests: XCTestCase {
         let reading = Task { try await first.account.loadOwnProfile() }
         try await appBackendEventually { await transport.isHeld("get_own_profile") }
         let other = try XCTUnwrap(BackendConfiguration(address: "https://other.example", publicClientKey: "fixture-key"))
-        let replacement = AppComposition(configuration: other, defaults: defaults, transport: AppBackendTransport(),
+        let replacement = AppComposition(configuration: other, defaults: defaults, notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(), transport: AppBackendTransport(),
             keychain: keychain, signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { InMemoryReceiptQueue() })
         await replacement.waitForRestoration()
         await transport.release("get_own_profile", with: appOwnProfileResponse())
@@ -359,7 +406,7 @@ final class BackendStorageReviewTests: XCTestCase {
 }
 
 /// Simulates protected preferences independently of the Keychain, without any sleeps.
-private final class ReviewDefaults: UserDefaults, @unchecked Sendable {
+private final class ReviewDefaults: AppInMemoryDefaults, @unchecked Sendable {
     private let lock = NSLock()
     private var readable = true
     private var synchronizedMarker = false
@@ -433,7 +480,7 @@ private func reviewComposition(defaults: UserDefaults, keychain: any KeychainCli
     sessionStore: (any SessionStore)? = nil, tokens: any TokenBatchStore = InMemoryTokenBatchStore(),
     queue: any ReceiptQueue = InMemoryReceiptQueue()) -> AppComposition {
     let clock = ManualEncounterClock()
-    return AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults, transport: transport,
+    return AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults, notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(), transport: transport,
         keychain: keychain, sessionStore: sessionStore, serverTokenStore: tokens, signedOutTokenStore: InMemoryTokenBatchStore(),
         queueOpener: { queue }, transportFactory: {
             await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)

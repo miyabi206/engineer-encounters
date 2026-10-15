@@ -87,7 +87,7 @@ final class RuntimeBackendTests: XCTestCase {
         let clock = ManualEncounterClock()
         // Wire the real composition and backend. The application, rather than this test,
         // must decide that a signed-out runtime has no upload route.
-        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(),
+        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(), notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
             transport: transport, keychain: AppMemoryKeychain(), sessionStore: InMemorySessionStore(),
             serverTokenStore: InMemoryTokenBatchStore(), signedOutTokenStore: InMemoryTokenBatchStore(),
             queueOpener: { queue }, transportFactory: {
@@ -149,7 +149,7 @@ final class RuntimeBackendTests: XCTestCase {
                                              HTTPResponse(data: batch, statusCode: 200)])
         let store = HeldAppTokenStore()
         let queue = InMemoryReceiptQueue()
-        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(),
+        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(), notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
             transport: transport, keychain: AppMemoryKeychain(), sessionStore: InMemorySessionStore(session: try appBackendTestSession()),
             serverTokenStore: store, queueOpener: { queue }, now: { appBackendTestNow })
         await composition.waitForRestoration()

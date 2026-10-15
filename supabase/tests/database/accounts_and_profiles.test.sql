@@ -68,6 +68,10 @@ begin
 end;
 $$;
 
+-- Test helpers use explicit grants under the hardened function defaults.
+grant execute on all functions in schema accounts_profiles_test to anon, authenticated;
+grant execute on all functions in schema extensions to anon, authenticated;
+
 select extensions.plan(546);
 
 select extensions.ok(c.relrowsecurity, t.name || ' has RLS enabled')
@@ -501,10 +505,10 @@ select extensions.is(pg_catalog.jsonb_build_array(
 reset role;
 select extensions.is((select terms_version from private.profiles where user_id = '11111111-1111-1111-1111-111111111111'),
     'draft', 'declaration versions also remain isolated by caller');
-select extensions.throws_ok('insert into private.blocks (blocker_id, blocked_id) values (''11111111-1111-1111-1111-111111111111'', ''11111111-1111-1111-1111-111111111111'')',
+select extensions.throws_ok('insert into private.blocks (blocker_id, blocked_id, placed_day) values (''11111111-1111-1111-1111-111111111111'', ''11111111-1111-1111-1111-111111111111'', date ''2026-10-13'')',
     '23514', null, 'blocks reject self-blocks');
-insert into private.blocks (blocker_id, blocked_id) values ('11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222');
-select extensions.throws_ok('insert into private.blocks (blocker_id, blocked_id) values (''11111111-1111-1111-1111-111111111111'', ''22222222-2222-2222-2222-222222222222'')',
+insert into private.blocks (blocker_id, blocked_id, placed_day) values ('11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', date '2026-10-13');
+select extensions.throws_ok('insert into private.blocks (blocker_id, blocked_id, placed_day) values (''11111111-1111-1111-1111-111111111111'', ''22222222-2222-2222-2222-222222222222'', date ''2026-10-13'')',
     '23505', null, 'the block pair is a primary key');
 select extensions.throws_ok('insert into private.external_links (owner_id, source, url, visibility) values (''11111111-1111-1111-1111-111111111111'', ''other'', ''https://example.invalid/unit-3'', null)',
     '23502', null, 'a link requires an explicit non-null visibility');
@@ -521,9 +525,9 @@ insert into private.user_purposes (user_id, purpose) values ('33333333-3333-3333
 insert into private.matching_preferences (user_id) values ('33333333-3333-3333-3333-333333333333');
 insert into private.field_visibility (owner_id, field, level) values ('33333333-3333-3333-3333-333333333333', 'display_name', 'private');
 insert into private.notification_preferences (user_id, time_zone) values ('33333333-3333-3333-3333-333333333333', 'UTC');
-insert into private.blocks (blocker_id, blocked_id) values
-    ('33333333-3333-3333-3333-333333333333', '11111111-1111-1111-1111-111111111111'),
-    ('22222222-2222-2222-2222-222222222222', '33333333-3333-3333-3333-333333333333');
+insert into private.blocks (blocker_id, blocked_id, placed_day) values
+    ('33333333-3333-3333-3333-333333333333', '11111111-1111-1111-1111-111111111111', date '2026-10-13'),
+    ('22222222-2222-2222-2222-222222222222', '33333333-3333-3333-3333-333333333333', date '2026-10-13');
 delete from auth.users where id = '33333333-3333-3333-3333-333333333333';
 
 select extensions.is((select pg_catalog.count(*) from private.profiles where user_id = '33333333-3333-3333-3333-333333333333'), 0::bigint, 'Auth deletion cascades to profiles');

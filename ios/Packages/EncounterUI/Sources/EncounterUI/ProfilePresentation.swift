@@ -190,16 +190,16 @@ public enum ProfileValidation {
 }
 
 public enum OnboardingStep: Sendable {
-    case basics, interests, permissions
+    case basics, interests, firstLink, permissions
 
-    public static func unfinishedStep(profile: OwnProfileState) -> Self {
+    public static func unfinishedStep(profile: OwnProfileState, requiresFirstLink: Bool = false) -> Self {
         if !ProfileValidation.invalidBasics(displayName: profile.displayName,
                                             introduction: profile.introduction).isEmpty {
             return .basics
         }
         if profile.interestIDs.isEmpty || profile.interestIDs.count > ProfileValidation.interestLimit ||
             profile.purposes.isEmpty { return .interests }
-        // S04 and link editing belong to Unit 5. Missing links remain visible on S05.
+        if FirstLinkStepGate.needsFirstLink(profile, enabled: requiresFirstLink) { return .firstLink }
         return .permissions
     }
 }

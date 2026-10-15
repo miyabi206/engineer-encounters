@@ -7,6 +7,7 @@ struct BackendCallFence {
     let isCurrent: @MainActor () -> Bool
 
     func call<Value>(_ operation: @MainActor () async throws -> Value) async throws -> Value {
+        guard isCurrent() else { throw BackendError.notAuthenticated }
         do {
             let result = try await operation()
             guard isCurrent() else { throw BackendError.notAuthenticated }

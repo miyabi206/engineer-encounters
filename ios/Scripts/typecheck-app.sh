@@ -52,6 +52,9 @@ for source in $(find ios/App -type f -name '*.swift' | sort); do
     esac
     set -- "$@" "$source"
 done
+for source in ios/SessionActivity/SessionActivityAttributes.swift ios/SessionActivity/SessionActivityIntents.swift; do
+    set -- "$@" "$source"
+done
 xcrun swiftc -emit-module -module-name EngineerEncounters -parse-as-library -enable-testing \
     -swift-version 6 -warnings-as-errors -sdk "$sdk" -target "$triple" \
     -emit-module-path "$output/EngineerEncounters.swiftmodule" "$@" \
@@ -72,4 +75,17 @@ xcrun swiftc -typecheck -module-name EngineerEncountersTests -parse-as-library -
     -swift-version 6 -warnings-as-errors -sdk "$sdk" -target "$triple" \
     -I "$output" -F "$platform/Developer/Library/Frameworks" -I "$platform/Developer/usr/lib" \
     "$@" || fail "type-check app tests" "$?"
+# Compile the actual extension and its intent metadata in every configuration.
+# WidgetBundle, ActivityAttributes, @Parameter and the control need no plugin macros.
+set -- -D SESSION_ACTIVITY_EXTENSION
+case "$configuration" in
+    Development) set -- "$@" -D DEVELOPMENT_BUILD ;;
+    Internal) set -- "$@" -D INTERNAL_BUILD ;;
+esac
+for source in $(find ios/SessionActivity -type f -name '*.swift' | sort); do
+    set -- "$@" "$source"
+done
+xcrun swiftc -typecheck -module-name SessionActivity -parse-as-library -application-extension \
+    -swift-version 6 -warnings-as-errors -sdk "$sdk" -target "$triple" \
+    "$@" || fail "type-check session activity extension" "$?"
 echo "Type-check passed: $configuration"

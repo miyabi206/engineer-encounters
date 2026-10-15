@@ -30,6 +30,88 @@ final class OnboardingModelTests: XCTestCase {
     }
 
     @MainActor
+    func testLinkActionsInsertS04AndAConfirmedPrivateLinkAllowsS05() async throws {
+        let driver = OnboardingTestDriver()
+        let links = LinkTestDriver()
+        let model = driver.model(linkActions: links.actions)
+        model.displayName = "Name"; model.introduction = "Introduction"
+        await model.saveBasics()
+        XCTAssertEqual(model.step, .interests)
+        await model.loadInterests()
+        model.toggleInterest("caller"); model.togglePurpose(.collaboration)
+        await model.saveSelections()
+        XCTAssertEqual(model.step, .firstLink)
+        let linkModel = try XCTUnwrap(model.linkModel)
+        await linkModel.loadLinks()
+        XCTAssertFalse(model.canContinueFirstLink)
+        model.continueFirstLink()
+        XCTAssertEqual(model.step, .firstLink)
+        await model.finish(discovery: false)
+        XCTAssertTrue(driver.finishes.isEmpty)
+        linkModel.beginAdd()
+        await linkModel.connectGitHub()
+        await linkModel.preview(links.repository)
+        linkModel.draft?.visibility = .private
+        XCTAssertFalse(model.canContinueFirstLink)
+        let saved = await linkModel.save()
+        XCTAssertTrue(saved)
+        XCTAssertEqual(model.profile.linkCount, 1)
+        XCTAssertTrue(model.profile.prerequisites.link)
+        XCTAssertTrue(model.canContinueFirstLink)
+        model.continueFirstLink()
+        XCTAssertEqual(model.step, .permissions)
+        model.back()
+        XCTAssertEqual(model.step, .firstLink)
+        model.back()
+        XCTAssertEqual(model.step, .interests)
+        XCTAssertEqual(model.displayName, "Name")
+        XCTAssertEqual(model.selectedPurposes, [.collaboration])
+    }
+
+    @MainActor
+    func testResumingWithoutLinkUsesS04OnlyWhenLinkActionsAreSupplied() async throws {
+        let driver = OnboardingTestDriver()
+        driver.profile = OwnProfileState(displayName: "Name", introduction: "Introduction",
+                                          interestIDs: ["caller"], purposes: [.discovery])
+        XCTAssertEqual(driver.model().step, .permissions)
+        let links = LinkTestDriver()
+        let model = driver.model(linkActions: links.actions)
+        XCTAssertEqual(model.step, .firstLink)
+        let linkModel = try XCTUnwrap(model.linkModel)
+        links.links = [OwnLinkState(id: "unverified", source: .other, sourceLabel: "Page", title: "Work",
+                                   url: links.url, visibility: .private, verified: false)]
+        await linkModel.loadLinks()
+        XCTAssertTrue(model.canContinueFirstLink)
+        model.continueFirstLink()
+        XCTAssertEqual(model.step, .permissions)
+        model.edit(.link)
+        XCTAssertEqual(model.step, .firstLink)
+        XCTAssertEqual(driver.linkRoutes, 0)
+        driver.profile.linkCount = 1
+        XCTAssertEqual(driver.model(linkActions: links.actions).step, .permissions)
+    }
+
+    @MainActor
+    func testFirstLinkLoadErrorCannotAdvanceOrEraseProfilePrerequisites() async throws {
+        let driver = OnboardingTestDriver()
+        driver.profile = OwnProfileState(displayName: "Name", introduction: "Introduction",
+                                          interestIDs: ["caller"], purposes: [.discovery])
+        let links = LinkTestDriver()
+        links.failure = LinkActionError(code: .unavailable)
+        let model = driver.model(linkActions: links.actions)
+        let linkModel = try XCTUnwrap(model.linkModel)
+        await linkModel.loadLinks()
+        XCTAssertEqual(model.step, .firstLink)
+        XCTAssertFalse(model.canContinueFirstLink)
+        XCTAssertEqual(model.profile.linkCount, 0)
+        XCTAssertNotNil(linkModel.error)
+        links.failure = nil
+        await linkModel.retry()
+        XCTAssertTrue(linkModel.hasLoadedLinks)
+        XCTAssertFalse(model.canContinueFirstLink)
+    }
+
+    @MainActor
     func testFailedBasicsSaveRetainsInputAndRetryAdvancesOnlyOnSuccess() async {
         let driver = OnboardingTestDriver()
         driver.failure = ProfileActionError(code: .invalidInput, fields: ["display_name"])
@@ -361,13 +443,14 @@ private final class OnboardingTestDriver {
     var duringSave: (@MainActor () async -> Void)?
 
     func model(interests: [InterestOption]? = nil,
-               bluetooth: BluetoothPermissionState = .notRequested, hasLinkRoute: Bool = false) -> OnboardingModel {
+               bluetooth: BluetoothPermissionState = .notRequested, hasLinkRoute: Bool = false,
+               linkActions: LinkActions? = nil) -> OnboardingModel {
         let linkRoute: (@MainActor () -> Void)?
         if hasLinkRoute { linkRoute = { self.linkRoutes += 1 } } else { linkRoute = nil }
         return OnboardingModel(profile: profile, interests: interests, bluetooth: bluetooth, actions: actions,
                         onExit: { self.exits += 1 }, onFinish: { self.finishes.append($0) },
                         onBluetoothRecovery: { self.recoveries += 1 },
-                        onAddLink: linkRoute)
+                        onAddLink: linkRoute, linkActions: linkActions)
     }
 
     private func checkFailure(_ operation: String) throws {

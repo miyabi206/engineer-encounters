@@ -10,6 +10,7 @@ final class AccountFlowModel: ObservableObject {
     @Published private(set) var root: AccountRoot = .welcome
     @Published private(set) var onboarding: OnboardingModel?
     @Published private(set) var settings: SettingsModel?
+    @Published private(set) var links: LinksModel?
     @Published private(set) var profileError: ProfileActionError?
     @Published private(set) var bluetooth: BluetoothPermissionState = .notRequested
     @Published private(set) var savedWithStaleProfile = false
@@ -20,6 +21,7 @@ final class AccountFlowModel: ObservableObject {
     private var restorationFinished = false
     private var startupTask: Task<Void, Never>?
     private var profileTask: (id: UUID, task: Task<Void, Never>)?
+    private var profileLoadVersion: UInt = 0
     private var subscriptions: Set<AnyCancellable> = []
     private var radioSubscription: AnyCancellable?
 
@@ -73,12 +75,15 @@ final class AccountFlowModel: ObservableObject {
     }
 
     func refresh() async {
-        guard started, composition.account.state.isSignedIn else { return }
+        guard started, !composition.deletionSuspended else { return }
+        let previousProfileLoadVersion = profileLoadVersion
         await composition.refresh()
         guard composition.account.state.isSignedIn else { return }
         receive(state: composition.account.state)
         if case .signedIn = composition.account.state {
-            beginProfileLoad()
+            // Recovery's state notification may already have loaded the profile,
+            // even if its task finished while composition was still refreshing.
+            if profileLoadVersion == previousProfileLoadVersion { beginProfileLoad() }
             await profileTask?.task.value
         }
     }
@@ -95,6 +100,7 @@ final class AccountFlowModel: ObservableObject {
             accountID = nil
             onboarding = nil
             settings = nil
+            links = nil
             profileError = nil
             switch state {
             case .restoring: root = .restoring
@@ -109,6 +115,7 @@ final class AccountFlowModel: ObservableObject {
         accountID = id
         onboarding = nil
         settings = nil
+        links = nil
         profileError = nil
         root = .loadingProfile
         // Published sends before state is assigned. The task starts after this synchronous transition.
@@ -117,6 +124,7 @@ final class AccountFlowModel: ObservableObject {
 
     private func beginProfileLoad() {
         guard profileTask == nil else { return }
+        profileLoadVersion &+= 1
         let id = UUID()
         let epoch = composition.account.sessionGeneration
         let task = Task { [weak self] in
@@ -142,19 +150,30 @@ final class AccountFlowModel: ObservableObject {
         }
     }
 
-    private func makeModels(profile: OwnProfileState) {
-        guard let id = accountID else { return }
-        let epoch = composition.account.sessionGeneration
-        let completed = completion.contains(id)
-        let actions = composition.account.profileActions(bluetoothState: { [weak self] in
+    private static func allowsDiscoveryActivation(_ profile: OwnProfileState) -> Bool {
+        profile.declarationsRecorded && !profile.timeZone.isEmpty && profile.moderationState == "active"
+    }
+
+    private func profileActions() -> ProfileActions {
+        composition.account.profileActions(bluetoothState: { [weak self] in
             self?.bluetooth ?? .unavailable
         }) { [weak self] in
             guard let self else { throw ProfileActionError(code: .unavailable) }
             try await self.composition.requestBluetooth()
             return self.bluetooth
         }
+    }
+
+    private func makeModels(profile: OwnProfileState) {
+        guard let id = accountID else { return }
+        let epoch = composition.account.sessionGeneration
+        let completed = completion.contains(id)
+        composition.configureSample(for: id, completedOnboarding: completed)
+        let actions = profileActions()
+        let linkActions = composition.linkAdapter.actions()
+        links = LinksModel(actions: linkActions, discoveryOn: profile.discoveryOn)
         settings = SettingsModel(profile: profile, actions: actions, bluetooth: bluetooth,
-            onboardingExplanationCompleted: completed, allowsDiscoveryActivation: false)
+            onboardingExplanationCompleted: completed, allowsDiscoveryActivation: Self.allowsDiscoveryActivation(profile))
         if completed {
             onboarding = nil
             root = .settings
@@ -168,7 +187,7 @@ final class AccountFlowModel: ObservableObject {
                     guard let self, self.composition.account.sessionGeneration == epoch else { return }
                     self.finishOnboarding(for: id)
                 },
-                onBluetoothRecovery: Self.openBluetoothSettings)
+                onBluetoothRecovery: Self.openBluetoothSettings, linkActions: linkActions)
             root = .onboarding
         }
     }
@@ -183,7 +202,9 @@ final class AccountFlowModel: ObservableObject {
     private func receive(profile: OwnProfileState) {
         guard let id = accountID, composition.account.state == .signedIn(id) else { return }
         onboarding?.receive(profile: profile, bluetooth: bluetooth)
+        settings?.receive(allowsDiscoveryActivation: Self.allowsDiscoveryActivation(profile))
         settings?.receive(profile: profile, bluetooth: bluetooth)
+        links?.discoveryOn = profile.discoveryOn
     }
 
     private func receive(bluetooth: BluetoothPermissionState) {

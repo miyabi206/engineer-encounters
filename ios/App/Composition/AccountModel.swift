@@ -30,6 +30,43 @@ final class AccountModel: ObservableObject {
     @Published private(set) var sessionCleanupFailed: Bool
     var sessionCleanupPending: Bool { cleanup.isPending }
     private var generation = UUID()
+    var isDeletionSuspended: @MainActor () -> Bool = { false }
+    var deletionSuspended: Bool { isDeletionSuspended() }
+    private(set) var accountWasDeleted = false
+    private var protectedGeneration = UUID()
+
+    func suspendForDeletion() {
+        protectedGeneration = UUID()
+        refreshTask?.task.cancel(); refreshTask = nil
+        setupTask?.task.cancel(); setupTask = nil
+    }
+
+    func resumeAfterDeletionFailure() {
+        guard !accountWasDeleted else { return }
+        protectedGeneration = UUID()
+    }
+
+    /// Suspension also fences responses already in flight, even if cancellation is ignored.
+    func protectedOperation<Value>(_ operation: @MainActor () async throws -> Value) async throws -> Value {
+        guard !deletionSuspended, !accountWasDeleted else { throw CancellationError() }
+        let revision = protectedGeneration
+        do {
+            let result = try await operation()
+            guard revision == protectedGeneration, !deletionSuspended, !accountWasDeleted else { throw CancellationError() }
+            return result
+        } catch {
+            guard revision == protectedGeneration, !deletionSuspended, !accountWasDeleted else { throw CancellationError() }
+            throw error
+        }
+    }
+
+    func completeAccountDeletion(generation epoch: UUID) async {
+        guard generation == epoch, hasCurrentSessionContext else { return }
+        accountWasDeleted = true
+        suspendForDeletion()
+        // Hard deletion has already committed; never send outgoing account work now.
+        try? await signOut(prepareOutgoing: false)
+    }
     private var refreshTask: (id: UUID, task: Task<Void, Never>)?
     private struct Declarations {
         let age18: Bool
@@ -45,9 +82,16 @@ final class AccountModel: ObservableObject {
     private let timeZone: @MainActor () -> String
     private var registeredTimeZone: String?
     private(set) var sessionChangeInProgress = false
+    private(set) var discardingSession = false
+    private var localCleanupFailed = false
     var bindingGeneration: @MainActor () -> UUID? = { nil }
     private var operationTask: Task<Void, any Error>?
     var prepareForSessionChange: @MainActor () async throws -> Void = {}
+    var prepareToDiscardSession: @MainActor () async -> Void = {}
+    var authorizationWillBeDiscarded: @MainActor () async -> Void = {}
+    var protectedContentDidChange: @MainActor () -> Void = {}
+    var discoveryWillChange: @MainActor (Bool) async throws -> Void = { _ in }
+    var discoveryDidChange: @MainActor (Bool) async -> Void = { _ in }
     var sessionDidChange: @MainActor (_ recreate: Bool) async -> Void = { _ in }
     var canRefreshSession: @MainActor () -> Bool = { true }
 
@@ -73,7 +117,7 @@ final class AccountModel: ObservableObject {
     }
 
     func restore() async {
-        guard hasCurrentSessionContext, !sessionChangeInProgress else { return }
+        guard hasCurrentSessionContext, !sessionChangeInProgress, !deletionSuspended, !accountWasDeleted else { return }
         guard let sessions else {
             await sessionDidChange(false)
             return
@@ -92,6 +136,8 @@ final class AccountModel: ObservableObject {
             guard epoch == generation, hasCurrentSessionContext else { return }
             guard let stored else {
                 if state.isSignedIn {
+                    await authorizationWillBeDiscarded()
+                    guard epoch == generation, hasCurrentSessionContext else { return }
                     invalidateRefresh()
                     registeredTimeZone = nil
                     pendingDeclarations = nil
@@ -178,6 +224,7 @@ final class AccountModel: ObservableObject {
             self.sessionCleanupFailed = false
             do { try await stagedStore.activate(sessionStore) } catch { storageFailed = true }
             guard self.hasCurrentSessionContext else { throw BackendError.notAuthenticated }
+            self.accountWasDeleted = false
             self.sessions = newSessions
             self.service = serviceFactory(newSessions)
             self.registeredTimeZone = nil
@@ -203,7 +250,8 @@ final class AccountModel: ObservableObject {
         }
     }
 
-    func signOut() async throws {
+    func signOut(prepareOutgoing: Bool = true) async throws {
+        guard !deletionSuspended || accountWasDeleted || !prepareOutgoing else { throw BackendError.invalidRequest }
         let epoch = generation
         try await serialize {
             guard epoch == self.generation else { return }
@@ -211,11 +259,16 @@ final class AccountModel: ObservableObject {
             defer { self.sessionChangeInProgress = false }
             guard self.hasCurrentSessionContext else { throw BackendError.notAuthenticated }
             guard let sessions = self.sessions else { return }
+            self.discardingSession = true
+            defer { self.discardingSession = false }
+            if prepareOutgoing { await self.prepareToDiscardSession() }
+            guard self.hasCurrentSessionContext else { throw BackendError.notAuthenticated }
             do { try self.cleanup.begin() }
-            catch { self.sessionCleanupFailed = true; throw BackendError.storageFailure }
+            catch { self.sessionCleanupFailed = true; if !self.accountWasDeleted { throw BackendError.storageFailure } }
             var storageFailed = false
             self.invalidateRefresh()
-            do { try await self.prepareForSessionChange() } catch { storageFailed = true }
+            do { try await self.prepareForSessionChange(); self.localCleanupFailed = false }
+            catch { storageFailed = true; self.localCleanupFailed = true }
             guard self.hasCurrentSessionContext else { throw BackendError.notAuthenticated }
             // SessionManager clears its in-memory account even when persistence fails.
             do {
@@ -223,10 +276,12 @@ final class AccountModel: ObservableObject {
                 if self.hasCurrentSessionContext { self.cleanup.complete() }
             } catch { storageFailed = true }
             guard self.hasCurrentSessionContext else { throw BackendError.notAuthenticated }
+            if self.localCleanupFailed { try? self.cleanup.begin() }
             self.sessionCleanupFailed = self.cleanup.isPending
             self.registeredTimeZone = nil
             self.pendingDeclarations = nil
             self.onboardingCompletion.clear()
+            self.profile = nil
             self.state = .signedOut
             await self.sessionDidChange(true)
             if storageFailed { throw BackendError.storageFailure }
@@ -243,7 +298,7 @@ final class AccountModel: ObservableObject {
             await discardDeadSession(epoch: generation, recreate: true)
             return
         }
-        guard canRefreshSession() else { return }
+        guard !deletionSuspended, !accountWasDeleted, canRefreshSession() else { return }
         guard state.isSignedIn, let sessions else { return }
         if let refreshTask { await refreshTask.task.value; return }
         let epoch = generation
@@ -253,7 +308,7 @@ final class AccountModel: ObservableObject {
             guard let self else { return }
             do {
                 guard self.canRefreshSession() else { throw BackendError.storageFailure }
-                let session = try await fence.call { try await sessions.session() }
+                let session = try await self.protectedOperation { try await fence.call { try await sessions.session() } }
                 guard epoch == self.generation, self.hasCurrentSessionContext else { return }
                 switch self.state {
                 case .signedIn(let user) where user != session.userID,
@@ -270,10 +325,12 @@ final class AccountModel: ObservableObject {
                 try await self.finishAccountSetup(epoch: epoch)
                 guard epoch == self.generation else { return }
                 self.state = .signedIn(session.userID)
+            } catch is CancellationError {
+                return
             } catch BackendError.notAuthenticated {
                 await self.discardDeadSession(epoch: epoch, recreate: true)
             } catch {
-                guard epoch == self.generation, self.hasCurrentSessionContext else { return }
+                guard epoch == self.generation, self.hasCurrentSessionContext, !self.deletionSuspended else { return }
                 if self.cleanup.isPending {
                     await self.discardDeadSession(epoch: epoch, recreate: true)
                     return
@@ -288,6 +345,7 @@ final class AccountModel: ObservableObject {
 
     private func finishAccountSetup(epoch: UUID) async throws {
         guard epoch == generation else { throw BackendError.notAuthenticated }
+        guard !deletionSuspended, !accountWasDeleted else { throw CancellationError() }
         guard canRefreshSession() else { throw BackendError.storageFailure }
         if let setupTask { return try await setupTask.task.value }
         let id = UUID()
@@ -296,9 +354,11 @@ final class AccountModel: ObservableObject {
             guard epoch == self.generation else { throw BackendError.notAuthenticated }
             if let declarations = self.pendingDeclarations, let service = self.service {
                 guard self.canRefreshSession() else { throw BackendError.storageFailure }
-                try await fence.call {
-                    try await service.acceptDeclarations(age18: declarations.age18, termsVersion: declarations.terms,
-                                                         privacyVersion: declarations.privacy)
+                try await self.protectedOperation {
+                    try await fence.call {
+                        try await service.acceptDeclarations(age18: declarations.age18, termsVersion: declarations.terms,
+                                                             privacyVersion: declarations.privacy)
+                    }
                 }
                 guard epoch == self.generation else { throw BackendError.notAuthenticated }
                 self.pendingDeclarations = nil
@@ -306,7 +366,7 @@ final class AccountModel: ObservableObject {
             let zone = self.timeZone()
             if zone != self.registeredTimeZone, let service = self.service {
                 guard self.canRefreshSession() else { throw BackendError.storageFailure }
-                try await fence.call { try await service.registerTimeZone(zone) }
+                try await self.protectedOperation { try await fence.call { try await service.registerTimeZone(zone) } }
                 guard epoch == self.generation else { throw BackendError.notAuthenticated }
                 self.registeredTimeZone = zone
             }
@@ -332,10 +392,15 @@ final class AccountModel: ObservableObject {
             if self.state == .signedOut { return }
             self.sessionChangeInProgress = true
             defer { self.sessionChangeInProgress = false }
+            self.discardingSession = true
+            defer { self.discardingSession = false }
+            await self.authorizationWillBeDiscarded()
+            guard self.hasCurrentSessionContext else { return }
             do { try self.cleanup.begin() }
             catch { self.sessionCleanupFailed = true; self.profile = nil; return }
             self.invalidateRefresh()
-            try? await self.prepareForSessionChange()
+            do { try await self.prepareForSessionChange(); self.localCleanupFailed = false }
+            catch { self.localCleanupFailed = true }
             guard self.hasCurrentSessionContext else { return }
             do {
                 try await sessions.clear()
@@ -343,6 +408,7 @@ final class AccountModel: ObservableObject {
             }
             catch { /* The marker keeps failed deletion quarantined across restart. */ }
             guard self.hasCurrentSessionContext else { return }
+            if self.localCleanupFailed { try? self.cleanup.begin() }
             self.sessionCleanupFailed = self.cleanup.isPending
             self.registeredTimeZone = nil
             self.pendingDeclarations = nil
@@ -358,12 +424,20 @@ final class AccountModel: ObservableObject {
                   self.state == .signedOut, self.cleanup.isPending, let sessions = self.sessions else { return }
             self.sessionChangeInProgress = true
             defer { self.sessionChangeInProgress = false }
-            // The runtime already belongs to the signed-out owner. Do not clear tokens or receipts again.
+            // Credential-only retries preserve the prepared signed-out owner. A failed local purge must finish first.
+            let retriedLocalCleanup = self.localCleanupFailed
             do {
+                if self.localCleanupFailed {
+                    self.discardingSession = true
+                    defer { self.discardingSession = false }
+                    try await self.prepareForSessionChange()
+                    self.localCleanupFailed = false
+                }
                 try await sessions.clear()
                 if self.hasCurrentSessionContext { self.cleanup.complete() }
             } catch { /* Retain the durable marker for the next retry. */ }
             self.sessionCleanupFailed = self.cleanup.isPending
+            if retriedLocalCleanup { await self.sessionDidChange(true) }
         }
     }
 
@@ -381,7 +455,7 @@ final class AccountModel: ObservableObject {
     }
 
     func publishProfile(_ value: OwnProfileState, stale: Bool) {
-        guard hasCurrentSessionContext, !cleanup.isPending else { return }
+        guard hasCurrentSessionContext, !cleanup.isPending, !deletionSuspended, !accountWasDeleted else { return }
         profileIsStale = stale
         profile = value
     }

@@ -1,7 +1,44 @@
+import Combine
 import XCTest
 @testable import EncounterUI
 
 final class SettingsModelTests: XCTestCase {
+    @MainActor
+    func testActivationPermissionUpdatePublishesAndPreservesDraftsAndSaveResult() async {
+        let driver = SettingsTestDriver()
+        driver.profile.prerequisites.link = true
+        let model = driver.model(allowsActivation: true)
+        let interests = model.interests
+        model.displayName = "Updated name"
+        model.minimumSharedInterests = 5
+        model.visibility[.introduction] = .private
+        var permissions: [Bool] = []
+        let subscription = model.$allowsDiscoveryActivation.sink { permissions.append($0) }
+        XCTAssertTrue(model.canEnableDiscovery)
+        driver.duringProfileSave = {
+            XCTAssertTrue(model.isSaving)
+            model.receive(allowsDiscoveryActivation: false)
+            XCTAssertEqual(model.displayName, "Updated name")
+            XCTAssertEqual(model.interests, interests)
+            XCTAssertTrue(model.hasLoadedInterests)
+        }
+        let result = await model.saveProfile()
+        XCTAssertTrue(result)
+        XCTAssertEqual(model.profile.displayName, "Updated name")
+        XCTAssertFalse(model.isSaving)
+        XCTAssertFalse(model.allowsDiscoveryActivation)
+        XCTAssertFalse(model.canEnableDiscovery)
+        XCTAssertNil(model.errors[.profile])
+        XCTAssertNil(model.failedOperations[.profile])
+        XCTAssertEqual(model.minimumSharedInterests, 5)
+        XCTAssertEqual(model.visibility[.introduction], .private)
+        XCTAssertEqual(model.interests, interests)
+        model.receive(allowsDiscoveryActivation: true)
+        XCTAssertTrue(model.canEnableDiscovery)
+        XCTAssertEqual(permissions, [true, false, true])
+        subscription.cancel()
+    }
+
     @MainActor
     func testProfileSaveTrimsAllValuesAndCommitsBothStages() async {
         let driver = SettingsTestDriver()

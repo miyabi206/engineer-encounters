@@ -51,7 +51,7 @@ final class BackendStorageRecoveryTests: XCTestCase {
             var queueOpens = 0
             var radioBuilds = 0
             await keychain.setUnavailable(true)
-            let composition = AppComposition(configuration: configuration, defaults: defaults, transport: transport,
+            let composition = AppComposition(configuration: configuration, defaults: defaults, notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(), transport: transport,
                 keychain: keychain, sessionStore: sessionInKeychain ? nil : InMemorySessionStore(session: session),
                 queueOpener: { queueOpens += 1; return queue }, transportFactory: {
                     radioBuilds += 1
@@ -297,7 +297,7 @@ final class BackendStorageRecoveryTests: XCTestCase {
             ParticipationFlag(defaults: defaults).isEnabled = true
             var radioSawCleanStorage = false
             let clock = ManualEncounterClock()
-            let composition = AppComposition(configuration: configuration, defaults: defaults, transport: transport,
+            let composition = AppComposition(configuration: configuration, defaults: defaults, notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(), transport: transport,
                 keychain: keychain, serverTokenStore: tokens, signedOutTokenStore: InMemoryTokenBatchStore(),
                 queueOpener: { queue }, transportFactory: {
                     let batch = try? await tokens.load()
@@ -397,6 +397,7 @@ private actor StorageBoundaryTransport: HTTPTransport {
     let queue: any ReceiptQueue
     private(set) var crossedWithOldStorage = false
     init(tokens: any TokenBatchStore, queue: any ReceiptQueue) { self.tokens = tokens; self.queue = queue }
+    func sendWithoutRedirects(_ request: URLRequest) async throws -> HTTPResponse { try await send(request) }
     func send(_ request: URLRequest) async throws -> HTTPResponse {
         let batch = try await tokens.load()
         let pending = try await queue.pending()
@@ -411,7 +412,7 @@ private func storageComposition(configuration: BackendConfiguration, defaults: U
     keychain: any KeychainClient, transport: any HTTPTransport, tokens: (any TokenBatchStore)? = nil,
     queue: any ReceiptQueue) -> AppComposition {
     let clock = ManualEncounterClock()
-    return AppComposition(configuration: configuration, defaults: defaults, transport: transport, keychain: keychain,
+    return AppComposition(configuration: configuration, defaults: defaults, notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(), transport: transport, keychain: keychain,
         serverTokenStore: tokens, signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { queue }, transportFactory: {
             await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)
         }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(), now: { appBackendTestNow }, timeZone: { "Asia/Tokyo" })

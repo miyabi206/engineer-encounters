@@ -22,6 +22,15 @@ final class SettingsStringsTests: XCTestCase {
                        "Matching affects order and visibility. It does not hide encounters.")
         XCTAssertEqual(SettingsStrings.localized("appliesToPast", language: "ja"), "過去のすれちがいや保存した項目にも適用されます")
         XCTAssertEqual(SettingsStrings.localized("everyoneEligible", language: "en"), "Everyone eligible")
+        for (key, japanese, english) in [
+            ("dailyReportTitle", "毎日のレポート", "Daily report"),
+            ("blockedUsers", "ブロックした相手", "Blocked users"),
+            ("account", "アカウント", "Account"),
+            ("legal", "法務・サポート", "Legal and support")
+        ] {
+            XCTAssertEqual(SettingsStrings.localized(key, language: "ja"), japanese)
+            XCTAssertEqual(SettingsStrings.localized(key, language: "en"), english)
+        }
         for language in ["ja", "en"] {
             let table = try SettingsStrings.table(language: language)
             XCTAssertEqual(String(format: try XCTUnwrap(table["counter"]), 30, 30), "30/30")

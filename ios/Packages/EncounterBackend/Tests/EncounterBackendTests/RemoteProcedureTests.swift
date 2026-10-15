@@ -78,6 +78,21 @@ final class RemoteProcedureTests: XCTestCase {
         XCTAssertEqual(requests.count, 2)
     }
 
+    func testObsoleteSuccessIsDiscardedAfterSignOutOrSessionReplacement() async throws {
+        for signsOut in [true, false] {
+            let transport = StubTransport([.held(jsonResponse(#"{"saved":true}"#)), .response(authResponse())])
+            let manager = testManager(transport: transport, store: InMemorySessionStore(session: try testSession()))
+            let client = RemoteProcedureClient(configuration: testConfiguration(), transport: transport, sessions: manager)
+            let call = Task { try await client.call("update_own_profile", parameters: RPCParameters(display_name: "Name"), as: RPCResult.self) }
+            await transport.waitForRequests(1)
+            if signsOut { try await manager.clear() }
+            else { _ = try await manager.establish(using: AuthRequest(path: "provider/session", body: Data("{}".utf8))) }
+            await transport.release()
+            do { _ = try await call.value; XCTFail("Obsolete response must be discarded") }
+            catch { XCTAssertEqual(error as? BackendError, .notAuthenticated) }
+        }
+    }
+
     func testEveryContractCodeAndFieldDetails() async throws {
         let mappings: [(String, BackendError)] = [
             ("not_authenticated", .notAuthenticated), ("account_not_ready", .accountNotReady),

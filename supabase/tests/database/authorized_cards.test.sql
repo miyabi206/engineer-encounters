@@ -43,7 +43,7 @@ $$;
 insert into private.external_links (link_id, owner_id, source, source_item_id, url, title,
     description, main_language, tags, opening_text, verification_state, visibility, display_order)
 select authorized_cards_test.id(200 + 10 * (o - 1) + l), authorized_cards_test.id(o),
-    'other', 'must-not-leak', 'https://example.invalid/' || o || '/' || l,
+    'other', 'must-not-leak-' || l, 'https://example.invalid/' || o || '/' || l,
     'Link ' || l, 'Description ' || l, case when l = 4 then null else 'en' end,
     array['tag-b', 'tag-a'], 'Opening ' || l, 'unverified', 'everyone_eligible',
     case when l in (2, 3) then 10 when l = 1 then 20 else 30 end
@@ -71,10 +71,10 @@ returns jsonb language sql immutable set search_path = '' as $$
     );
 $$;
 
-create function authorized_cards_test.base_card(viewer_number integer)
+create function authorized_cards_test.base_card(viewer_number integer, is_favorite boolean default false)
 returns jsonb language sql stable set search_path = '' as $$
     select pg_catalog.jsonb_build_object('encounter_id', authorized_cards_test.id(100),
-        'kind', 'ambient', 'day', (pg_catalog.now() at time zone 'UTC')::date
+        'favorite', is_favorite, 'saved_link_ids', '[]'::jsonb, 'kind', 'ambient', 'day', (pg_catalog.now() at time zone 'UTC')::date
             - case when viewer_number = 1 then 0 else 1 end);
 $$;
 
@@ -101,7 +101,7 @@ begin
     cross join pg_catalog.unnest(array['discovery', 'collaboration']) as p;
     update private.field_visibility set level = 'everyone_eligible'
     where owner_id in (authorized_cards_test.id(1), authorized_cards_test.id(2));
-    update private.external_links as links set source = 'other', source_item_id = 'must-not-leak',
+    update private.external_links as links set source = 'other', source_item_id = 'must-not-leak-' || l,
         url = 'https://example.invalid/' || o || '/' || l,
         title = 'Link ' || l, description = 'Description ' || l,
         main_language = case when l = 4 then null else 'en' end,
@@ -144,7 +144,7 @@ begin
 end;
 $$;
 
-create function authorized_cards_test.expect_error(v_statement text, v_code text, v_description text)
+create function authorized_cards_test.expect_error(v_statement text, v_code text, v_description text, v_detail text default '')
 returns text language plpgsql set search_path = pg_catalog, extensions as $$
 declare
     v_actual_state text;
@@ -157,7 +157,7 @@ begin
         get stacked diagnostics v_actual_state = returned_sqlstate,
             v_actual_message = message_text, v_actual_detail = pg_exception_detail;
         return extensions.is(pg_catalog.jsonb_build_array(v_actual_state, v_actual_message, coalesce(v_actual_detail, '')),
-            pg_catalog.jsonb_build_array('P0001'::text, v_code, ''::text), v_description);
+            pg_catalog.jsonb_build_array('P0001'::text, v_code, v_detail), v_description);
     end;
     return extensions.fail(v_description || ': expected exception');
 end;
@@ -192,10 +192,10 @@ begin
         update private.profiles set discovery_on = (v_flags & 64) <> 0 where user_id = authorized_cards_test.id(1);
         update private.profiles set discovery_on = (v_flags & 32) <> 0 where user_id = authorized_cards_test.id(2);
         if (v_flags & 16) <> 0 then
-            insert into private.blocks values (authorized_cards_test.id(1), authorized_cards_test.id(2));
+            insert into private.blocks (blocker_id, blocked_id, placed_day) values (authorized_cards_test.id(1), authorized_cards_test.id(2), (pg_catalog.now() at time zone 'UTC')::date);
         end if;
         if (v_flags & 8) <> 0 then
-            insert into private.blocks values (authorized_cards_test.id(2), authorized_cards_test.id(1));
+            insert into private.blocks (blocker_id, blocked_id, placed_day) values (authorized_cards_test.id(2), authorized_cards_test.id(1), (pg_catalog.now() at time zone 'UTC')::date);
         end if;
         delete from private.user_purposes where user_id in (authorized_cards_test.id(1), authorized_cards_test.id(2));
         insert into private.user_purposes values (authorized_cards_test.id(1), 'discovery'),
@@ -300,8 +300,13 @@ revoke all on function authorized_cards_test.item_levels() from public, anon, au
 
 -- Catalog/privileges: 18; actual role checks: 14; exhaustive truth table: 1792;
 -- individual levels: 72; wire values: 9; mixed levels: 4; current settings: 19;
--- helper edge cases: 6; additional read gates: 31.
-select extensions.plan(1965);
+-- helper edge cases: 6; additional read gates: 31; own state amendment: 6.
+-- Test helpers use explicit grants under the hardened function defaults.
+grant execute on all functions in schema authorized_cards_test to anon, authenticated, service_role;
+revoke all on function authorized_cards_test.reset_pair() from public, anon, authenticated, service_role;
+grant execute on all functions in schema extensions to anon, authenticated, service_role;
+
+select extensions.plan(1971);
 
 select extensions.ok(p.prosecdef, 'card is security definer')
 from pg_catalog.pg_proc as p where p.oid = 'public.get_encounter_card(uuid)'::regprocedure;
@@ -444,7 +449,7 @@ where encounter_id = authorized_cards_test.id(100) and viewer_id = authorized_ca
 update private.field_visibility set level = 'compatible_only' where owner_id = authorized_cards_test.id(2);
 update private.external_links set visibility = 'compatible_only' where owner_id = authorized_cards_test.id(2);
 select extensions.is(authorized_cards_test.as_caller(authorized_cards_test.id(1), authorized_cards_test.id(100)),
-    authorized_cards_test.base_card(1) || pg_catalog.jsonb_build_object('day', (pg_catalog.now() at time zone 'UTC')::date - 40)
+    authorized_cards_test.base_card(1, true) || pg_catalog.jsonb_build_object('day', (pg_catalog.now() at time zone 'UTC')::date - 40)
         || authorized_cards_test.expected_fields(2) || pg_catalog.jsonb_build_object('links', authorized_cards_test.expected_links(2)),
     'old favorite initially reads the current compatible card');
 update private.profiles set display_name = 'Changed' where user_id = authorized_cards_test.id(2);
@@ -498,10 +503,10 @@ update private.profiles set discovery_on = true where user_id = authorized_cards
 update private.profiles set discovery_on = false where user_id = authorized_cards_test.id(2);
 select authorized_cards_test.refused(1, 'owner discovery off refuses an existing favorite');
 update private.profiles set discovery_on = true where user_id = authorized_cards_test.id(2);
-insert into private.blocks values (authorized_cards_test.id(1), authorized_cards_test.id(2));
+insert into private.blocks (blocker_id, blocked_id, placed_day) values (authorized_cards_test.id(1), authorized_cards_test.id(2), (pg_catalog.now() at time zone 'UTC')::date);
 select authorized_cards_test.refused(1, 'viewer block refuses an existing favorite');
 delete from private.blocks where blocker_id = authorized_cards_test.id(1);
-insert into private.blocks values (authorized_cards_test.id(2), authorized_cards_test.id(1));
+insert into private.blocks (blocker_id, blocked_id, placed_day) values (authorized_cards_test.id(2), authorized_cards_test.id(1), (pg_catalog.now() at time zone 'UTC')::date);
 select authorized_cards_test.refused(1, 'owner block refuses an existing favorite');
 delete from private.blocks where blocker_id = authorized_cards_test.id(2);
 select extensions.is(authorized_cards_test.as_caller(authorized_cards_test.id(1), authorized_cards_test.id(100))->>'display_name',
@@ -543,7 +548,7 @@ from pg_catalog.unnest(array['display_name', 'introduction', 'interests', 'purpo
 select authorized_cards_test.reset_pair();
 select authorized_cards_test.refused(1, 'unknown encounter returns only not_found', 999);
 select authorized_cards_test.expect_error(pg_catalog.format('select authorized_cards_test.as_caller(%L::uuid, null)',
-    authorized_cards_test.id(1)), 'not_found', 'null encounter returns only not_found');
+    authorized_cards_test.id(1)), 'invalid_input', 'null encounter names its parameter', 'encounter_id');
 select authorized_cards_test.refused(3, 'nonparticipant returns only not_found');
 insert into private.encounter_views (encounter_id, viewer_id, revealed, reveal_report_day, favorite)
 values (authorized_cards_test.id(100), authorized_cards_test.id(3), true, (pg_catalog.now() at time zone 'UTC')::date, true);
@@ -588,11 +593,9 @@ revoke all on function authorized_cards_test.moderation_states() from public, an
 select * from authorized_cards_test.moderation_states();
 select authorized_cards_test.reset_pair();
 update private.profiles set moderation_state = 'hidden' where user_id = authorized_cards_test.id(1);
-select extensions.is(authorized_cards_test.as_caller(authorized_cards_test.id(1), authorized_cards_test.id(100))->>'display_name',
-    'Owner2', 'the moderation gate applies to the other account, not the viewer');
+select authorized_cards_test.refused(1, 'hidden viewer cannot read another account card');
 update private.profiles set moderation_state = 'suspended' where user_id = authorized_cards_test.id(1);
-select extensions.is(authorized_cards_test.as_caller(authorized_cards_test.id(1), authorized_cards_test.id(100))->>'display_name',
-    'Owner2', 'viewer suspension does not change the defined owner moderation gate');
+select authorized_cards_test.refused(1, 'suspended viewer cannot read another account card');
 
 select authorized_cards_test.reset_pair();
 update private.encounters set day_a = (pg_catalog.now() at time zone 'UTC')::date - 29,
@@ -647,6 +650,26 @@ select extensions.is(authorized_cards_test.as_caller(authorized_cards_test.id(1)
 update private.encounters set kind = 'qr' where encounter_id = authorized_cards_test.id(100);
 select extensions.is(authorized_cards_test.as_caller(authorized_cards_test.id(2), authorized_cards_test.id(100))->>'kind',
     'qr', 'revealed qr returns the stored kind');
+
+-- The detail endpoint adds caller state; the shared gate remains plain Card.
+select authorized_cards_test.reset_pair();
+select extensions.is(authorized_cards_test.as_caller(authorized_cards_test.id(1), authorized_cards_test.id(100))->'favorite',
+    'false'::jsonb, 'favorite is required even when false');
+select extensions.is(authorized_cards_test.as_caller(authorized_cards_test.id(1), authorized_cards_test.id(100))->'saved_link_ids',
+    '[]'::jsonb, 'saved ids are required even when empty');
+insert into private.saved_links (viewer_id, encounter_id, link_id) values
+    (authorized_cards_test.id(1), authorized_cards_test.id(100), authorized_cards_test.id(211)),
+    (authorized_cards_test.id(1), authorized_cards_test.id(100), authorized_cards_test.id(212));
+select extensions.is(authorized_cards_test.as_caller(authorized_cards_test.id(1), authorized_cards_test.id(100))->'saved_link_ids',
+    pg_catalog.jsonb_build_array(authorized_cards_test.id(212), authorized_cards_test.id(211)),
+    'saved ids follow visible link order');
+update private.external_links set visibility = 'private' where link_id = authorized_cards_test.id(212);
+select extensions.is(authorized_cards_test.as_caller(authorized_cards_test.id(1), authorized_cards_test.id(100))->'saved_link_ids',
+    pg_catalog.jsonb_build_array(authorized_cards_test.id(211)), 'private saved ids are omitted');
+select extensions.is(authorized_cards_test.as_caller(authorized_cards_test.id(2), authorized_cards_test.id(100))->'saved_link_ids',
+    '[]'::jsonb, 'own state never includes the other viewer saves');
+select extensions.ok(not (private.visible_encounter_card(authorized_cards_test.id(1), authorized_cards_test.id(100))
+    ?| array['favorite', 'saved_link_ids', 'shared_interest_ids']), 'gate returns plain Card');
 
 select * from extensions.finish();
 

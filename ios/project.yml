@@ -57,17 +57,46 @@ targets:
     platform: iOS
     sources:
       - App
+      - path: SessionActivity
+        excludes:
+          - SessionActivityBundle.swift
+          - Info.plist
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_IDENTIFIER)
         INFOPLIST_FILE: App/Info.plist
         TARGETED_DEVICE_FAMILY: "1,2"
     dependencies:
+      - target: SessionActivity
+        embed: true
       - package: EncounterDomain
       - package: EncounterBluetooth
       - package: EncounterStorage
       - package: EncounterBackend
       - package: EncounterUI
+  SessionActivity:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - SessionActivity
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_IDENTIFIER).SessionActivity
+        INFOPLIST_FILE: SessionActivity/Info.plist
+        TARGETED_DEVICE_FAMILY: "1,2"
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) SESSION_ACTIVITY_EXTENSION"
+        # No backend configuration is available in the rendering extension.
+        BACKEND_URL: ""
+        BACKEND_PUBLIC_KEY: ""
+        DEVELOPMENT_BACKEND_URL: ""
+        DEVELOPMENT_BACKEND_PUBLIC_KEY: ""
+        INTERNAL_BACKEND_URL: ""
+        INTERNAL_BACKEND_PUBLIC_KEY: ""
+        RELEASE_BACKEND_URL: ""
+        RELEASE_BACKEND_PUBLIC_KEY: ""
   EngineerEncountersTests:
     type: bundle.unit-test
     platform: iOS

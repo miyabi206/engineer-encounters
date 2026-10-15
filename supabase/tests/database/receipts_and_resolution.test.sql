@@ -184,6 +184,10 @@ cross join lateral (values (c.start_seconds), (c.start_seconds + 120), (c.start_
     (c.current_seconds), (c.current_seconds + 300), (c.current_seconds + 301),
     (c.current_seconds - 172800), (c.current_seconds - 172799)) as times(t);
 
+-- Test helpers use explicit grants under the hardened function defaults.
+grant execute on all functions in schema receipts_test to anon, authenticated, service_role;
+grant execute on all functions in schema extensions to anon, authenticated, service_role;
+
 select extensions.plan(472);
 -- Catalog, default denial, date-only confirmed storage and RPC privileges.
 select extensions.ok(pg_catalog.to_regclass('private.' || name) is not null, name || ' exists') from receipts_test.tables;
@@ -202,7 +206,7 @@ select extensions.is(pg_catalog.format_type(p.prorettype, null), 'jsonb', 'RPC r
 select extensions.is((select pg_catalog.array_agg(a.attname::text order by a.attnum) from pg_catalog.pg_attribute as a where a.attrelid = 'private.sessions'::regclass and a.attnum > 0 and not a.attisdropped), array['session_id', 'user_id', 'starts_at', 'expires_at', 'stopped_at'], 'sessions has only allocated columns');
 select extensions.is((select pg_catalog.array_agg(a.attname::text order by a.attnum) from pg_catalog.pg_attribute as a where a.attrelid = 'private.consumed_nonces'::regclass and a.attnum > 0 and not a.attisdropped), array['exchange_digest', 'delete_after'], 'consumed_nonces has only allocated columns');
 select extensions.is((select pg_catalog.array_agg(a.attname::text order by a.attnum) from pg_catalog.pg_attribute as a where a.attrelid = 'private.encounters'::regclass and a.attnum > 0 and not a.attisdropped), array['encounter_id', 'user_a', 'user_b', 'kind', 'day_a', 'day_b'], 'encounters has only allocated columns');
-select extensions.is((select pg_catalog.array_agg(a.attname::text order by a.attnum) from pg_catalog.pg_attribute as a where a.attrelid = 'private.encounter_views'::regclass and a.attnum > 0 and not a.attisdropped), array['encounter_id', 'viewer_id', 'revealed', 'reveal_report_day', 'favorite'], 'encounter_views has only allocated columns');
+select extensions.is((select pg_catalog.array_agg(a.attname::text order by a.attnum) from pg_catalog.pg_attribute as a where a.attrelid = 'private.encounter_views'::regclass and a.attnum > 0 and not a.attisdropped), array['encounter_id', 'viewer_id', 'revealed', 'reveal_report_day', 'favorite', 'revealed_report_day'], 'encounter_views has only allocated columns');
 select extensions.ok(not exists (select 1 from pg_catalog.pg_attribute as a where a.attrelid = ('private.' || t.name)::regclass and a.attnum > 0 and not a.attisdropped and a.atttypid in ('timestamp'::regtype, 'timestamptz'::regtype, 'time'::regtype, 'timetz'::regtype)), t.name || ' has no precise encounter time') from (values ('encounters'), ('encounter_views'), ('consumed_nonces')) as t(name);
 select extensions.is((select a.atttypid::regtype::text from pg_catalog.pg_attribute as a where a.attrelid = 'private.consumed_nonces'::regclass and a.attname = 'delete_after'), 'date', 'nonce deletion is day granular');
 set local "request.jwt.claim.sub" = '';
@@ -990,7 +994,7 @@ update private.notification_preferences set time_zone = 'Asia/Tokyo' where user_
 -- Either-direction blocks conceal suppression while consuming and erasing both receipt shapes.
 reset role;
 select receipts_test.reset_evidence();
-insert into private.blocks values (receipts_test.user_id(1), receipts_test.user_id(2));
+insert into private.blocks (blocker_id, blocked_id, placed_day) values (receipts_test.user_id(1), receipts_test.user_id(2), (pg_catalog.now() at time zone 'UTC')::date);
 set local role authenticated;
 set local "request.jwt.claims" = '{"sub":"cccccccc-0000-0000-0000-000000000001","role":"authenticated"}';
 select receipts_test.expect('block 1 first half', pg_catalog.jsonb_build_array(receipts_test.receipt(450, 1, null, 120, (select start_seconds from receipts_test.clock) + 120, null, false, false, null, 0), receipts_test.receipt(449, 1)), array['candidate','candidate']);
@@ -1004,7 +1008,7 @@ select extensions.is((select pg_catalog.count(*) from private.encounter_candidat
 select extensions.is((select pg_catalog.count(*) from private.consumed_nonces), 1::bigint, 'block 1 consumes qualifying nonces');
 reset role;
 select receipts_test.reset_evidence();
-insert into private.blocks values (receipts_test.user_id(2), receipts_test.user_id(1));
+insert into private.blocks (blocker_id, blocked_id, placed_day) values (receipts_test.user_id(2), receipts_test.user_id(1), (pg_catalog.now() at time zone 'UTC')::date);
 set local role authenticated;
 set local "request.jwt.claims" = '{"sub":"cccccccc-0000-0000-0000-000000000001","role":"authenticated"}';
 select receipts_test.expect('block 2 first joined call', pg_catalog.jsonb_build_array(receipts_test.receipt(460, 1, null, 0, null, null, false, false, null, 0), receipts_test.receipt(461, 1, (select start_seconds from receipts_test.clock) + 120, 120, null, 460, false, false, null, 0), receipts_test.receipt(462, 1)), array['candidate', 'candidate', 'candidate']);

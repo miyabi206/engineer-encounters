@@ -6,10 +6,21 @@
     <string>ja</string>
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>近くにいるほかの利用者とのすれちがいを記録するためにBluetoothを使用します。</string>
+    <key>NSCameraUsageDescription</key>
+    <string>QRコードを読み取るためにカメラを使用します。</string>
+    <key>NSSupportsLiveActivities</key>
+    <true/>
     <key>UIBackgroundModes</key>
     <array>
         <string>bluetooth-central</string>
         <string>bluetooth-peripheral</string>
+    </array>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLSchemes</key>
+            <array><string>engineer-encounters</string></array>
+        </dict>
     </array>
     <key>CFBundleDisplayName</key>
     <string>Engineer Encounters</string>
@@ -29,6 +40,14 @@
     <string>$(CURRENT_PROJECT_VERSION)</string>
     <key>BuildConfiguration</key>
     <string>$(CONFIGURATION)</string>
+    <key>TermsURL</key>
+    <string>$(TermsURL)</string>
+    <key>PrivacyURL</key>
+    <string>$(PrivacyURL)</string>
+    <key>SupportURL</key>
+    <string>$(SupportURL)</string>
+    <key>ModerationContact</key>
+    <string>$(ModerationContact)</string>
     <key>BackendURL</key>
     <string>$(BACKEND_URL)</string>
     <key>BackendPublicKey</key>

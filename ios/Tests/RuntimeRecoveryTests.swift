@@ -39,7 +39,7 @@ final class RuntimeRecoveryTests: XCTestCase {
         let transport = ControlledAppBackendTransport([
             "register_time_zone": [.response(appAccountOK())], "submit_receipts": [.held]
         ])
-        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(),
+        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(), notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
             transport: transport, keychain: AppMemoryKeychain(), sessionStore: InMemorySessionStore(session: try appBackendTestSession()),
             serverTokenStore: InMemoryTokenBatchStore(), signedOutTokenStore: InMemoryTokenBatchStore(),
             queueOpener: { queue }, now: { appBackendTestNow })
@@ -78,7 +78,7 @@ final class RuntimeRecoveryTests: XCTestCase {
         let tokens = InMemoryTokenBatchStore()
         let sessions = InMemorySessionStore(session: try appBackendTestSession())
         let queue = InMemoryReceiptQueue()
-        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(),
+        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(), notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
             transport: transport, keychain: AppMemoryKeychain(), sessionStore: sessions, serverTokenStore: tokens,
             signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { queue }, now: { appBackendTestNow })
         await composition.waitForRestoration()
@@ -120,7 +120,7 @@ final class RuntimeRecoveryTests: XCTestCase {
         let clock = ManualEncounterClock()
         let defaults = appBackendDefaults()
         ParticipationFlag(defaults: defaults).isEnabled = true
-        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults,
+        let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults, notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
             transport: transport, keychain: AppMemoryKeychain(), sessionStore: InMemorySessionStore(session: try appBackendTestSession()),
             serverTokenStore: tokens, signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { InMemoryReceiptQueue() },
             transportFactory: { await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock) },
@@ -270,7 +270,7 @@ final class RuntimeRecoveryTests: XCTestCase {
         let defaults = appBackendDefaults()
         ParticipationFlag(defaults: defaults).isEnabled = true
         let transport = AppBackendTransport()
-        let composition = AppComposition(configuration: nil, defaults: defaults, transport: transport,
+        let composition = AppComposition(configuration: nil, defaults: defaults, notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(), transport: transport,
             keychain: AppMemoryKeychain(), signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { InMemoryReceiptQueue() }, transportFactory: {
                 await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)
             }, clock: clock)
@@ -297,7 +297,7 @@ final class RuntimeRecoveryTests: XCTestCase {
         let tokens = FailingAppTokenStore()
         var opens = 0
         var builds = 0
-        let composition = AppComposition(configuration: nil, defaults: appBackendDefaults(),
+        let composition = AppComposition(configuration: nil, defaults: appBackendDefaults(), notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
             keychain: AppMemoryKeychain(), signedOutTokenStore: tokens, queueOpener: { opens += 1; return queue }, transportFactory: {
                 builds += 1
                 return await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: ManualEncounterClock())

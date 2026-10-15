@@ -1,0 +1,489 @@
+import EncounterBackend
+import EncounterDomain
+import EncounterUI
+import Foundation
+
+/// Runtime-readable policy. Only salted owner markers, never credentials or account IDs,
+/// are retained here. Unacknowledged stops survive the process in bound non-secret storage.
+actor SessionHolder {
+    struct Snapshot: Sendable {
+        let version: UInt64
+        let state: SessionState
+        let remainingSeconds: Int
+        let activityEndsAt: Date?
+        let stopPending: Bool
+        let discoveryOffPending: Bool
+    }
+    struct Request: Sendable {
+        let owner: BackendStorageOwner
+        let id: UUID
+        let sentAt: EncounterTime
+        let starting: Bool
+    }
+    struct Stop: Equatable, Sendable {
+        let owner: BackendStorageOwner
+        let id: UUID
+    }
+    private let clock: any EncounterClock
+    private let stops: PendingSessionStopStore
+    private var suppressed: PendingSessionStopStore.Marker?
+    private var markerNeedsSaving = false
+    private var suppressionDeadline: TimeInterval = 0
+    private var checkingStop: Stop?
+    // Response filtering only; this record never owns a pending stop or a timer.
+    private var completedStop: (owner: BackendStorageOwner, sessionID: UUID)?
+    private var lastMonotonic: TimeInterval = 0
+    private var stoppedRequest: Request?
+    private var cancelledStart: PendingSessionStopStore.CancelledStart?
+    private var cancellationSaved = false
+    private var cancellationSave: (id: UUID, task: Task<Void, any Error>)?
+    private var quarantineDeadline: TimeInterval?
+    private var owner: BackendStorageOwner?
+    private var loadingStop = false
+    private var request: Request?
+    private var acknowledgement: SessionAcknowledgement?
+    private var acknowledgedAt: TimeInterval = 0
+    private var deadline: TimeInterval = 0
+    private var activityEndsAt: Date?
+    private var state: SessionState = .none
+    private var pending: Stop?
+    private var discoveryOffPending = false
+    private var discoveryOff = false
+    private var version: UInt64 = 0
+    private var expiry: Task<Void, Never>?
+    private var observer: (@MainActor @Sendable (Snapshot) -> Void)?
+
+    init(clock: any EncounterClock, stops: PendingSessionStopStore) {
+        self.clock = clock; self.stops = stops
+    }
+
+    func observe(_ observer: @escaping @MainActor @Sendable (Snapshot) -> Void) {
+        self.observer = observer
+    }
+
+    func bind(_ owner: BackendStorageOwner?) async {
+        guard self.owner != owner || loadingStop else { return }
+        let previousOwner = self.owner
+        _ = await cancellationSave?.task.result
+        guard self.owner == previousOwner else { return }
+        self.owner = owner
+        loadingStop = owner != nil
+        suppressed = nil; markerNeedsSaving = false; suppressionDeadline = 0
+        checkingStop = nil; completedStop = nil; stoppedRequest = nil
+        cancelledStart = nil; cancellationSaved = false; cancellationSave = nil; quarantineDeadline = nil
+        request = nil; pending = nil; discoveryOffPending = false; discoveryOff = false
+        clear()
+        state = .none
+        changed()
+        guard let owner else { return }
+        let marker: PendingSessionStopStore.Marker?
+        let cancellation: PendingSessionStopStore.CancelledStart?
+        do {
+            marker = try await stops.load(owner: owner)
+            cancellation = try await stops.loadCancelledStart(owner: owner)
+        }
+        catch {
+            // Unknown durable state cannot authorize a fresh active claim.
+            state = .stopping; changed(); return
+        }
+        let time = await clock.now()
+        guard self.owner == owner else { return }
+        lastMonotonic = time.monotonic
+        loadingStop = false
+        cancelledStart = cancellation
+        cancellationSaved = cancellation != nil
+        if cancellation != nil { quarantineDeadline = time.monotonic + SessionCancellationPolicy.quarantineDuration }
+        if marker != nil || cancellation != nil {
+            // Only the server can establish that a durable stop is no longer owed.
+            suppressed = marker
+            pending = Stop(owner: owner, id: UUID())
+            checkingStop = pending
+            state = .stopping
+            changed()
+        }
+    }
+
+    func needsStopCheck(owner: BackendStorageOwner) -> Bool {
+        self.owner == owner && checkingStop != nil && checkingStop == pending
+    }
+
+    func begin(owner: BackendStorageOwner, starting: Bool) async throws -> Request {
+        let time = await clock.now()
+        await expire(at: time.monotonic)
+        lastMonotonic = time.monotonic
+        guard self.owner == owner else { throw SessionActionError.unavailable }
+        guard request == nil, !loadingStop, pending == nil || (!starting && needsStopCheck(owner: owner)) else {
+            throw BackendError.transportFailure
+        }
+        guard !discoveryOff || (!starting && needsStopCheck(owner: owner)) else {
+            throw BackendError.prerequisiteMissing(fields: ["discovery"])
+        }
+        let request = Request(owner: owner, id: UUID(), sentAt: time, starting: starting)
+        self.request = request
+        if starting, acknowledgement == nil { state = .starting; changed() }
+        return request
+    }
+
+    @discardableResult
+    func receive(_ value: SessionTransfer?, for request: Request, acceptingActive: Bool = true) async throws -> Bool {
+        let time = await clock.now()
+        let sentAt = (self.request?.id == request.id ? self.request : stoppedRequest)?.sentAt ?? request.sentAt
+        lastMonotonic = time.monotonic
+        // A locally stopped in-flight start can first reveal its ID here. Persist it
+        // without ever accepting the obsolete answer as an active acknowledgement.
+        if owner == request.owner, stoppedRequest?.id == request.id, pending != nil, let value {
+            stoppedRequest = nil
+            try await suppress(value, sentAt: sentAt, at: time, owner: request.owner)
+            return false
+        }
+        await expire(at: time.monotonic)
+        guard isCurrent(request) else { return false }
+        if cancelledStart != nil, let quarantineDeadline {
+            self.request = nil
+            let proofAfterDeadline = sentAt.monotonic >= quarantineDeadline
+            if let value {
+                // During quarantine every active get is suppressed and authorizes
+                // exactly one stop. No timestamp is used to attribute that session.
+                try await suppress(value, sentAt: sentAt, at: time, owner: request.owner)
+                guard owner == request.owner, cancelledStart != nil else { return false }
+                checkingStop = nil
+            } else if proofAfterDeadline {
+                try await resolveCancellation(owner: request.owner)
+            } else {
+                checkingStop = pending
+            }
+            guard owner == request.owner else { return false }
+            changed()
+            return true
+        }
+        if needsStopCheck(owner: request.owner), let marker = suppressed {
+            checkingStop = nil
+            if value?.sessionID == marker.sessionID {
+                self.request = nil
+                changed()
+                return true
+            }
+            suppressed = nil; markerNeedsSaving = false; suppressionDeadline = 0
+            if !discoveryOffPending { pending = nil }
+            await stops.remove(marker, owner: request.owner)
+            guard owner == request.owner, self.request?.id == request.id else { return false }
+            if discoveryOffPending {
+                // The marker was resolved, but the queued discovery-off still must be sent.
+                self.request = nil; clear(); state = .stopping; changed()
+                return true
+            }
+        }
+        self.request = nil
+        clear()
+        state = .none
+        if acceptingActive, let value, value.sessionID != suppressed?.sessionID,
+           !(completedStop?.owner == request.owner && completedStop?.sessionID == value.sessionID),
+           value.startsAt.date <= value.serverTime.date,
+           sentAt.monotonic + value.expiresAt.date.timeIntervalSince(value.serverTime.date) > time.monotonic {
+            acknowledgement = SessionAcknowledgement(sessionID: value.sessionID.uuidString.lowercased(),
+                startsAt: value.startsAt.date, expiresAt: value.expiresAt.date, serverTime: value.serverTime.date)
+            acknowledgedAt = sentAt.monotonic
+            deadline = sentAt.monotonic + value.expiresAt.date.timeIntervalSince(value.serverTime.date)
+            activityEndsAt = time.wall.addingTimeInterval(deadline - time.monotonic)
+            state = .active(acknowledgement!)
+            let clock = clock
+            let deadline = deadline
+            expiry = Task { [weak self] in
+                do {
+                    try await clock.wait(until: deadline)
+                    guard !Task.isCancelled else { return }
+                    await self?.expire(request: request)
+                } catch { /* Rebinding or stopping cancels the local timer. */ }
+            }
+        }
+        changed()
+        return true
+    }
+
+    func fail(_ request: Request, offline: Bool, definiteStartFailure: Bool = false) async {
+        if owner == request.owner, stoppedRequest?.id == request.id, cancelledStart != nil {
+            let time = await clock.now()
+            guard owner == request.owner, stoppedRequest?.id == request.id else { return }
+            stoppedRequest = nil
+            lastMonotonic = time.monotonic
+            if definiteStartFailure {
+                do { try await resolveCancellation(owner: request.owner) }
+                catch { beginQuarantine(at: time.monotonic) }
+            } else { beginQuarantine(at: time.monotonic) }
+            changed()
+            return
+        }
+        guard isCurrent(request) else { return }
+        self.request = nil
+        if acknowledgement == nil, pending == nil { state = offline ? .startRefusedOffline : .failed; changed() }
+    }
+
+    func needsCancellationPoll(owner: BackendStorageOwner) -> Bool {
+        self.owner == owner && cancelledStart != nil && quarantineDeadline != nil
+    }
+
+    func canUploadStop(_ stop: Stop) -> Bool {
+        guard pending == stop, self.owner == stop.owner else { return false }
+        guard cancelledStart != nil else { return !needsStopCheck(owner: stop.owner) }
+        return stoppedRequest == nil && suppressed != nil && !needsStopCheck(owner: stop.owner)
+    }
+
+    private func beginQuarantine(at monotonic: TimeInterval) {
+        if quarantineDeadline == nil { quarantineDeadline = monotonic + SessionCancellationPolicy.quarantineDuration }
+        checkingStop = pending
+        state = .stopping
+    }
+
+    private func resolveCancellation(owner: BackendStorageOwner) async throws {
+        guard self.owner == owner, let cancellation = cancelledStart else { return }
+        // Join the initial save before removing it; a late save must never
+        // resurrect a cancellation after a deliberate later start is permitted.
+        try await persistCancellation(owner: owner)
+        guard self.owner == owner, cancelledStart == cancellation else { return }
+        try await stops.removeCancelledStart(cancellation, owner: owner)
+        guard self.owner == owner, cancelledStart == cancellation else { return }
+        cancelledStart = nil; cancellationSaved = false; cancellationSave = nil; quarantineDeadline = nil
+        stoppedRequest = nil; checkingStop = nil
+        if let marker = suppressed { await stops.remove(marker, owner: owner) }
+        guard self.owner == owner else { return }
+        suppressed = nil; markerNeedsSaving = false; suppressionDeadline = 0
+        if !discoveryOffPending { pending = nil }
+        clear(); state = pending == nil ? .none : .stopping
+    }
+
+    func refuseOfflineStart(owner: BackendStorageOwner) {
+        guard self.owner == owner, pending == nil, acknowledgement == nil else { return }
+        state = .startRefusedOffline
+        changed()
+    }
+
+    func isCurrent(_ request: Request) -> Bool {
+        owner == request.owner && self.request?.id == request.id &&
+            (pending == nil || needsStopCheck(owner: request.owner)) &&
+            (!discoveryOff || needsStopCheck(owner: request.owner))
+    }
+
+    func markSent(_ request: Request) async -> Bool {
+        let time = await clock.now()
+        guard isCurrent(request) else { return false }
+        self.request = Request(owner: request.owner, id: request.id, sentAt: time, starting: request.starting)
+        return true
+    }
+
+    func discardRequest() async {
+        if cancelledStart != nil, quarantineDeadline == nil {
+            let time = await clock.now()
+            stoppedRequest = nil
+            beginQuarantine(at: time.monotonic)
+            changed()
+        }
+        request = nil
+        if state == .starting { state = .none; changed() }
+    }
+
+    @discardableResult
+    func stop(owner: BackendStorageOwner, discoveryOff: Bool = false, force: Bool = true,
+              requiringGet: Bool = false) async throws -> Stop? {
+        let time = await clock.now()
+        lastMonotonic = time.monotonic
+        await expire(at: time.monotonic)
+        guard self.owner == owner else { return nil }
+        if cancelledStart != nil {
+            if discoveryOff { self.discoveryOff = true; discoveryOffPending = true }
+            try await persistCancellation(owner: owner)
+            changed()
+            return pending
+        }
+        let needed = force || acknowledgement != nil || request != nil || pending != nil
+        let needsCheck = needsStopCheck(owner: owner)
+        // An unresolved get is not an in-flight start: its answer must never
+        // replace the marked ID with a session started on another device.
+        stoppedRequest = needsCheck ? nil : (request ?? stoppedRequest)
+        request = nil
+        let acknowledgement = acknowledgement
+        let marker = acknowledgement.flatMap { value in
+            UUID(uuidString: value.sessionID).map {
+                PendingSessionStopStore.Marker(sessionID: $0,
+                    expiresAt: time.wall.addingTimeInterval(max(0, deadline - time.monotonic)))
+            }
+        }
+        clear()
+        if discoveryOff { self.discoveryOff = true; discoveryOffPending = true }
+        if needed || discoveryOff { pending = Stop(owner: owner, id: UUID()) }
+        // Replacing the local stop must not authorize an unresolved durable marker.
+        checkingStop = needsCheck ? pending : nil
+        state = pending == nil ? .none : .stopping
+        changed()
+        if let stoppedRequest, stoppedRequest.starting {
+            let cancellation = PendingSessionStopStore.CancelledStart(requestID: stoppedRequest.id)
+            cancelledStart = cancellation
+            // Complete this durable save before waiting for the start's answer.
+            try await persistCancellation(owner: owner)
+        }
+        if let marker {
+            suppressed = marker
+            if requiringGet { checkingStop = pending }
+            suppressionDeadline = deadline
+            markerNeedsSaving = true
+            try await persistMarker(owner: owner)
+        }
+        return pending
+    }
+
+    func pendingStop(owner: BackendStorageOwner) async throws -> Stop? {
+        let time = await clock.now()
+        await expire(at: time.monotonic)
+        guard self.owner == owner else { return nil }
+        try await persistCancellation(owner: owner)
+        try await persistMarker(owner: owner)
+        return pending
+    }
+
+    func discardPendingStops() async {
+        let save = cancellationSave?.task
+        request = nil; stoppedRequest = nil; suppressed = nil; markerNeedsSaving = false; pending = nil
+        cancelledStart = nil; cancellationSaved = false; cancellationSave = nil; quarantineDeadline = nil
+        suppressionDeadline = 0; checkingStop = nil; completedStop = nil
+        discoveryOffPending = false
+        clear(); state = .none; changed()
+        _ = await save?.result
+        await stops.clear()
+    }
+    func needsDiscoveryOff(_ stop: Stop) -> Bool { pending == stop && discoveryOffPending }
+
+    func finish(_ stop: Stop) async {
+        let time = await clock.now()
+        guard pending == stop, owner == stop.owner else { return }
+        lastMonotonic = time.monotonic
+        let marker = suppressed
+        if let marker { completedStop = (stop.owner, marker.sessionID) }
+        if cancelledStart != nil {
+            discoveryOffPending = false
+            if quarantineDeadline == nil || time.monotonic >= quarantineDeadline! {
+                do { try await resolveCancellation(owner: stop.owner) }
+                catch {
+                    let time = await clock.now()
+                    beginQuarantine(at: time.monotonic)
+                }
+            } else {
+                if let marker { await stops.remove(marker, owner: stop.owner) }
+                guard owner == stop.owner, pending == stop else { return }
+                suppressed = nil; markerNeedsSaving = false; suppressionDeadline = 0
+                checkingStop = pending
+            }
+            guard owner == stop.owner else { return }
+            state = pending == nil ? .none : .stopping
+            changed()
+            return
+        }
+        suppressed = nil; suppressionDeadline = 0; checkingStop = nil
+        pending = nil; stoppedRequest = nil; markerNeedsSaving = false; discoveryOffPending = false; state = .none
+        changed()
+        if let marker { await stops.remove(marker, owner: stop.owner) }
+    }
+
+    func discoveryAcknowledged(enabled: Bool, stop: Stop?) async {
+        if enabled {
+            // Do not release an unsent discovery-off request by accepting an overlapping enable.
+            if !discoveryOffPending { discoveryOff = false }
+        } else if let stop { await finish(stop) }
+    }
+
+    func snapshot() async -> Snapshot {
+        let time = await clock.now()
+        await expire(at: time.monotonic)
+        return snapshot(at: time.monotonic)
+    }
+
+    func isActive() async -> Bool {
+        let time = await clock.now()
+        await expire(at: time.monotonic)
+        return acknowledgement != nil && pending == nil
+    }
+
+    func isActive(owner: BackendStorageOwner) async -> Bool {
+        let time = await clock.now()
+        await expire(at: time.monotonic)
+        return self.owner == owner && acknowledgement != nil && pending == nil
+    }
+
+    private func expire(request: Request) async {
+        guard owner == request.owner else { return }
+        let time = await clock.now()
+        await expire(at: time.monotonic)
+    }
+
+    private func expire(at time: TimeInterval) async {
+        lastMonotonic = time
+        guard acknowledgement != nil, time >= deadline else { return }
+        clear(); state = .none; changed()
+    }
+
+    private func suppress(_ value: SessionTransfer, sentAt: EncounterTime, at time: EncounterTime,
+                          owner: BackendStorageOwner) async throws {
+        let deadline = sentAt.monotonic + value.expiresAt.date.timeIntervalSince(value.serverTime.date)
+        let marker = PendingSessionStopStore.Marker(sessionID: value.sessionID,
+            expiresAt: time.wall.addingTimeInterval(max(0, deadline - time.monotonic)))
+        suppressed = marker; suppressionDeadline = deadline
+        markerNeedsSaving = true
+        try await persistMarker(owner: owner)
+    }
+
+    private func persistCancellation(owner: BackendStorageOwner) async throws {
+        guard self.owner == owner, !cancellationSaved, let marker = cancelledStart else { return }
+        let save: (id: UUID, task: Task<Void, any Error>)
+        if let current = cancellationSave { save = current }
+        else {
+            let id = UUID(), stops = stops
+            save = (id, Task { try await stops.saveCancelledStart(marker, owner: owner) })
+            cancellationSave = save
+        }
+        do {
+            try await save.task.value
+            if self.owner == owner, cancelledStart == marker, cancellationSave?.id == save.id {
+                cancellationSaved = true; cancellationSave = nil
+            }
+        } catch {
+            if cancellationSave?.id == save.id { cancellationSave = nil }
+            throw error
+        }
+    }
+
+    private func persistMarker(owner: BackendStorageOwner) async throws {
+        guard markerNeedsSaving, self.owner == owner, let marker = suppressed else { return }
+        let deadline = suppressionDeadline
+        let time = await clock.now()
+        guard markerNeedsSaving, self.owner == owner, suppressed == marker, suppressionDeadline == deadline else { return }
+        // Expiry is advisory metadata, anchored when saved rather than when sent.
+        let saved = PendingSessionStopStore.Marker(sessionID: marker.sessionID,
+            expiresAt: time.wall.addingTimeInterval(max(0, deadline - time.monotonic)))
+        suppressed = saved
+        try await stops.save(saved, owner: owner)
+        if self.owner == owner, suppressed == saved { markerNeedsSaving = false }
+    }
+
+    private func clear() {
+        acknowledgement = nil
+        activityEndsAt = nil
+        expiry?.cancel(); expiry = nil
+    }
+
+    private func snapshot(at time: TimeInterval) -> Snapshot {
+        var state = state
+        var remaining = 0
+        if let acknowledgement {
+            let serverTime = acknowledgement.serverTime.addingTimeInterval(max(0, time - acknowledgedAt))
+            state = .active(SessionAcknowledgement(sessionID: acknowledgement.sessionID,
+                startsAt: acknowledgement.startsAt, expiresAt: acknowledgement.expiresAt, serverTime: serverTime))
+            remaining = SessionCountdown.seconds(until: acknowledgement.expiresAt, now: serverTime)
+        }
+        return Snapshot(version: version, state: state, remainingSeconds: remaining, activityEndsAt: activityEndsAt,
+                        stopPending: pending != nil, discoveryOffPending: discoveryOffPending)
+    }
+
+    private func changed() {
+        version += 1
+        let snapshot = snapshot(at: lastMonotonic)
+        if let observer { Task { @MainActor in observer(snapshot) } }
+    }
+}

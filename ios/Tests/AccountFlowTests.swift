@@ -28,7 +28,7 @@ final class AccountFlowTests: XCTestCase {
         basics.displayName = ""
         var selections = appPresentationProfile()
         selections.interestIDs = []
-        let cases: [(OwnProfileState, OnboardingStep)] = [(basics, .basics), (selections, .interests), (appPresentationProfile(), .permissions)]
+        let cases: [(OwnProfileState, OnboardingStep)] = [(basics, .basics), (selections, .interests), (appPresentationProfile(), .firstLink), (appLinkedPresentationProfile(), .permissions)]
         for (profile, step) in cases {
             var builds = 0
             let composition = appFlowComposition(transport: AppBackendTransport([appAccountOK(), appOwnProfileResponse(profile)]),
@@ -42,10 +42,122 @@ final class AccountFlowTests: XCTestCase {
             XCTAssertEqual(flow.onboarding?.step, step)
             XCTAssertEqual(flow.onboarding?.profile, profile)
             XCTAssertFalse(try XCTUnwrap(flow.onboarding).canEnableDiscovery)
-            XCTAssertFalse(try XCTUnwrap(flow.settings).allowsDiscoveryActivation)
+            XCTAssertTrue(try XCTUnwrap(flow.settings).allowsDiscoveryActivation)
             XCTAssertEqual(builds, 0)
             XCTAssertFalse(flow.usesSignInWelcome)
         }
+    }
+
+    func testSettingsDiscoveryActivationRequiresReadyAccountAndEachPrerequisite() async throws {
+        for missing in ["none", "display_name", "introduction", "interest", "link", "declarations", "time_zone", "moderation"] {
+            var profile = appLinkedPresentationProfile()
+            switch missing {
+            case "display_name": profile.prerequisites.displayName = false
+            case "introduction": profile.prerequisites.introduction = false
+            case "interest": profile.prerequisites.interest = false
+            case "link": profile.prerequisites.link = false
+            case "declarations": profile.declarationsRecorded = false
+            case "time_zone": profile.timeZone = ""
+            case "moderation": profile.moderationState = "suspended"
+            default: break
+            }
+            var enabled = profile; enabled.discoveryOn = true
+            let transport = ControlledAppBackendTransport([
+                "register_time_zone": [.response(appAccountOK())],
+                "get_own_profile": [.response(appOwnProfileResponse(profile)), .response(appOwnProfileResponse(enabled))],
+                "set_discovery": [.response(appAccountOK())]
+            ])
+            let defaults = appBackendDefaults()
+            OnboardingCompletionStore(defaults: defaults).finish(appBackendTestUser)
+            let composition = appFlowComposition(transport: transport, session: try appBackendTestSession(), defaults: defaults)
+            let flow = AccountFlowModel(composition: composition)
+            await flow.start()
+            XCTAssertEqual(flow.root, .settings)
+            let settings = try XCTUnwrap(flow.settings)
+            // Supply the radio observation independently from profile readiness.
+            composition.runtime?.receive(.radioAvailability(.available))
+            settings.receive(profile: profile, bluetooth: .available)
+            XCTAssertEqual(settings.canEnableDiscovery, missing == "none", missing)
+            let saved = await settings.setDiscovery(true)
+            XCTAssertEqual(saved, missing == "none", missing)
+            let count = await transport.count("set_discovery")
+            XCTAssertEqual(count, missing == "none" ? 1 : 0, missing)
+        }
+    }
+
+    func testSettingsActivationFollowsReadinessAndNewLinkProfileUpdates() async throws {
+        var unready = appLinkedPresentationProfile(); unready.declarationsRecorded = false
+        let composition = appFlowComposition(transport: AppBackendTransport([appAccountOK(), appOwnProfileResponse(unready)]),
+            session: try appBackendTestSession())
+        let flow = AccountFlowModel(composition: composition)
+        await flow.start()
+        XCTAssertFalse(try XCTUnwrap(flow.settings).allowsDiscoveryActivation)
+        composition.runtime?.receive(.radioAvailability(.available))
+        composition.account.publishProfile(appPresentationProfile(), stale: false)
+        let settings = try XCTUnwrap(flow.settings)
+        XCTAssertTrue(settings.allowsDiscoveryActivation)
+        settings.receive(profile: appPresentationProfile(), bluetooth: .available)
+        XCTAssertFalse(settings.canEnableDiscovery)
+        composition.account.publishProfile(appLinkedPresentationProfile(), stale: false)
+        XCTAssertTrue(try XCTUnwrap(flow.settings).canEnableDiscovery)
+    }
+
+    func testReadinessChangeRetainsSettingsDraftsCatalogueAndSaveInFlight() async throws {
+        let profile = appLinkedPresentationProfile()
+        var unready = profile
+        unready.declarationsRecorded = false
+        var saved = unready
+        saved.minimumSharedInterests = 5
+        let catalogue = HTTPResponse(data: Data(#"[{"interest_id":"a","label_ja":"技術","label_en":"Technology","display_order":1}]"#.utf8), statusCode: 200)
+        let transport = ControlledAppBackendTransport([
+            "register_time_zone": [.response(appAccountOK())],
+            "get_own_profile": [.response(appOwnProfileResponse(profile)), .response(appOwnProfileResponse(profile)),
+                .response(appOwnProfileResponse(saved))],
+            "list_interests": [.response(catalogue)],
+            "set_minimum_shared_interests": [.held]
+        ])
+        let composition = appFlowComposition(transport: transport, session: try appBackendTestSession())
+        let flow = AccountFlowModel(composition: composition)
+        await flow.start()
+        let settings = try XCTUnwrap(flow.settings)
+        await settings.loadInterests()
+        let interests = settings.interests
+        XCTAssertTrue(settings.hasLoadedInterests)
+        XCTAssertEqual(interests.count, 1)
+        settings.introduction = "Unsaved introduction"
+        settings.visibility[.introduction] = .private
+        settings.minimumSharedInterests = 5
+        XCTAssertEqual(settings.profile.minimumSharedInterests, 3)
+        XCTAssertTrue(settings.canSaveMatching)
+        let saving = Task { await settings.saveMatching() }
+        try await appBackendEventually { await transport.isHeld("set_minimum_shared_interests") }
+        composition.account.publishProfile(unready, stale: false)
+        XCTAssertTrue(flow.settings === settings)
+        XCTAssertFalse(settings.allowsDiscoveryActivation)
+        XCTAssertTrue(settings.isSaving)
+        XCTAssertEqual(settings.introduction, "Unsaved introduction")
+        XCTAssertEqual(settings.visibility[.introduction], .private)
+        XCTAssertEqual(settings.interests, interests)
+        await transport.release("set_minimum_shared_interests", with: appAccountOK())
+        await saving.value
+        XCTAssertTrue(flow.settings === settings)
+        XCTAssertFalse(settings.isSaving)
+        XCTAssertEqual(settings.profile.minimumSharedInterests, 5)
+        XCTAssertNil(settings.errors[.discovery])
+        XCTAssertNil(settings.failedOperations[.discovery])
+        var ready = saved
+        ready.declarationsRecorded = true
+        ready.prerequisites.link = false
+        composition.account.publishProfile(ready, stale: false)
+        XCTAssertTrue(flow.settings === settings)
+        XCTAssertTrue(settings.allowsDiscoveryActivation)
+        XCTAssertFalse(settings.canEnableDiscovery)
+        XCTAssertEqual(settings.introduction, "Unsaved introduction")
+        XCTAssertEqual(settings.visibility[.introduction], .private)
+        XCTAssertEqual(settings.interests, interests)
+        XCTAssertTrue(settings.hasLoadedInterests)
+        let writes = await transport.count("set_minimum_shared_interests")
+        XCTAssertEqual(writes, 1)
     }
 
     func testProfileLoadFailureRetriesWithoutLosingTheSession() async throws {
@@ -63,7 +175,7 @@ final class AccountFlowTests: XCTestCase {
 
     func testFinishedOnboardingSurvivesRelaunchForOnlyThatAccount() async throws {
         let defaults = appBackendDefaults()
-        let composition = appFlowComposition(transport: AppBackendTransport([appAccountOK(), appOwnProfileResponse()]),
+        let composition = appFlowComposition(transport: AppBackendTransport([appAccountOK(), appOwnProfileResponse(appLinkedPresentationProfile())]),
             session: try appBackendTestSession())
         let flow = AccountFlowModel(composition: composition, defaults: defaults)
         await flow.start()
@@ -73,9 +185,9 @@ final class AccountFlowTests: XCTestCase {
         XCTAssertEqual(flow.root, .settings)
         XCTAssertTrue(flow.completion.contains(appBackendTestUser))
         XCTAssertFalse(try XCTUnwrap(flow.settings).showsDiscoveryExplanation)
-        XCTAssertFalse(try XCTUnwrap(flow.settings).allowsDiscoveryActivation)
+        XCTAssertTrue(try XCTUnwrap(flow.settings).allowsDiscoveryActivation)
         XCTAssertNil(flow.onboarding)
-        let sameAccount = appFlowComposition(transport: AppBackendTransport([appAccountOK(), appOwnProfileResponse()]),
+        let sameAccount = appFlowComposition(transport: AppBackendTransport([appAccountOK(), appOwnProfileResponse(appLinkedPresentationProfile())]),
             session: try appBackendTestSession())
         let relaunched = AccountFlowModel(composition: sameAccount, defaults: defaults)
         await relaunched.start()
@@ -85,14 +197,14 @@ final class AccountFlowTests: XCTestCase {
         XCTAssertEqual(flow.root, .welcome)
         XCTAssertNil(flow.settings)
         XCTAssertFalse(flow.completion.contains(appBackendTestUser))
-        let afterSignOut = appFlowComposition(transport: AppBackendTransport([appAccountOK(), appOwnProfileResponse()]),
+        let afterSignOut = appFlowComposition(transport: AppBackendTransport([appAccountOK(), appOwnProfileResponse(appLinkedPresentationProfile())]),
             session: try appBackendTestSession())
         let restarted = AccountFlowModel(composition: afterSignOut, defaults: defaults)
         await restarted.start()
         XCTAssertEqual(restarted.root, .onboarding)
 
         let otherID = UUID(uuidString: "00000000-0000-0000-0000-000000000222")!
-        let otherAccount = appFlowComposition(transport: AppBackendTransport([appAccountOK(), appOwnProfileResponse()]),
+        let otherAccount = appFlowComposition(transport: AppBackendTransport([appAccountOK(), appOwnProfileResponse(appLinkedPresentationProfile())]),
             session: try appBackendTestSession(userID: otherID))
         let other = AccountFlowModel(composition: otherAccount, defaults: defaults)
         await other.start()
@@ -301,7 +413,7 @@ final class AccountFlowTests: XCTestCase {
             let queue = InMemoryReceiptQueue()
             let tokens = InMemoryTokenBatchStore(batch: try EncounterSamples.batch())
             let sessions = InMemorySessionStore(session: try appBackendTestSession())
-            let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(),
+            let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(), notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
                 transport: transport, keychain: AppMemoryKeychain(), sessionStore: sessions, serverTokenStore: tokens,
                 signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { queue },
                 transportFactory: { ConsentTestTransport() }, now: { appBackendTestNow }, timeZone: { "Asia/Tokyo" })
@@ -358,7 +470,7 @@ final class AccountFlowTests: XCTestCase {
         let defaults = appBackendDefaults()
         let transport = ControlledAppBackendTransport([
             "register_time_zone": [.response(appAccountOK()), .response(appAccountOK())],
-            "get_own_profile": [.response(appOwnProfileResponse()), .response(appOwnProfileResponse(otherProfile))],
+            "get_own_profile": [.response(appOwnProfileResponse(appLinkedPresentationProfile())), .response(appOwnProfileResponse(otherProfile))],
             "signin": [.response(appBackendAuthResponse(userID: otherID))],
             "accept_declarations": [.response(appAccountOK())]
         ])
@@ -471,7 +583,7 @@ private func appFlowComposition(configuration: BackendConfiguration? = appBacken
     transport: any HTTPTransport = AppBackendTransport(), session: BackendSession? = nil,
     sessionStore: (any SessionStore)? = nil, defaults: UserDefaults? = nil,
     transportFactory: @escaping @MainActor () async -> any BluetoothTransport = { ConsentTestTransport() }) -> AppComposition {
-    AppComposition(configuration: configuration, defaults: defaults ?? appBackendDefaults(userID: session?.userID ?? appBackendTestUser), transport: transport,
+    AppComposition(configuration: configuration, defaults: defaults ?? appBackendDefaults(userID: session?.userID ?? appBackendTestUser), notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(), transport: transport,
         keychain: AppMemoryKeychain(), sessionStore: sessionStore ?? InMemorySessionStore(session: session), serverTokenStore: InMemoryTokenBatchStore(),
         signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { InMemoryReceiptQueue() },
         transportFactory: transportFactory, now: { appBackendTestNow }, timeZone: { "Asia/Tokyo" })

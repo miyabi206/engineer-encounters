@@ -29,6 +29,12 @@
 "device" = "端末モデル";
 "bluetooth" = "Bluetooth";
 "ownSession" = "自分のセッション";
+"sessionActive" = "有効";
+"sessionStarting" = "開始中";
+"sessionStopPending" = "終了 · 停止の送信待ち";
+"sessionOffline" = "オフラインのため開始できません";
+"sessionFailed" = "セッションのリクエストに失敗しました";
+"sessionEnded" = "有効なセッションなし";
 "participation" = "試行開始時の発見";
 "noTokenPause" = "トークンがないため発見を一時停止";
 "storageUnavailable" = "ストレージを利用できません";
@@ -74,3 +80,8 @@
 
 "signOut" = "サインアウト";
 "signOutFailed" = "サインアウトできませんでした。もう一度お試しください。";
+
+"demoNotificationTitle" = "Engineer Encounters";
+"demoNotificationReady" = "出会いをアプリで確認できます。";
+"demoNotificationName" = "{name}さんとの出会いをアプリで確認できます。";
+"demoUnavailable" = "このバックエンドでは即時デモを利用できません。";

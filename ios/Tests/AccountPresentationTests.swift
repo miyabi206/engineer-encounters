@@ -6,6 +6,21 @@ import XCTest
 
 @MainActor
 final class AccountPresentationTests: XCTestCase {
+    func testLocallyRefusedBluetoothActionNeverDiscardsHealthyAccount() async throws {
+        for code in [ProfileActionError.Code.notAuthenticated, .unavailable] {
+            let account = try await makePresentationAccount(transport: AppBackendTransport([appAccountOK()]))
+            var discards = 0
+            account.prepareToDiscardSession = { discards += 1 }
+            let actions = account.profileActions { throw ProfileActionError(code: code) }
+            do { _ = try await actions.requestBluetooth(); XCTFail("Local refusal must surface") }
+            catch { XCTAssertEqual(error as? ProfileActionError, .init(code: code)) }
+            XCTAssertEqual(account.state, .signedIn(appBackendTestUser))
+            XCTAssertEqual(discards, 0)
+            let session = try await account.sessions?.session()
+            XCTAssertEqual(session?.userID, appBackendTestUser)
+        }
+    }
+
     func testEveryProfileWriteUsesItsContractParametersAndPublishesConfirmedProfile() async throws {
         let cases: [(String, [String: Any], @MainActor (ProfileActions) async throws -> OwnProfileState)] = [
             ("update_own_profile", ["display_name": "名前", "introduction": "紹介", "contact_detail": "連絡先"],

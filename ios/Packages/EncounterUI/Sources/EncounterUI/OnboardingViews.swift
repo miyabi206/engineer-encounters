@@ -13,6 +13,7 @@ public struct OnboardingView: View {
         switch model.step {
         case .basics: ProfileBasicsView(model: model)
         case .interests: InterestsAndPurposesView(model: model)
+        case .firstLink: FirstLinkView(model: model)
         case .permissions: DiscoveryPermissionsView(model: model)
         }
     }
@@ -231,7 +232,7 @@ public struct DiscoveryPermissionsView: View {
         let met = model.profile.prerequisites.isMet(prerequisite)
         let label = OnboardingStrings.text(prerequisite.labelKey)
         let status = OnboardingStrings.text(met ? .met : .missing)
-        if !met && prerequisite != .link {
+        if !met && (prerequisite != .link || model.linkModel != nil) {
             Button { model.edit(prerequisite) } label: {
                 Label(OnboardingStrings.labelStatus(label, status), systemImage: "square")
             }.disabled(model.isBusy)

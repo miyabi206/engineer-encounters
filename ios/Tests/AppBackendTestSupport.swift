@@ -2,8 +2,10 @@ import EncounterBackend
 import EncounterDomain
 import EncounterDomainTestSupport
 import EncounterStorage
+import EncounterUI
 import Foundation
 import Security
+import UIKit
 import XCTest
 @testable import EngineerEncounters
 
@@ -37,6 +39,7 @@ actor AppBackendTransport: HTTPTransport {
     private var requests: [URLRequest] = []
     private var responses: [HTTPResponse]
     init(_ responses: [HTTPResponse] = []) { self.responses = responses }
+    func sendWithoutRedirects(_ request: URLRequest) async throws -> HTTPResponse { try await send(request) }
     func send(_ request: URLRequest) async throws -> HTTPResponse {
         requests.append(request)
         guard !responses.isEmpty else { throw BackendError.transportFailure }
@@ -126,17 +129,61 @@ func appBackendEventually(_ condition: @MainActor () async throws -> Bool) async
 
 enum AppBackendTestFailure: Error { case didNotSettle }
 
+/// Hosted suites can reach UI tests before UIKit reconnects the host's scene.
 @MainActor
-func appBackendDefaults(userID: UUID? = appBackendTestUser, bound: Bool = true) -> UserDefaults {
-    let defaults = UserDefaults(suiteName: "EngineerEncounters.Backend.Tests.\(UUID().uuidString)")!
+func appBackendWindowScene(timeout: TimeInterval = 5,
+                           file: StaticString = #filePath, line: UInt = #line) throws -> UIWindowScene {
+    let application = UIApplication.shared
+    let deadline = ProcessInfo.processInfo.systemUptime + timeout
+    var activationRequested = false
+    repeat {
+        let scenes = application.connectedScenes.compactMap { $0 as? UIWindowScene }
+        if let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first { return scene }
+        if !activationRequested, let session = application.openSessions.first(where: { $0.role == .windowApplication }) {
+            activationRequested = true
+            application.activateSceneSession(for: UISceneSessionActivationRequest(session: session), errorHandler: nil)
+        }
+        _ = RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+    } while ProcessInfo.processInfo.systemUptime < deadline
+    return try XCTUnwrap(application.connectedScenes.compactMap { $0 as? UIWindowScene }.first,
+        "No connected UIWindowScene appeared within \(timeout)s; open sessions: \(application.openSessions.count), activation requested: \(activationRequested).",
+        file: file, line: line)
+}
+
+@MainActor
+func appBackendDefaults(userID: UUID? = appBackendTestUser, bound: Bool = true,
+                        defaults suppliedDefaults: UserDefaults? = nil,
+                        file: StaticString = #filePath, line: UInt = #line) -> UserDefaults {
+    let defaults = suppliedDefaults ?? AppInMemoryDefaults()
     // Seed fakes with the binding that a preceding successful sign-in would have saved.
     if bound {
         let backend = BackendStorageBinding.identity(appBackendTestConfiguration())
         defaults.set(backend, forKey: BackendStorageBinding.sessionBackendKey)
-        defaults.set(try! JSONEncoder().encode(BackendStorageOwner(backend: backend, account: userID, salt: try! InstallationStorageSalt.load(defaults: defaults))),
-                     forKey: BackendStorageBinding.ownerKey)
+        do {
+            let salt = try InstallationStorageSalt.load(defaults: defaults)
+            let owner = BackendStorageOwner(backend: backend, account: userID, salt: salt)
+            defaults.set(try JSONEncoder().encode(owner), forKey: BackendStorageBinding.ownerKey)
+            guard defaults.synchronize() else { throw BackendError.storageFailure }
+        } catch {
+            XCTFail("Unable to seed backend test defaults: storage unavailable or invalid binding", file: file, line: line)
+        }
     }
     return defaults
+}
+
+/// Each instance has its own store and never reads or writes a preferences suite.
+class AppInMemoryDefaults: UserDefaults, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: Any] = [:]
+    override func synchronize() -> Bool { true }
+    override func object(forKey name: String) -> Any? { lock.withLock { values[name] } }
+    override func data(forKey name: String) -> Data? { object(forKey: name) as? Data }
+    override func string(forKey name: String) -> String? { object(forKey: name) as? String }
+    override func bool(forKey name: String) -> Bool { object(forKey: name) as? Bool ?? false }
+    override func dictionaryRepresentation() -> [String: Any] { lock.withLock { values } }
+    override func set(_ value: Any?, forKey name: String) { lock.withLock { values[name] = value } }
+    override func set(_ value: Bool, forKey name: String) { set(value as Any, forKey: name) }
+    override func removeObject(forKey name: String) { lock.withLock { values[name] = nil } }
 }
 
 @MainActor
@@ -186,6 +233,7 @@ actor ControlledAppBackendTransport: HTTPTransport {
     private var held: [(String, CheckedContinuation<HTTPResponse, any Error>)] = []
 
     init(_ plans: [String: [Reply]]) { self.plans = plans }
+    func sendWithoutRedirects(_ request: URLRequest) async throws -> HTTPResponse { try await send(request) }
     func send(_ request: URLRequest) async throws -> HTTPResponse {
         requests.append(request)
         let path = request.url!.lastPathComponent
@@ -205,6 +253,10 @@ actor ControlledAppBackendTransport: HTTPTransport {
     func release(_ path: String, with response: HTTPResponse) {
         guard let index = held.firstIndex(where: { $0.0 == path }) else { return }
         held.remove(at: index).1.resume(returning: response)
+    }
+    func releaseFailure(_ path: String) {
+        guard let index = held.firstIndex(where: { $0.0 == path }) else { return }
+        held.remove(at: index).1.resume(throwing: BackendError.transportFailure)
     }
 }
 
@@ -283,4 +335,31 @@ actor RetryingAppTokenIssuer: TokenIssuer {
             validFrom: now, validUntil: now.addingTimeInterval(900))
         try await store.save(TokenBatch(windows: [window]))
     }
+}
+
+@MainActor
+final class TestLocalNotificationCenter: LocalNotificationCenter {
+    var authorization = ReportSettingsPermission.notRequested
+    var requests = 0
+    var bodies: [String] = []
+    var clears = 0
+    func permission() async -> ReportSettingsPermission { authorization }
+    func requestPermission() async throws { requests += 1 }
+    private var notifications: [String: String] = [:]
+    var holdsPosts = false
+    private var postContinuation: CheckedContinuation<Void, Never>?
+    var hasHeldPost: Bool { postContinuation != nil }
+    func releasePost() { postContinuation?.resume(); postContinuation = nil; holdsPosts = false }
+    func post(body: String) async throws -> String {
+        if holdsPosts { await withCheckedContinuation { postContinuation = $0 } }
+        let id = UUID().uuidString; notifications[id] = body; bodies.append(body); return id
+    }
+    func remove(_ id: String) {
+        if let body = notifications.removeValue(forKey: id), let index = bodies.firstIndex(of: body) { bodies.remove(at: index) }
+    }
+    func clear() { clears += 1; bodies = []; notifications = [:] }
+}
+
+func appTrialLogURL() -> URL {
+    FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("trial.json")
 }

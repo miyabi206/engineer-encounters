@@ -4,3 +4,50 @@
 "continueSetup" = "初期設定を続ける";
 "restoring" = "アカウントを復元しています…";
 "savedStale" = "保存しました。表示内容が古い場合があります。更新して再読み込みできます。";
+
+"links" = "自分のリンク";
+"disconnectGitHub" = "GitHubの連携を解除";
+"disconnectLastLink" = "最後のリンクを削除する前に発見をオフにしてください。";
+"disconnectError" = "GitHubの連携を解除できませんでした。もう一度お試しください。";
+"discoverySettings" = "発見の設定";
+"disconnectConfirmation" = "アプリ内のGitHubリンクを削除します。元のページやコピー済みのURLは削除されません。";
+
+"githubSyncPending" = "GitHubは連携済みです。同期を再試行してください。";
+"connectError" = "GitHubの連携または同期に失敗しました。再試行してください。";
+"discoverTab" = "見つける";
+"profileTab" = "プロフィール";
+"settingsTab" = "設定";
+
+"accountSettingsTitle" = "アカウント";
+"accountSettingsSignIn" = "サインイン方法";
+"accountSettingsTemporary" = "一時アカウント";
+"accountSettingsGithub" = "GitHub連携";
+"accountSettingsDisconnect" = "GitHub連携を解除";
+"accountSettingsDisconnectExplanation" = "連携を解除すると、このアカウントで確認されたリンクは未確認となり、読み込んだリポジトリのリンクカードは削除されます。";
+"accountSettingsNotConnected" = "未連携";
+"accountSettingsSignOut" = "サインアウト";
+"accountSettingsDelete" = "アカウントを削除";
+"accountSettingsTemporaryWarning" = "この一時アカウントは、再インストールすると維持できません";
+"accountSettingsConnected" = "連携済み";
+"accountSettingsConfirmSignOut" = "サインアウトしますか？";
+"accountSettingsSignOutExplanation" = "サインアウトしてもアカウントは削除されません";
+"accountSettingsPermanent" = "削除は即時かつ永久です。安全のための例外があります。";
+"accountSettingsLastLink" = "最後のリンクを削除するには、先に発見をオフにしてください";
+"accountSettingsPending" = "アカウント削除を処理しています。発見と相手の情報へのアクセスは停止しています。";
+"accountSettingsConfigurationRequired" = "運営者がサーバーを設定するまで、アカウントを削除できません。削除を再試行するか、アカウントを確認して再開してください。";
+"accountSettingsFailedDeletion" = "アカウントを削除できませんでした。削除を再試行するか、アカウントを確認してアプリの利用を再開してください。";
+"accountSettingsCheckingAccount" = "アカウントを確認しています…";
+"accountSettingsFailedAccountCheck" = "アカウントを確認できませんでした。利用を再開する前に再試行してください。";
+"accountSettingsDeletionConfirmation" = "個人データはすぐに完全削除され、元に戻せません。安全のための唯一の例外として、Appleアカウント識別子を元に戻せない一方向ハッシュにした値と、運営者の対応結果、他の人があなたに設定したブロックだけを、プライバシーポリシーに記載した期間保存します。同じAppleアカウントで再登録すると、対応結果とブロックを再適用します。それ以外は何も残りません。名前、プロフィール項目、リンク、トークン、すれちがい、連絡先は保存しません。ブロックした人が自分のアカウントを削除すると、そのブロックも削除します。";
+
+"deletionRetry" = "アカウント削除を再試行";
+"deletionResume" = "アカウントを確認して再開";
+"support" = "サポート";
+"back" = "戻る";
+"cancel" = "キャンセル";
+"cleanupError" = "端末のアカウントデータを削除できませんでした。サインインする前に再試行してください。";
+
+"bluetoothUnavailable" = "Bluetoothを利用できません";
+"bluetoothCheckGuidance" = "近くでの発見に使うBluetoothの状態を確認してください。";
+"checkBluetooth" = "Bluetoothを確認";
+"qrExchange" = "QR交換";

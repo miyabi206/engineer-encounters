@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -69,6 +70,11 @@ public struct AuthRequest: Sendable, CustomStringConvertible, CustomDebugStringC
     public var customMirror: Mirror { Mirror(self, children: [:]) }
 }
 
+/// Auth can refuse removal when GitHub is the account's only identity.
+public enum GitHubUnlinkOutcome: Sendable, Equatable {
+    case unlinked, notLinked, lastIdentityRetained
+}
+
 /// Establishes sessions and coalesces expiry and unauthorized refreshes without timers.
 public actor SessionManager: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
     private let configuration: BackendConfiguration
@@ -79,9 +85,39 @@ public actor SessionManager: CustomStringConvertible, CustomDebugStringConvertib
     private var cached: BackendSession?
     private var loaded = false
     private var generation = UUID()
+    private var credentialRevision = UUID()
     private var loading: Task<BackendSession?, any Error>?
     private var refreshFlight: (id: UUID, task: Task<BackendSession, any Error>)?
     private var persistence: Task<Void, any Error>?
+    private var pendingIdentityLink: PendingIdentityLink?
+    private var identityLinkOperation: UUID?
+
+    private struct PendingIdentityLink {
+        let id: UUID
+        let epoch: UUID
+        let accountID: UUID
+        let callback: URL
+        let verifier: String
+        var state: String?
+    }
+
+    struct Authorization: Sendable {
+        let session: BackendSession
+        let epoch: UUID
+    }
+
+    func authorization(for backend: BackendConfiguration? = nil) async throws -> Authorization {
+        guard backend == nil || backend == configuration else { throw BackendError.invalidRequest }
+        let value = try await session()
+        guard cached?.userID == value.userID else { throw BackendError.notAuthenticated }
+        return Authorization(session: value, epoch: generation)
+    }
+
+    func validate(_ authorization: Authorization) throws {
+        guard generation == authorization.epoch, cached?.userID == authorization.session.userID else {
+            throw BackendError.notAuthenticated
+        }
+    }
 
     public init(configuration: BackendConfiguration, transport: any HTTPTransport,
                 store: any SessionStore, refreshLeeway: TimeInterval = 60,
@@ -99,6 +135,102 @@ public actor SessionManager: CustomStringConvertible, CustomDebugStringConvertib
         let epoch = generation
         let session = try await Self.fetch(auth, configuration: configuration, transport: transport, now: now, bearer: nil)
         return try await commit(session, epoch: epoch)
+    }
+
+    /// Produces the manual-link authorization URL; opening the browser belongs to the app.
+    public func beginGitHubLink() async throws -> URL {
+        try await beginIdentityLink(provider: "github", callback: URL(string: "engineer-encounters://auth/github")!)
+    }
+
+    /// Exchanges one pending callback without ever installing a different account's session.
+    public func completeGitHubLink(from callback: URL) async throws -> BackendSession {
+        try await completeIdentityLink(from: callback)
+    }
+
+    /// Discards only the in-memory linking attempt, including an in-flight exchange.
+    public func cancelGitHubLink() {
+        pendingIdentityLink = nil
+        identityLinkOperation = nil
+    }
+
+    private func beginIdentityLink(provider: String, callback: URL) async throws -> URL {
+        guard identityLinkOperation == nil else { throw BackendError.invalidRequest }
+        let authorization = try await authorization()
+        guard identityLinkOperation == nil else { throw BackendError.invalidRequest }
+        let id = UUID()
+        let verifier = Self.base64URL(Data((0..<32).map { _ in UInt8.random(in: .min ... .max) }))
+        var pending = PendingIdentityLink(id: id, epoch: authorization.epoch, accountID: authorization.session.userID,
+                                          callback: callback, verifier: verifier, state: nil)
+        identityLinkOperation = id
+        do {
+            let auth = try AuthRequest(path: "user/identities/authorize", method: "GET", body: Data(), queryItems: [
+                URLQueryItem(name: "provider", value: provider),
+                URLQueryItem(name: "redirect_to", value: callback.absoluteString),
+                URLQueryItem(name: "code_challenge", value: Self.base64URL(Data(SHA256.hash(data: Data(verifier.utf8))))),
+                URLQueryItem(name: "code_challenge_method", value: "s256"),
+                URLQueryItem(name: "skip_http_redirect", value: "true")
+            ])
+            let response = try await Self.send(auth, configuration: configuration, transport: transport,
+                                               bearer: authorization.session.accessCredential)
+            try Task.checkCancellation()
+            try validate(authorization)
+            guard identityLinkOperation == id else { throw BackendError.invalidRequest }
+            guard (200..<300).contains(response.statusCode) else { throw BackendError.httpFailure(statusCode: response.statusCode) }
+            struct Result: Decodable { let url: String }
+            guard let result = try? JSONDecoder().decode(Result.self, from: response.data),
+                  let parts = URLComponents(string: result.url), parts.scheme == "https", parts.host != nil,
+                  parts.user == nil, parts.password == nil, let url = parts.url else { throw BackendError.invalidResponse }
+            let states = (parts.queryItems ?? []).filter { $0.name == "state" }
+            guard states.count <= 1, states.first.map({ !($0.value ?? "").isEmpty }) ?? true else {
+                throw BackendError.invalidResponse
+            }
+            pending.state = states.first?.value
+            pendingIdentityLink = pending
+            return url
+        } catch {
+            if identityLinkOperation == id { cancelGitHubLink() }
+            throw error
+        }
+    }
+
+    private func completeIdentityLink(from callback: URL) async throws -> BackendSession {
+        guard let pending = pendingIdentityLink else { throw BackendError.invalidRequest }
+        // Consume before any suspension so a duplicate callback cannot exchange twice.
+        pendingIdentityLink = nil
+        defer { if identityLinkOperation == pending.id { identityLinkOperation = nil } }
+        guard let parts = URLComponents(url: callback, resolvingAgainstBaseURL: false),
+              parts.scheme == pending.callback.scheme, parts.host == pending.callback.host,
+              parts.percentEncodedPath == pending.callback.path, parts.user == nil, parts.password == nil,
+              parts.port == nil, parts.fragment == nil else { throw BackendError.invalidRequest }
+        let query = parts.queryItems ?? []
+        let codes = query.filter { $0.name == "code" }
+        let states = query.filter { $0.name == "state" }
+        guard !query.contains(where: { $0.name == "error" || $0.name == "error_code" }),
+              codes.count == 1, let code = codes.first?.value, !code.isEmpty,
+              states.count <= 1 else { throw BackendError.invalidRequest }
+        // Supabase PKCE normally returns only code. Validate state whenever it is returned.
+        if let state = states.first {
+            guard let expected = pending.state, state.value == expected else { throw BackendError.invalidRequest }
+        }
+        guard generation == pending.epoch, cached?.userID == pending.accountID else { throw BackendError.notAuthenticated }
+        struct Parameters: Encodable { let auth_code: String; let code_verifier: String }
+        let auth = try AuthRequest(path: "token", body: JSONEncoder().encode(Parameters(auth_code: code, code_verifier: pending.verifier)),
+                                   queryItems: [URLQueryItem(name: "grant_type", value: "pkce")])
+        let result = try await Self.fetch(auth, configuration: configuration, transport: transport, now: now, bearer: nil)
+        try Task.checkCancellation()
+        guard generation == pending.epoch, cached?.userID == pending.accountID else { throw BackendError.notAuthenticated }
+        guard identityLinkOperation == pending.id else { throw BackendError.invalidRequest }
+        guard result.userID == pending.accountID else { throw BackendError.invalidResponse }
+        // Provider credentials in the Auth body are intentionally never decoded.
+        // The account epoch fences account changes, not same-account credential updates.
+        // Existing refresh waiters resolve to these credentials when their response arrives.
+        refreshFlight = nil
+        return try await commit(result, epoch: pending.epoch)
+    }
+
+    private static func base64URL(_ data: Data) -> String {
+        data.base64EncodedString().replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
     }
 
     /// Returns a signed-in session, refreshing shortly before its expiry.
@@ -122,14 +254,100 @@ public actor SessionManager: CustomStringConvertible, CustomDebugStringConvertib
                                    queryItems: [URLQueryItem(name: "grant_type", value: "refresh_token")])
         let epoch = generation
         let id = UUID()
+        let revision = credentialRevision
         let task = Task {
-            let result = try await Self.fetch(auth, configuration: configuration, transport: transport,
-                                              now: now, bearer: nil, isRefresh: true)
-            return try await self.commit(result, epoch: epoch)
+            do {
+                let result = try await Self.fetch(auth, configuration: configuration, transport: transport,
+                                                  now: now, bearer: nil, isRefresh: true)
+                if let replacement = try self.refreshReplacement(epoch: epoch, revision: revision, accountID: current.userID) {
+                    return replacement
+                }
+                guard result.userID == current.userID else { throw BackendError.notAuthenticated }
+                return try await self.commit(result, epoch: epoch)
+            } catch {
+                if let replacement = try self.refreshReplacement(epoch: epoch, revision: revision, accountID: current.userID) {
+                    return replacement
+                }
+                throw error
+            }
         }
         let flight = (id: id, task: task)
         refreshFlight = flight
         return try await finish(flight)
+    }
+
+    private func refreshReplacement(epoch: UUID, revision: UUID, accountID: UUID) throws -> BackendSession? {
+        guard epoch == generation else { throw BackendError.notAuthenticated }
+        guard revision != credentialRevision else { return nil }
+        guard let cached, cached.userID == accountID else { throw BackendError.notAuthenticated }
+        return cached
+    }
+
+    /// Unlinks all live GitHub identities through Auth; never clears the session.
+    public func unlinkGitHubIdentity() async throws -> GitHubUnlinkOutcome {
+        let authorization = try await authorization()
+        let userRequest = try AuthRequest(path: "user", method: "GET", body: Data())
+        let response = try await authenticatedAuth(userRequest, authorization: authorization)
+        guard (200..<300).contains(response.statusCode) else { throw BackendError.httpFailure(statusCode: response.statusCode) }
+        struct User: Decodable {
+            struct Identity: Decodable {
+                let identity_id: UUID
+                let provider: String
+                let created_at: Date?
+            }
+            let id: UUID
+            let identities: [Identity]
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let value = try decoder.singleValueContainer().decode(String.self)
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let date = formatter.date(from: value) { return date }
+            formatter.formatOptions = [.withInternetDateTime]
+            guard let date = formatter.date(from: value) else { throw BackendError.invalidResponse }
+            return date
+        }
+        guard let user = try? decoder.decode(User.self, from: response.data),
+              user.id == authorization.session.userID else { throw BackendError.invalidResponse }
+        let identities = user.identities.filter { $0.provider == "github" }.sorted {
+            let left = $0.created_at ?? .distantFuture
+            let right = $1.created_at ?? .distantFuture
+            if left != right { return left < right }
+            return $0.identity_id.uuidString < $1.identity_id.uuidString
+        }
+        guard !identities.isEmpty else { return .notLinked }
+        struct Failure: Decodable {
+            let code: String?
+            let error_code: String?
+            enum CodingKeys: String, CodingKey { case code, error_code }
+            init(from decoder: any Decoder) throws {
+                let fields = try decoder.container(keyedBy: CodingKeys.self)
+                code = try? fields.decode(String.self, forKey: .code)
+                error_code = try? fields.decode(String.self, forKey: .error_code)
+            }
+        }
+        for identity in identities {
+            let unlink = try AuthRequest(path: "user/identities/" + identity.identity_id.uuidString.lowercased(),
+                                         method: "DELETE", body: Data())
+            let deleted = try await authenticatedAuth(unlink, authorization: authorization)
+            if (200..<300).contains(deleted.statusCode) { continue }
+            if [400, 422].contains(deleted.statusCode),
+               let failure = try? JSONDecoder().decode(Failure.self, from: deleted.data),
+               (failure.error_code ?? failure.code) == "single_identity_not_deletable" { return .lastIdentityRetained }
+            throw BackendError.httpFailure(statusCode: deleted.statusCode)
+        }
+        return .unlinked
+    }
+
+    private func authenticatedAuth(_ auth: AuthRequest, authorization: Authorization) async throws -> HTTPResponse {
+        try validate(authorization)
+        let session = cached ?? authorization.session
+        let response = try await Self.send(auth, configuration: configuration, transport: transport,
+                                           bearer: session.accessCredential)
+        try validate(authorization)
+        guard response.statusCode != 401 else { throw BackendError.notAuthenticated }
+        return response
     }
 
     /// Invalidates in-flight work and removes all persisted credentials.
@@ -141,6 +359,7 @@ public actor SessionManager: CustomStringConvertible, CustomDebugStringConvertib
     }
 
     private func invalidate() {
+        cancelGitHubLink()
         generation = UUID()
         loading?.cancel()
         loading = nil
@@ -189,11 +408,12 @@ public actor SessionManager: CustomStringConvertible, CustomDebugStringConvertib
     private func commit(_ session: BackendSession, epoch: UUID) async throws -> BackendSession {
         guard epoch == generation else { throw BackendError.notAuthenticated }
         cached = session
+        credentialRevision = UUID()
         loaded = true
         // Auth success remains usable when device persistence is unavailable.
         try? await persist(session)
         guard epoch == generation else { throw BackendError.notAuthenticated }
-        return session
+        return cached ?? session
     }
 
     private func persist(_ session: BackendSession?) async throws {
@@ -212,20 +432,7 @@ public actor SessionManager: CustomStringConvertible, CustomDebugStringConvertib
     private static func fetch(_ auth: AuthRequest, configuration: BackendConfiguration,
                               transport: any HTTPTransport, now: @Sendable () -> Date,
                               bearer: String?, isRefresh: Bool = false) async throws -> BackendSession {
-        var components = URLComponents(url: configuration.endpoint("auth/v1/" + auth.path), resolvingAgainstBaseURL: false)!
-        if !auth.queryItems.isEmpty { components.queryItems = auth.queryItems }
-        guard let url = components.url else { throw BackendError.invalidRequest }
-        var request = URLRequest(url: url)
-        request.httpMethod = auth.method
-        request.httpBody = auth.body
-        request.setValue(configuration.publicClientKey, forHTTPHeaderField: "apikey")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        if let bearer { request.setValue("Bearer " + bearer, forHTTPHeaderField: "Authorization") }
-        let response: HTTPResponse
-        do { response = try await transport.send(request) }
-        catch is CancellationError { throw CancellationError() }
-        catch { throw BackendError.transportFailure }
+        let response = try await send(auth, configuration: configuration, transport: transport, bearer: bearer)
         guard (200..<300).contains(response.statusCode) else {
             if isRefresh, response.statusCode == 400 || response.statusCode == 401 {
                 struct Failure: Decodable {
@@ -270,6 +477,27 @@ public actor SessionManager: CustomStringConvertible, CustomDebugStringConvertib
             return try BackendSession(accessCredential: value.access_token, refreshCredential: value.refresh_token,
                                       expiresAt: expiry, userID: value.user.id)
         } catch { throw BackendError.invalidResponse }
+    }
+
+    private static func send(_ auth: AuthRequest, configuration: BackendConfiguration,
+                             transport: any HTTPTransport, bearer: String?) async throws -> HTTPResponse {
+        var components = URLComponents(url: configuration.endpoint("auth/v1/" + auth.path), resolvingAgainstBaseURL: false)!
+        if !auth.queryItems.isEmpty { components.queryItems = auth.queryItems }
+        guard let url = components.url else { throw BackendError.invalidRequest }
+        var request = URLRequest(url: url)
+        request.httpMethod = auth.method
+        request.httpBody = auth.body
+        request.setValue(configuration.publicClientKey, forHTTPHeaderField: "apikey")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if let bearer { request.setValue("Bearer " + bearer, forHTTPHeaderField: "Authorization") }
+        let response: HTTPResponse
+        do {
+            response = try await transport.sendCredentialRequest(request)
+        }
+        catch is CancellationError { throw CancellationError() }
+        catch { throw BackendError.transportFailure }
+        return response
     }
 
     public nonisolated var description: String { "SessionManager(<redacted>)" }

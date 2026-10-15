@@ -74,7 +74,7 @@ public final class SettingsModel: ObservableObject {
     @Published public private(set) var failedOperations: [SettingsScreen: SettingsOperation] = [:]
     @Published public private(set) var appliedChanges: [SettingsScreen: [SettingsAppliedChange]] = [:]
     public let showsDiscoveryExplanation: Bool
-    public let allowsDiscoveryActivation: Bool
+    @Published public private(set) var allowsDiscoveryActivation: Bool
     private let actions: ProfileActions
     private var pendingInterestLoad = false
     private var isReceivingState = false
@@ -159,6 +159,10 @@ public final class SettingsModel: ObservableObject {
     }
 
     public func receive(bluetooth: BluetoothPermissionState) { self.bluetooth = bluetooth }
+
+    public func receive(allowsDiscoveryActivation: Bool) {
+        self.allowsDiscoveryActivation = allowsDiscoveryActivation
+    }
 
     public func leave(_ screen: SettingsScreen) {
         errors[screen] = nil

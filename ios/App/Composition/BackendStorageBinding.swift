@@ -142,10 +142,15 @@ actor BoundSessionStore: SessionStore {
     private let store: any SessionStore
     private let binding: BackendStorageBinding
     private var writing: Task<Void, any Error>?
+    private var beforeCredentialClear: (@MainActor @Sendable () async -> Void)?
 
     init(_ store: any SessionStore, binding: BackendStorageBinding) {
         self.store = store
         self.binding = binding
+    }
+
+    func beforeClearingCredentials(_ action: @escaping @MainActor @Sendable () async -> Void) {
+        beforeCredentialClear = action
     }
 
     func load() async throws -> BackendSession? {
@@ -169,6 +174,10 @@ actor BoundSessionStore: SessionStore {
     func clear() async throws {
         try await write {
             guard await self.binding.isCurrent else { throw BackendError.notAuthenticated }
+            // SessionManager also clears on an invalid refresh, before AccountModel gets
+            // the error. Clear the receipt flag before any persisted credential deletion.
+            await self.beforeCredentialClear?()
+            guard await self.binding.isCurrent else { throw BackendError.notAuthenticated }
             try await self.binding.cleanup.begin()
             try await self.store.clear()
             guard await self.binding.isCurrent else { throw BackendError.notAuthenticated }
@@ -191,12 +200,27 @@ struct BackendBoundTransport: HTTPTransport {
     let binding: BackendStorageBinding
 
     func send(_ request: URLRequest) async throws -> HTTPResponse {
+        try await send(request, refusesRedirects: false)
+    }
+
+    func sendWithoutRedirects(_ request: URLRequest) async throws -> HTTPResponse {
+        try await send(request, refusesRedirects: true)
+    }
+
+    private func send(_ request: URLRequest, refusesRedirects: Bool) async throws -> HTTPResponse {
         guard await binding.allowsNetwork else { throw CancellationError() }
         let generation = await binding.generation
-        if request.url?.path.contains("/rest/v1/rpc/") == true {
+        let path = request.url?.path ?? ""
+        let isLinkExchange = path.hasSuffix("/auth/v1/token") &&
+            URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.contains {
+                $0.name == "grant_type" && $0.value == "pkce"
+            } == true
+        if path.contains("/rest/v1/rpc/") || path.contains("/functions/v1/") || path.contains("/auth/v1/user") || isLinkExchange {
             guard await binding.allowsAuthenticatedNetwork else { throw CancellationError() }
         }
-        let response = try await transport.send(request)
+        let response: HTTPResponse
+        if refusesRedirects { response = try await transport.sendWithoutRedirects(request) }
+        else { response = try await transport.send(request) }
         guard await binding.isCurrent, await binding.generation == generation else { throw CancellationError() }
         return response
     }

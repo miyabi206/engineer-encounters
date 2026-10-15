@@ -107,6 +107,10 @@ begin
 end;
 $$;
 
+-- Test helpers use explicit grants under the hardened function defaults.
+grant execute on all functions in schema server_tokens_test to anon, authenticated;
+grant execute on all functions in schema extensions to anon, authenticated;
+
 select extensions.plan(177);
 
 -- Catalog and grants: 32 assertions.

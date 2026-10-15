@@ -18,6 +18,7 @@ struct EncounterRuntimeStatus: Sendable, Equatable {
 /// App lifecycle and I/O wiring only; all encounter policy stays in the engine.
 @MainActor
 final class EncounterRuntime: ObservableObject {
+    @Published private(set) var hasRequestedBluetooth = false
     @Published private(set) var status = EncounterRuntimeStatus()
     @Published private(set) var backendFailure: BackendError?
     private static var receiptQueueTask: Task<SwiftDataReceiptQueue, any Error>?
@@ -37,6 +38,7 @@ final class EncounterRuntime: ObservableObject {
     private let storageIsReady: @MainActor () -> Bool
     private let canCallBackend: @MainActor () -> Bool
     private let backendFence: @MainActor () -> BackendCallFence
+    var receiptsDidResolve: @MainActor () async -> Void = {}
     private var uploader: ReceiptUploader?
     private var uploadQueue: AccountReceiptQueue?
     private(set) var uploadTask: Task<Void, Never>?
@@ -277,6 +279,7 @@ final class EncounterRuntime: ObservableObject {
         }
         if engine != nil { return true }
         // Do not create either Bluetooth manager until consent and durable storage are ready.
+        hasRequestedBluetooth = true
         let transport = await transportFactory()
         guard (!requiresParticipation || participationOn), validForAccount else { return false }
         let relay = RuntimeBluetoothTransport(underlying: transport) { [weak self] availability in
@@ -484,6 +487,8 @@ final class EncounterRuntime: ObservableObject {
             guard canCallBackend() else { return }
             let fence = callFence()
             let outcome = try await fence.call { try await uploader.upload(at: time.wall) }
+            guard validForAccount, generation == uploadGeneration else { return }
+            if outcome.error == nil, outcome.settledCount > 0 { await receiptsDidResolve() }
             guard validForAccount, generation == uploadGeneration, let next = outcome.nextAttemptAt else { return }
             scheduledUpload = uploadScheduler.schedule(at: next) { [weak self] in
                 guard let self, self.validForAccount, generation == self.uploadGeneration else { return }

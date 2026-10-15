@@ -1,0 +1,8 @@
+"active" = "Session active";
+"remaining" = "Time remaining";
+"stop" = "Stop session";
+"start" = "Start session";
+"ended" = "Session ended";
+"session" = "Session";
+"startOffline" = "Connect to start a session";
+"startFailed" = "Could not start the session";
