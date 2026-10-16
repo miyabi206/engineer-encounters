@@ -1309,7 +1309,9 @@ final class SessionHolderTests: XCTestCase {
                 sessionStore: InMemorySessionStore(session: try appBackendTestSession()),
                 serverTokenStore: InMemoryTokenBatchStore(batch: batch),
                 signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { queue }, transportFactory: { radio },
-                clock: clock, uploadScheduler: ManualReceiptUploadScheduler(), now: { appBackendTestNow },
+                clock: clock, uploadScheduler: ManualReceiptUploadScheduler(),
+                productLifecycle: ProductSceneLifecycle(phase: .background, notifications: NotificationCenter()),
+                now: { appBackendTestNow },
                 sessionIsOnline: { true })
             await composition.waitForRestoration()
             if mode != "none" { _ = try await composition.sessionAdapter.actions().startSession() }
@@ -1380,7 +1382,10 @@ private func sessionComposition(_ transport: any HTTPTransport, clock: ManualEnc
         serverTokenStore: tokens, signedOutTokenStore: InMemoryTokenBatchStore(),
         queueOpener: { queue }, transportFactory: {
             await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)
-        }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(), now: { appBackendTestNow },
+        }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(),
+        // Holder/action tests drive their own reads; activation is covered by SessionRelaunchTests.
+        productLifecycle: ProductSceneLifecycle(phase: .background, notifications: NotificationCenter()),
+        now: { appBackendTestNow },
         sessionIsOnline: online, sessionNetwork: network, sessionCancellationScheduler: cancellationScheduler,
         timeZone: { "Asia/Tokyo" })
 }

@@ -444,6 +444,9 @@ func productComposition(_ transport: any HTTPTransport, defaults: UserDefaults? 
         queueOpener: { queue ?? InMemoryReceiptQueue() }, transportFactory: {
             await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)
         }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(),
-        confirmationScheduler: confirmationScheduler, productLifecycle: lifecycle, now: { appBackendTestNow },
+        // Service tests keep their request order unless they explicitly exercise activation.
+        confirmationScheduler: confirmationScheduler,
+        productLifecycle: lifecycle ?? ProductSceneLifecycle(phase: .background, notifications: NotificationCenter()),
+        now: { appBackendTestNow },
         sessionNetwork: SessionNetworkAvailability(monitorsSystemPath: false), timeZone: { "Asia/Tokyo" })
 }

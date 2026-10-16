@@ -556,7 +556,10 @@ private func linkComposition(transport: any HTTPTransport, runner: (any GitHubWe
     AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(), notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(), transport: transport,
         keychain: AppMemoryKeychain(), sessionStore: try store ?? InMemorySessionStore(session: appBackendTestSession()),
         serverTokenStore: InMemoryTokenBatchStore(), signedOutTokenStore: InMemoryTokenBatchStore(),
-        queueOpener: { InMemoryReceiptQueue() }, now: { appBackendTestNow }, webAuthenticationRunner: runner,
+        queueOpener: { InMemoryReceiptQueue() },
+        // Link fixtures supply ordered replies for their explicit service calls.
+        productLifecycle: ProductSceneLifecycle(phase: .background, notifications: NotificationCenter()),
+        now: { appBackendTestNow }, webAuthenticationRunner: runner,
         timeZone: { "Asia/Tokyo" })
 }
 

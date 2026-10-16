@@ -151,7 +151,10 @@ final class RuntimeBackendTests: XCTestCase {
         let queue = InMemoryReceiptQueue()
         let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(), notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
             transport: transport, keychain: AppMemoryKeychain(), sessionStore: InMemorySessionStore(session: try appBackendTestSession()),
-            serverTokenStore: store, queueOpener: { queue }, now: { appBackendTestNow })
+            serverTokenStore: store, queueOpener: { queue },
+            // The next ordered reply belongs to the held token issue, not an activation get.
+            productLifecycle: ProductSceneLifecycle(phase: .background, notifications: NotificationCenter()),
+            now: { appBackendTestNow })
         await composition.waitForRestoration()
         let oldRuntime = try XCTUnwrap(composition.runtime)
         let issuer = try XCTUnwrap(oldRuntime.tokenIssuer)

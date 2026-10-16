@@ -51,6 +51,8 @@ final class AppComposition: ObservableObject {
     private let clock: any EncounterClock
     private let uploadScheduler: any ReceiptUploadScheduler
     private var restorationTask: Task<Void, Never>?
+    private var sessionActivation: UUID?
+    private var refreshedSessionActivation: (activation: UUID, epoch: UUID)?
     private var sessionChangeInProgress = false
     var sessionControlAvailable: Bool {
         !sessionChangeInProgress && !account.sessionChangeInProgress && !deletionSuspended && storageReady && !keychainUnavailable
@@ -211,11 +213,12 @@ final class AppComposition: ObservableObject {
         self.productLifecycle.$phase.removeDuplicates().sink { [weak confirmationPoller] phase in
             confirmationPoller?.receive(foreground: phase == .active)
         }.store(in: &productSubscriptions)
-        account.$state.removeDuplicates().sink { [weak confirmationPoller, weak sessionAdapter] state in
+        account.$state.removeDuplicates().sink { [weak self, weak confirmationPoller, weak sessionAdapter] state in
             sessionAdapter?.clearControlStartFailure()
             if case .signedIn = state {
                 confirmationPoller?.receive(authorized: true)
                 if case .active = sessionAdapter?.state { confirmationPoller?.receive(sessionActive: true) }
+                Task { await self?.refreshSessionForActivation() }
             } else {
                 let pending: Bool
                 switch state {
@@ -228,8 +231,15 @@ final class AppComposition: ObservableObject {
         account.$profile.dropFirst().sink { [weak sessionAdapter] _ in
             Task { await sessionAdapter?.refreshActivity() }
         }.store(in: &productSubscriptions)
-        self.productLifecycle.$phase.removeDuplicates().sink { [weak sessionAdapter] phase in
-            if phase == .active { Task { await sessionAdapter?.refreshActivity() } }
+        self.productLifecycle.$phase.removeDuplicates().sink { [weak self] phase in
+            guard let self else { return }
+            self.sessionActivation = phase == .active ? UUID() : nil
+            if phase == .active {
+                Task {
+                    await self.sessionAdapter.refreshActivity()
+                    await self.refreshSessionForActivation()
+                }
+            }
         }.store(in: &productSubscriptions)
         isParticipating = participation.isEnabled
         settingsSafetyAdapter.suspendParticipation = { [weak self] in self?.startAccountDeletion() }
@@ -353,6 +363,21 @@ final class AppComposition: ObservableObject {
 
     func waitForRestoration() async { await restorationTask?.value }
 
+    private func refreshSessionForActivation() async {
+        let activation = sessionActivation
+        // Neither the active notification nor the signed-in publication may insert a
+        // session get into restoration's credential/storage/account-setup sequence.
+        await waitForRestoration()
+        guard let activation, sessionActivation == activation, productLifecycle.phase == .active,
+              case .signedIn = account.state, !sessionChangeInProgress, !account.sessionChangeInProgress,
+              !account.deletionSuspended, sessionServices?.isCurrent == true else { return }
+        let epoch = account.sessionGeneration
+        guard refreshedSessionActivation?.activation != activation || refreshedSessionActivation?.epoch != epoch else { return }
+        // Claim before awaiting: account/scene notifications and refresh() can overlap.
+        refreshedSessionActivation = (activation, epoch)
+        await sessionAdapter.foreground(refreshSession: true)
+    }
+
     var status: EncounterRuntimeStatus {
         var status = runtime?.status ?? EncounterRuntimeStatus()
         status.storageUnavailable = status.storageUnavailable || keychainUnavailable || (binding != nil && (!storageReady || binding?.preparedOwner == nil))
@@ -403,6 +428,8 @@ final class AppComposition: ObservableObject {
         } else if !storageReady || keychainUnavailable { await recreateRuntime(force: true) }
         guard !sessionChangeInProgress, !account.sessionChangeInProgress, !account.deletionSuspended else { return }
         await account.refresh()
+        guard !sessionChangeInProgress, !account.sessionChangeInProgress, !account.deletionSuspended else { return }
+        await refreshSessionForActivation()
         guard !sessionChangeInProgress, !account.sessionChangeInProgress, !account.deletionSuspended else { return }
         await sessionAdapter.foreground()
         guard !sessionChangeInProgress, !account.sessionChangeInProgress, !account.deletionSuspended else { return }

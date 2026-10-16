@@ -778,7 +778,10 @@ func settingsComposition(_ transport: any HTTPTransport, defaults: UserDefaults,
         transport: transport, keychain: keychain, sessionStore: store, serverTokenStore: tokens,
         signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { queue }, transportFactory: transportFactory ?? {
             await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)
-        }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(), now: { appBackendTestNow },
+        }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(),
+        // Settings/deletion fixtures drive their own requests, independently of activation.
+        productLifecycle: ProductSceneLifecycle(phase: .background, notifications: NotificationCenter()),
+        now: { appBackendTestNow },
         sessionNetwork: SessionNetworkAvailability(monitorsSystemPath: false), timeZone: { "Asia/Tokyo" })
 }
 

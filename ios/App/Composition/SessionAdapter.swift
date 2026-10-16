@@ -201,20 +201,37 @@ final class SessionAdapter: ObservableObject {
         })
     }
 
-    func foreground() async {
+    func foreground(refreshSession: Bool = false) async {
+        let epoch = account.sessionGeneration
         await update()
-        // Foreground retries pending writes without claiming a restored session or changing
-        // account restoration's existing request order. S08 explicitly loads get_own_session.
-        guard let backend, backend.isCurrent, !account.sessionChangeInProgress, retry == nil else { return }
+        // Reachability and cancellation polls still retry only pending writes. A scene
+        // activation uses S08's refresh path after account restoration/setup completes.
+        if refreshSession {
+            guard case .signedIn = account.state, isOnline() else { return }
+            await retry?.task.value
+        }
+        guard epoch == account.sessionGeneration, let backend, backend.isCurrent, backend.epoch == epoch,
+              !account.sessionChangeInProgress, !account.deletionSuspended, retry == nil else { return }
+        if refreshSession {
+            guard case .signedIn = account.state else { return }
+        }
         let id = UUID()
         let task = Task { [weak self] in
             guard let self else { return }
             defer { if self.retry?.id == id { self.retry = nil } }
-            do { try await self.flushStop(backend) }
-            catch { await self.handle(error, backend: backend, starting: false) }
+            do {
+                try Task.checkCancellation()
+                if refreshSession { _ = try await self.refresh(epoch: epoch) }
+                else { try await self.flushStop(backend) }
+            }
+            catch {
+                // refresh already records the original service error before mapping it.
+                if !refreshSession { await self.handle(error, backend: backend, starting: false) }
+            }
             await self.update()
         }
         retry = (id, task)
+        if refreshSession { await task.value }
     }
 
     func discoveryWillChange(enabled: Bool) async throws {

@@ -74,7 +74,10 @@ final class AccountModelTests: XCTestCase {
         let zone = AppTestTimeZone("Asia/Tokyo")
         let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(), notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
             transport: transport, keychain: AppMemoryKeychain(), sessionStore: store, serverTokenStore: InMemoryTokenBatchStore(),
-            queueOpener: { InMemoryReceiptQueue() }, now: { appBackendTestNow }, timeZone: { zone.value })
+            queueOpener: { InMemoryReceiptQueue() },
+            // This test exercises account setup, independently of scene activation.
+            productLifecycle: ProductSceneLifecycle(phase: .background, notifications: NotificationCenter()),
+            now: { appBackendTestNow }, timeZone: { zone.value })
         var states: [AccountState] = []
         let subscription = composition.account.$state.sink { states.append($0) }
         await composition.waitForRestoration()
@@ -206,7 +209,9 @@ final class AccountModelTests: XCTestCase {
                 notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
                 transport: AppBackendTransport([HTTPResponse(data: Data(), statusCode: 204)]),
                 keychain: AppMemoryKeychain(), sessionStore: sessionStore, serverTokenStore: InMemoryTokenBatchStore(),
-                queueOpener: { InMemoryReceiptQueue() }, now: { appBackendTestNow }, timeZone: { "Asia/Tokyo" })
+                queueOpener: { InMemoryReceiptQueue() },
+                productLifecycle: ProductSceneLifecycle(phase: .background, notifications: NotificationCenter()),
+                now: { appBackendTestNow }, timeZone: { "Asia/Tokyo" })
             await composition.waitForRestoration()
             let zones = RegisteredTimeZoneStore(defaults: defaults)
             let key = try zones.key(for: appBackendTestUser)
@@ -277,6 +282,8 @@ final class AccountModelTests: XCTestCase {
             notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(), transport: transport,
             keychain: AppMemoryKeychain(), sessionStore: InMemorySessionStore(session: try appBackendTestSession(userID: userID)),
             serverTokenStore: InMemoryTokenBatchStore(), queueOpener: { InMemoryReceiptQueue() },
+            // Keep account-only request sequences independent of the host's scene state.
+            productLifecycle: ProductSceneLifecycle(phase: .background, notifications: NotificationCenter()),
             now: { appBackendTestNow }, timeZone: { zone })
     }
 
@@ -290,7 +297,9 @@ final class AccountModelTests: XCTestCase {
         let store = InMemorySessionStore(session: try appBackendTestSession())
         let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults, notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
             transport: AppBackendTransport([HTTPResponse(data: Data(), statusCode: 204)]), keychain: keychain,
-            sessionStore: store, queueOpener: { queue }, now: { appBackendTestNow })
+            sessionStore: store, queueOpener: { queue },
+            productLifecycle: ProductSceneLifecycle(phase: .background, notifications: NotificationCenter()),
+            now: { appBackendTestNow })
         await composition.waitForRestoration()
         let oldRuntime = try XCTUnwrap(composition.runtime)
         let oldIssuer = try XCTUnwrap(oldRuntime.tokenIssuer)
@@ -338,7 +347,9 @@ final class AccountModelTests: XCTestCase {
             queueOpener: { InMemoryReceiptQueue() }, transportFactory: {
                 builds += 1
                 return await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)
-            }, clock: clock, now: { appBackendTestNow })
+            }, clock: clock,
+            productLifecycle: ProductSceneLifecycle(phase: .background, notifications: NotificationCenter()),
+            now: { appBackendTestNow })
         await composition.waitForRestoration()
         XCTAssertEqual(composition.account.state, .signedIn(appBackendTestUser))
         XCTAssertTrue(composition.runtime?.tokenIssuer is ServerTokenIssuer)
@@ -358,7 +369,9 @@ final class AccountModelTests: XCTestCase {
             let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults,
                 notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(), transport: transport,
                 keychain: AppMemoryKeychain(), sessionStore: InMemorySessionStore(), serverTokenStore: InMemoryTokenBatchStore(),
-                queueOpener: { InMemoryReceiptQueue() }, now: { appBackendTestNow }, timeZone: { "Asia/Tokyo" })
+                queueOpener: { InMemoryReceiptQueue() },
+                productLifecycle: ProductSceneLifecycle(phase: .background, notifications: NotificationCenter()),
+                now: { appBackendTestNow }, timeZone: { "Asia/Tokyo" })
             await composition.waitForRestoration()
             do {
                 try await composition.account.signInTemporaryAccount(isAdult: true, acceptsTermsAndPrivacy: true)
@@ -382,7 +395,9 @@ final class AccountModelTests: XCTestCase {
         let server = InMemoryTokenBatchStore(batch: try EncounterSamples.batch())
         let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(), notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
             transport: transport, keychain: AppMemoryKeychain(), sessionStore: InMemorySessionStore(), serverTokenStore: server,
-            queueOpener: { queue }, now: { appBackendTestNow }, timeZone: { "Asia/Tokyo" })
+            queueOpener: { queue },
+            productLifecycle: ProductSceneLifecycle(phase: .background, notifications: NotificationCenter()),
+            now: { appBackendTestNow }, timeZone: { "Asia/Tokyo" })
         await composition.waitForRestoration()
         await composition.refreshLocalSummary()
         let oldRuntime = try XCTUnwrap(composition.runtime)
@@ -414,7 +429,9 @@ final class AccountModelTests: XCTestCase {
             transport: AppBackendTransport([appBackendAuthResponse(), HTTPResponse(data: Data(), statusCode: 500)]),
             keychain: AppMemoryKeychain(), sessionStore: sessions, serverTokenStore: InMemoryTokenBatchStore(),
             signedOutTokenStore: InMemoryTokenBatchStore(),
-            queueOpener: { InMemoryReceiptQueue() }, now: { appBackendTestNow })
+            queueOpener: { InMemoryReceiptQueue() },
+            productLifecycle: ProductSceneLifecycle(phase: .background, notifications: NotificationCenter()),
+            now: { appBackendTestNow })
         await composition.waitForRestoration()
         var states: [AccountState] = []
         let subscription = composition.account.$state.sink { states.append($0) }
