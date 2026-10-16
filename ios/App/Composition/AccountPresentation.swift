@@ -20,6 +20,7 @@ extension AccountModel {
     @discardableResult
     func loadOwnProfile() async throws -> OwnProfileState {
         let fresh = try await ownAccountOperation { try await $0.getOwnProfile() }
+        reconcileRegisteredTimeZone(with: fresh.timeZone)
         let state = Self.present(fresh)
         publishProfile(state, stale: false)
         return state

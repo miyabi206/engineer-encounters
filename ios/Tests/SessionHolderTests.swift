@@ -421,6 +421,8 @@ final class SessionHolderTests: XCTestCase {
                         "stop_session": [.failure]])
                     let first = try sessionComposition(firstTransport, clock: clock, defaults: defaults)
                     await first.waitForRestoration()
+                    let registrations = await firstTransport.count("register_time_zone")
+                    XCTAssertEqual(registrations, 1)
                     let actions = first.sessionAdapter.actions()
                     if inFlight {
                         let starting = Task { try await actions.startSession() }
@@ -467,7 +469,7 @@ final class SessionHolderTests: XCTestCase {
                     XCTAssertTrue(pendingStopKeys(defaults).isEmpty)
                     await assertFlag(next, false)
                     let paths = await transport.recorded().map { $0.url?.lastPathComponent }
-                    XCTAssertEqual(paths, ["register_time_zone", "get_own_session", "stop_session"])
+                    XCTAssertEqual(paths, ["get_own_session", "stop_session"])
                 }
             }
         }

@@ -237,7 +237,7 @@ final class AccountModel: ObservableObject {
         }
         guard let epoch = establishedGeneration else { return }
         do {
-            try await finishAccountSetup(epoch: epoch)
+            try await finishAccountSetup(epoch: epoch, account: session.userID)
             guard epoch == generation, hasCurrentSessionContext else { throw BackendError.notAuthenticated }
             state = .signedIn(session.userID)
             if storageFailed { throw BackendError.storageFailure }
@@ -323,7 +323,7 @@ final class AccountModel: ObservableObject {
                     await self.sessionDidChange(true)
                     guard epoch == self.generation else { return }
                 }
-                try await self.finishAccountSetup(epoch: epoch)
+                try await self.finishAccountSetup(epoch: epoch, account: session.userID)
                 guard epoch == self.generation else { return }
                 self.state = .signedIn(session.userID)
             } catch is CancellationError {
@@ -344,7 +344,7 @@ final class AccountModel: ObservableObject {
         if refreshTask?.id == id { refreshTask = nil }
     }
 
-    private func finishAccountSetup(epoch: UUID) async throws {
+    private func finishAccountSetup(epoch: UUID, account accountID: UUID) async throws {
         guard epoch == generation else { throw BackendError.notAuthenticated }
         guard !deletionSuspended, !accountWasDeleted else { throw CancellationError() }
         guard canRefreshSession() else { throw BackendError.storageFailure }
@@ -363,11 +363,6 @@ final class AccountModel: ObservableObject {
                 }
                 guard epoch == self.generation else { throw BackendError.notAuthenticated }
                 self.pendingDeclarations = nil
-            }
-            let accountID: UUID
-            switch self.state {
-            case .signedIn(let user), .signedInPending(.some(let user)): accountID = user
-            default: throw BackendError.notAuthenticated
             }
             let zone = self.timeZone()
             if zone != self.registeredTimeZones.zone(for: accountID), let service = self.service {
@@ -470,6 +465,11 @@ final class AccountModel: ObservableObject {
         guard hasCurrentSessionContext, !cleanup.isPending, !deletionSuspended, !accountWasDeleted else { return }
         profileIsStale = stale
         profile = value
+    }
+
+    func reconcileRegisteredTimeZone(with serverZone: String?) {
+        guard case .signedIn(let account) = state, serverZone != timeZone() else { return }
+        registeredTimeZones.forget(account)
     }
 
     /// Serialized session changes contain local cleanup and runtime wiring, never account requests.

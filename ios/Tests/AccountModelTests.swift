@@ -124,6 +124,37 @@ final class AccountModelTests: XCTestCase {
         XCTAssertEqual(RegisteredTimeZoneStore(defaults: defaults).zone(for: appBackendTestUser), "Europe/London")
     }
 
+    func testProfileWithMissingOrDifferentTimeZoneRetriesRegistrationOnNextRefresh() async throws {
+        for serverZone in ["", "UTC", "Asia/Tokyo"] {
+            let defaults = appBackendDefaults()
+            var profile = appPresentationProfile()
+            profile.timeZone = serverZone
+            var responses = [appAccountOK(), appOwnProfileResponse(profile)]
+            if serverZone != "Asia/Tokyo" { responses.append(appAccountOK()) }
+            let transport = AppBackendTransport(responses)
+            let composition = try timeZoneComposition(defaults: defaults, transport: transport, zone: "Asia/Tokyo")
+            await composition.waitForRestoration()
+            let zones = RegisteredTimeZoneStore(defaults: defaults)
+            let key = try zones.key(for: appBackendTestUser)
+            XCTAssertEqual(defaults.string(forKey: key), "Asia/Tokyo")
+            let otherAccount = UUID()
+            zones.record("Europe/London", for: otherAccount)
+
+            let loaded = try await composition.account.loadOwnProfile()
+            XCTAssertEqual(loaded.timeZone, serverZone)
+            XCTAssertEqual(defaults.string(forKey: key), serverZone == "Asia/Tokyo" ? "Asia/Tokyo" : nil)
+            XCTAssertEqual(zones.zone(for: otherAccount), "Europe/London")
+            await composition.account.refresh()
+            await composition.account.refresh()
+            XCTAssertEqual(composition.account.state, .signedIn(appBackendTestUser))
+            XCTAssertEqual(zones.zone(for: appBackendTestUser), "Asia/Tokyo")
+            let requests = await transport.recorded()
+            XCTAssertEqual(requests.map { $0.url?.lastPathComponent }, serverZone == "Asia/Tokyo" ?
+                ["register_time_zone", "get_own_profile"] :
+                ["register_time_zone", "get_own_profile", "register_time_zone"])
+        }
+    }
+
     func testRateLimitedTimeZoneDoesNotFailSetupAndRetriesOnNextLaunch() async throws {
         for previousZone in [nil, "Europe/London"] as [String?] {
             let defaults = appBackendDefaults()
@@ -178,6 +209,7 @@ final class AccountModelTests: XCTestCase {
                 queueOpener: { InMemoryReceiptQueue() }, now: { appBackendTestNow }, timeZone: { "Asia/Tokyo" })
             await composition.waitForRestoration()
             let zones = RegisteredTimeZoneStore(defaults: defaults)
+            let key = try zones.key(for: appBackendTestUser)
             XCTAssertEqual(zones.zone(for: appBackendTestUser), "Asia/Tokyo")
             switch operation {
             case "signOut": try await composition.account.signOut()
@@ -188,8 +220,8 @@ final class AccountModelTests: XCTestCase {
                 await composition.account.restore()
             }
             XCTAssertEqual(composition.account.state, .signedOut)
+            XCTAssertNil(defaults.object(forKey: key), operation)
             XCTAssertNil(zones.zone(for: appBackendTestUser), operation)
-            XCTAssertNil(defaults.object(forKey: try zones.key(for: appBackendTestUser)), operation)
         }
     }
 

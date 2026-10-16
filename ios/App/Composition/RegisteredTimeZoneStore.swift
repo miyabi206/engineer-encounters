@@ -28,6 +28,11 @@ final class RegisteredTimeZoneStore {
         defaults.set(zone, forKey: key)
     }
 
+    func forget(_ id: UUID) {
+        guard let key = try? key(for: id) else { return }
+        defaults.removeObject(forKey: key)
+    }
+
     func clear() {
         guard defaults.synchronize() else { return }
         for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(Self.prefix) || key == Self.bindingKey {
