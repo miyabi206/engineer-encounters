@@ -3,7 +3,7 @@
 **Version:** 0.8\
 **Status:** Confirmed product decisions; drafting defaults and unverified items labelled\
 **Date:** 2026-10-15\
-**Related:** `specification.md` v0.8, `design.md` v0.9, `ui.md` v0.7\
+**Related:** `specification.md` v0.8, `design.md` v0.10, `ui.md` v0.8\
 **Platforms:** iOS first, Android later\
 **Languages:** Japanese, English
 
