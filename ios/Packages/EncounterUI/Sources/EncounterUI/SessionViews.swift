@@ -15,6 +15,7 @@ struct SessionCard<Content: View>: View {
 @MainActor
 public struct SessionView<RevealedEncounters: View>: View {
     @ObservedObject private var model: SessionModel
+    @SessionViewState private var timelineStart = Date()
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ScaledMetric(relativeTo: .largeTitle) private var countdownSize = 44.0
@@ -85,7 +86,7 @@ public struct SessionView<RevealedEncounters: View>: View {
             }
         }
         .background {
-            TimelineView(.periodic(from: .now, by: 1)) { context in
+            TimelineView(.periodic(from: timelineStart, by: 1)) { context in
                 Color.clear.onChange(of: context.date, initial: true) { model.tick() }
             }
         }

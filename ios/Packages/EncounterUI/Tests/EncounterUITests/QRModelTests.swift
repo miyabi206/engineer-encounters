@@ -1,7 +1,68 @@
+import Combine
 import XCTest
 @testable import EncounterUI
 
 final class QRModelTests: XCTestCase {
+    @MainActor
+    func testTickWithoutCodeDoesNotPublish() async {
+        let driver = QRTestDriver()
+        let model = driver.model()
+        var changes = 0
+        let observation = model.objectWillChange.sink { changes += 1 }
+        defer { observation.cancel() }
+
+        await model.tick()
+        driver.elapsed = 0.5
+        await model.tick()
+        XCTAssertEqual(changes, 0)
+        XCTAssertEqual(driver.issues, 0)
+
+        driver.issueFailure = .network
+        await model.appear()
+        XCTAssertNil(model.code)
+        XCTAssertEqual(model.error, .network)
+        changes = 0
+        await model.tick()
+        driver.elapsed = 0.75
+        await model.tick()
+        XCTAssertEqual(changes, 0)
+        XCTAssertEqual(driver.issues, 1)
+    }
+
+    @MainActor
+    func testTickPublishesOnlyForCountdownChangesAndExpiry() async {
+        let driver = QRTestDriver()
+        let model = driver.model()
+        await model.appear()
+        var changes = 0
+        let observation = model.objectWillChange.sink { changes += 1 }
+        defer { observation.cancel() }
+
+        await model.tick()
+        driver.elapsed = 0.5
+        await model.tick()
+        XCTAssertEqual(changes, 0)
+        driver.elapsed = 1
+        await model.tick()
+        XCTAssertEqual(model.remainingSeconds, 119)
+        XCTAssertEqual(changes, 1)
+        driver.elapsed = 1.5
+        await model.tick()
+        XCTAssertEqual(changes, 1)
+
+        // Keep expiry observable without immediately issuing a replacement code.
+        model.select(.scan)
+        changes = 0
+        driver.elapsed = 120
+        await model.tick()
+        XCTAssertNil(model.code)
+        XCTAssertEqual(model.remainingSeconds, 0)
+        XCTAssertEqual(changes, 2)
+        await model.tick()
+        XCTAssertEqual(changes, 2)
+        XCTAssertEqual(driver.issues, 1)
+    }
+
     @MainActor
     func testIssueCountdownExpiryAndManualReplacement() async throws {
         let driver = QRTestDriver()

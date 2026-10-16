@@ -1,7 +1,61 @@
+import Combine
 import XCTest
 @testable import EncounterUI
 
 final class SessionModelTests: XCTestCase {
+    @MainActor
+    func testTickDoesNotPublishWhileNoneOrStarting() async {
+        let driver = SessionTestDriver()
+        let model = driver.model()
+        var changes = 0
+        let observation = model.objectWillChange.sink { changes += 1 }
+        defer { observation.cancel() }
+
+        model.tick()
+        driver.elapsed = 0.5
+        model.tick()
+        XCTAssertEqual(changes, 0)
+        driver.duringStart = {
+            XCTAssertEqual(model.state, .starting)
+            let before = changes
+            model.tick()
+            driver.elapsed += 0.25
+            model.tick()
+            XCTAssertEqual(changes, before)
+        }
+        await model.start()
+        XCTAssertTrue(model.isActive)
+    }
+
+    @MainActor
+    func testTickPublishesOnlyForCountdownChangesAndExpiry() {
+        let driver = SessionTestDriver()
+        let model = driver.model(active: true)
+        var changes = 0
+        let observation = model.objectWillChange.sink { changes += 1 }
+        defer { observation.cancel() }
+
+        model.tick()
+        driver.elapsed = 0.5
+        model.tick()
+        XCTAssertEqual(changes, 0)
+        driver.elapsed = 1
+        model.tick()
+        XCTAssertEqual(model.remainingSeconds, 7199)
+        XCTAssertEqual(changes, 1)
+        driver.elapsed = 1.5
+        model.tick()
+        XCTAssertEqual(changes, 1)
+        driver.elapsed = 7200
+        model.tick()
+        XCTAssertEqual(model.remainingSeconds, 0)
+        XCTAssertTrue(model.lifecycle.hasEnded)
+        XCTAssertFalse(model.isActive)
+        XCTAssertEqual(changes, 3)
+        model.tick()
+        XCTAssertEqual(changes, 3)
+    }
+
     @MainActor
     func testStartWaitsForServerAcknowledgementAndDuplicateStartIsIgnored() async {
         let driver = SessionTestDriver()

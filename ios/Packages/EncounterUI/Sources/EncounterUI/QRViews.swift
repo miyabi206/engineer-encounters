@@ -5,6 +5,7 @@ import UIKit
 @MainActor
 public struct QRView: View {
     @ObservedObject private var model: QRModel
+    @SessionViewState private var timelineStart = Date()
     @Environment(\.scenePhase) private var scenePhase
     @ScaledMetric(relativeTo: .body) private var cameraHeight = 280.0
     private let navigation: QRNavigationActions
@@ -43,7 +44,7 @@ public struct QRView: View {
             }
         }
         .background {
-            TimelineView(.periodic(from: .now, by: 1)) { context in
+            TimelineView(.periodic(from: timelineStart, by: 1)) { context in
                 Color.clear.onChange(of: context.date) {
                     if scenePhase == .active { Task { await model.tick() } }
                 }

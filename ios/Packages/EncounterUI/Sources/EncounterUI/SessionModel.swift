@@ -44,10 +44,14 @@ public final class SessionModel: ObservableObject {
 
     public func tick() {
         let now = estimatedServerTime
-        lifecycle.expire(now: now)
-        if case let .active(session) = state {
-            remainingSeconds = SessionCountdown.seconds(until: session.expiresAt, now: now)
-        } else { remainingSeconds = 0 }
+        var updatedLifecycle = lifecycle
+        updatedLifecycle.expire(now: now)
+        if updatedLifecycle != lifecycle { lifecycle = updatedLifecycle }
+        let remaining: Int
+        if case let .active(session) = updatedLifecycle.state {
+            remaining = SessionCountdown.seconds(until: session.expiresAt, now: now)
+        } else { remaining = 0 }
+        if remaining != remainingSeconds { remainingSeconds = remaining }
     }
 
     public func start() async {
