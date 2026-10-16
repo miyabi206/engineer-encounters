@@ -42,7 +42,7 @@ final class RuntimeRecoveryTests: XCTestCase {
         let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(), notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
             transport: transport, keychain: AppMemoryKeychain(), sessionStore: InMemorySessionStore(session: try appBackendTestSession()),
             serverTokenStore: InMemoryTokenBatchStore(), signedOutTokenStore: InMemoryTokenBatchStore(),
-            queueOpener: { queue }, now: { appBackendTestNow })
+            queueOpener: { queue }, productLifecycle: appBackendTestLifecycle(), now: { appBackendTestNow })
         await composition.waitForRestoration()
         let receipt = appBackendFinalReceipt()
         try await queue.enqueue(receipt)
@@ -80,7 +80,8 @@ final class RuntimeRecoveryTests: XCTestCase {
         let queue = InMemoryReceiptQueue()
         let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(), notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
             transport: transport, keychain: AppMemoryKeychain(), sessionStore: sessions, serverTokenStore: tokens,
-            signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { queue }, now: { appBackendTestNow })
+            signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { queue },
+            productLifecycle: appBackendTestLifecycle(), now: { appBackendTestNow })
         await composition.waitForRestoration()
         let oldRuntime = try XCTUnwrap(composition.runtime)
         let issuer = try XCTUnwrap(oldRuntime.tokenIssuer)
@@ -124,7 +125,8 @@ final class RuntimeRecoveryTests: XCTestCase {
             transport: transport, keychain: AppMemoryKeychain(), sessionStore: InMemorySessionStore(session: try appBackendTestSession()),
             serverTokenStore: tokens, signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { InMemoryReceiptQueue() },
             transportFactory: { await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock) },
-            clock: clock, uploadScheduler: ManualReceiptUploadScheduler(), now: { appBackendTestNow })
+            clock: clock, uploadScheduler: ManualReceiptUploadScheduler(), productLifecycle: appBackendTestLifecycle(),
+            now: { appBackendTestNow })
         await composition.waitForRestoration()
         try await appBackendEventually { await transport.isHeld("issue_token_batch") }
         let runtime = try XCTUnwrap(composition.runtime)

@@ -1,3 +1,4 @@
+import Combine
 import EncounterBackend
 import EncounterDomain
 import EncounterDomainTestSupport
@@ -92,19 +93,33 @@ final class SessionRelaunchTests: XCTestCase {
     }
 
     func testEachActivationRefreshesOnceDespiteDuplicateNotificationsAndAccountRefresh() async throws {
-        let transport = relaunchTransport(["get_own_session": [.held, .response(relaunchNull)]])
+        let transport = relaunchTransport(["get_own_session": [.held, .response(relaunchNull)],
+            "register_time_zone": [.response(appAccountOK()), .failure, .response(appAccountOK())]])
+        let zone = AppTestTimeZone("Asia/Tokyo")
         let lifecycle = ProductSceneLifecycle(phase: .background, notifications: NotificationCenter())
         let controller = RelaunchActivityController()
-        let composition = try relaunchComposition(transport, lifecycle: lifecycle, controller: controller)
+        let composition = try relaunchComposition(transport, lifecycle: lifecycle, controller: controller,
+            timeZone: { zone.value })
         await composition.waitForRestoration()
         lifecycle.receive(.active)
         try await appBackendEventually { await transport.isHeld("get_own_session") }
         lifecycle.receive(.active)
-        await composition.account.refresh()
+        zone.value = "Europe/London"
+        let refreshed = RelaunchProgress()
+        let refreshing = Task { await composition.refresh(); refreshed.completed = true }
+        try await appBackendEventually { refreshed.completed }
+        await refreshing.value
+        XCTAssertEqual(composition.account.state, .signedInPending(appBackendTestUser))
+        await composition.refresh()
+        XCTAssertEqual(composition.account.state, .signedIn(appBackendTestUser))
         let heldGets = await transport.count("get_own_session")
         XCTAssertEqual(heldGets, 1)
         await transport.release("get_own_session", with: relaunchSession)
-        try await appBackendEventually { composition.sessionActivity.payload != nil }
+        await composition.waitForSessionActivationRefresh()
+        XCTAssertNotNil(composition.sessionActivity.payload)
+        await composition.refresh()
+        let completedGets = await transport.count("get_own_session")
+        XCTAssertEqual(completedGets, 1)
         lifecycle.receive(.inactive)
         lifecycle.receive(.active)
         try await appBackendEventually { composition.sessionAdapter.state == .none }
@@ -133,21 +148,55 @@ final class SessionRelaunchTests: XCTestCase {
     }
 
     func testOfflineActivationKeepsLocalStateWithoutSigningOut() async throws {
-        var online = true
+        let network = SessionNetworkAvailability(monitorsSystemPath: false)
         let transport = relaunchTransport(["start_session": [.response(relaunchSession)],
             "get_own_session": [.response(relaunchNull)]])
         let lifecycle = ProductSceneLifecycle(phase: .background, notifications: NotificationCenter())
-        let composition = try relaunchComposition(transport, lifecycle: lifecycle, online: { online })
+        let composition = try relaunchComposition(transport, lifecycle: lifecycle, network: network)
         await composition.waitForRestoration()
         _ = try await composition.sessionAdapter.actions().startSession()
         let state = composition.sessionAdapter.state
-        online = false
+        network.receive(isOnline: false)
         lifecycle.receive(.active)
-        await composition.refresh()
+        await composition.waitForSessionActivationRefresh()
         XCTAssertEqual(composition.sessionAdapter.state, state)
         XCTAssertEqual(composition.account.state, .signedIn(appBackendTestUser))
         let before = await transport.count("get_own_session")
         XCTAssertEqual(before, 0)
+        network.receive(isOnline: true)
+        try await appBackendEventually { composition.sessionAdapter.state == .none }
+        let gets = await transport.count("get_own_session")
+        XCTAssertEqual(gets, 1)
+    }
+
+    func testOfflineRelaunchRecoversOnNetworkReturnWithoutAnotherActivation() async throws {
+        let network = SessionNetworkAvailability(monitorsSystemPath: false)
+        network.receive(isOnline: false)
+        let transport = relaunchTransport(["get_own_session": [.response(relaunchSession)]])
+        let composition = try relaunchComposition(transport, lifecycle: appBackendTestLifecycle(phase: .active), network: network)
+        await composition.waitForRestoration()
+        await composition.waitForSessionActivationRefresh()
+        let before = await transport.count("get_own_session")
+        XCTAssertEqual(before, 0)
+        network.receive(isOnline: true)
+        try await appBackendEventually { composition.sessionActivity.payload?.sessionID == relaunchSessionID }
+        let gets = await transport.count("get_own_session")
+        XCTAssertEqual(gets, 1)
+        XCTAssertEqual(composition.account.state, .signedIn(appBackendTestUser))
+    }
+
+    func testUnansweredColdGetKeepsNoneAndReleasesTheActivationClaimForRetry() async throws {
+        let transport = relaunchTransport(["get_own_session": [.failure, .response(relaunchSession)]])
+        let composition = try relaunchComposition(transport, lifecycle: appBackendTestLifecycle(phase: .active))
+        await composition.waitForRestoration()
+        await composition.waitForSessionActivationRefresh()
+        XCTAssertEqual(composition.sessionAdapter.state, .none)
+        XCTAssertEqual(composition.sessionAdapter.failure, .transport)
+        XCTAssertEqual(composition.account.state, .signedIn(appBackendTestUser))
+        await composition.refresh()
+        try await appBackendEventually { composition.sessionActivity.payload != nil }
+        let gets = await transport.count("get_own_session")
+        XCTAssertEqual(gets, 2)
     }
 
     func testActivationWaitsForFailedAccountSetupToRecover() async throws {
@@ -209,18 +258,238 @@ final class SessionRelaunchTests: XCTestCase {
     }
 
     func testDeletionSuspensionRefusesActivationGet() async throws {
-        let transport = relaunchTransport(["get_own_session": [.response(relaunchSession)]])
-        let lifecycle = ProductSceneLifecycle(phase: .background, notifications: NotificationCenter())
+        for suspended in [false, true] {
+            let transport = relaunchTransport(["get_own_session": [.response(relaunchSession)],
+                "delete_own_account": [.held]])
+            let lifecycle = appBackendTestLifecycle()
+            let composition = try relaunchComposition(transport, lifecycle: lifecycle)
+            await composition.waitForRestoration()
+            if suspended {
+                composition.startAccountDeletion()
+                try await appBackendEventually { await transport.isHeld("delete_own_account") }
+            }
+            lifecycle.receive(.active)
+            let answered = await composition.waitForSessionActivationRefresh()
+            XCTAssertEqual(answered, !suspended)
+            let gets = await transport.count("get_own_session")
+            XCTAssertEqual(gets, suspended ? 0 : 1)
+            if suspended {
+                XCTAssertNil(composition.sessionActivity.payload)
+                await transport.releaseFailure("delete_own_account")
+                try await appBackendEventually { composition.deletionState == .failed }
+            } else { XCTAssertNotNil(composition.sessionActivity.payload) }
+        }
+    }
+
+    func testS08RefreshWaitsForHeldActivationGet() async throws {
+        let transport = relaunchTransport(["get_own_session": [.held, .response(relaunchSession)]])
+        let composition = try relaunchComposition(transport, lifecycle: appBackendTestLifecycle(phase: .active))
+        await composition.waitForRestoration()
+        try await appBackendEventually { await transport.isHeld("get_own_session") }
+        let model = relaunchModel(composition)
+        let completed = RelaunchProgress()
+        let refreshing = Task { completed.started = true; await model.refresh(); completed.completed = true }
+        try await appBackendEventually { completed.started }
+        await composition.refresh()
+        XCTAssertFalse(completed.completed)
+        XCTAssertNil(composition.sessionAdapter.failure)
+        await transport.release("get_own_session", with: relaunchSession)
+        await refreshing.value
+        XCTAssertTrue(model.isActive)
+        XCTAssertFalse(model.refreshFailed)
+        XCTAssertNil(composition.sessionAdapter.failure)
+        let gets = await transport.count("get_own_session")
+        XCTAssertEqual(gets, 2)
+    }
+
+    func testS08StartWaitsForHeldActivationGet() async throws {
+        let transport = relaunchTransport(["get_own_session": [.held], "start_session": [.response(relaunchSession)]])
+        let composition = try relaunchComposition(transport, lifecycle: appBackendTestLifecycle(phase: .active))
+        await composition.waitForRestoration()
+        try await appBackendEventually { await transport.isHeld("get_own_session") }
+        let model = relaunchModel(composition)
+        let starting = Task { await model.start() }
+        try await appBackendEventually { model.state == .starting }
+        XCTAssertNil(composition.sessionAdapter.failure)
+        await transport.release("get_own_session", with: relaunchNull)
+        await starting.value
+        XCTAssertTrue(model.isActive)
+        XCTAssertNil(composition.sessionAdapter.failure)
+        let starts = await transport.count("start_session")
+        XCTAssertEqual(starts, 1)
+    }
+
+    func testControlCenterStartWaitsForHeldActivationGet() async throws {
+        let defaults = appBackendDefaults()
+        OnboardingCompletionStore(defaults: defaults).finish(appBackendTestUser)
+        var profile = appLinkedPresentationProfile(); profile.discoveryOn = true
+        let transport = relaunchTransport(["get_own_session": [.held, .response(relaunchNull)],
+            "get_own_profile": [.response(appOwnProfileResponse(profile))],
+            "start_session": [.response(relaunchSession)]])
+        let composition = try relaunchComposition(transport, lifecycle: appBackendTestLifecycle(phase: .active), defaults: defaults)
+        await composition.accountFlow.start()
+        composition.runtime?.receive(.radioAvailability(.available))
+        try await appBackendEventually { await transport.isHeld("get_own_session") }
+        let completed = RelaunchProgress()
+        let starting = Task { await composition.startSessionFromControl(); completed.completed = true }
+        try await appBackendEventually { composition.sessionAdapter.controlStartInProgress }
+        XCTAssertFalse(completed.completed)
+        XCTAssertNil(composition.sessionAdapter.controlStartFailure)
+        await transport.release("get_own_session", with: relaunchNull)
+        await starting.value
+        XCTAssertNotNil(composition.sessionActivity.payload)
+        XCTAssertNil(composition.sessionAdapter.controlStartFailure)
+        XCTAssertNil(composition.sessionAdapter.failure)
+        XCTAssertEqual(composition.productNavigation.discover, [.session])
+        let starts = await transport.count("start_session")
+        XCTAssertEqual(starts, 1)
+    }
+
+    func testActivationSkipsAnInFlightInteractiveGetWithoutPublishingFailure() async throws {
+        let lifecycle = appBackendTestLifecycle()
+        let transport = relaunchTransport(["get_own_session": [.held, .response(relaunchNull)]])
         let composition = try relaunchComposition(transport, lifecycle: lifecycle)
         await composition.waitForRestoration()
-        composition.account.isDeletionSuspended = { true }
+        let reading = Task { try await composition.sessionAdapter.actions().refreshSession() }
+        try await appBackendEventually { await transport.isHeld("get_own_session") }
         lifecycle.receive(.active)
+        let answered = await composition.waitForSessionActivationRefresh()
+        XCTAssertFalse(answered)
+        XCTAssertNil(composition.sessionAdapter.failure)
+        XCTAssertEqual(composition.sessionAdapter.state, .none)
+        await transport.release("get_own_session", with: relaunchSession)
+        _ = try await reading.value
+        XCTAssertNotNil(composition.sessionActivity.payload)
+        let gets = await transport.count("get_own_session")
+        XCTAssertEqual(gets, 1)
+        // The skipped attempt did not consume the activation's claim.
         await composition.refresh()
+        try await appBackendEventually { composition.sessionAdapter.state == .none }
+        let retriedGets = await transport.count("get_own_session")
+        XCTAssertEqual(retriedGets, 2)
+    }
+
+    func testReplacedActivationRetryReleasesItsClaimWithoutPublishingTheObsoleteAnswer() async throws {
+        let newSessionID = "00000000-0000-0000-0000-000000000445"
+        let transport = relaunchTransport(["get_own_session": [.held, .response(relaunchSessionResponse(id: newSessionID))]])
+        let composition = try relaunchComposition(transport, lifecycle: appBackendTestLifecycle(phase: .active))
+        await composition.waitForRestoration()
+        try await appBackendEventually { await transport.isHeld("get_own_session") }
+        let services = try XCTUnwrap(composition.sessionServices)
+        await composition.sessionAdapter.configure(nil)
+        await composition.sessionAdapter.configure(services)
+        await transport.release("get_own_session", with: relaunchSession)
+        let answered = await composition.waitForSessionActivationRefresh()
+        XCTAssertFalse(answered)
+        XCTAssertEqual(composition.sessionAdapter.state, .none)
+        XCTAssertNil(composition.sessionAdapter.failure)
+        await composition.refresh()
+        try await appBackendEventually { composition.sessionActivity.payload?.sessionID == newSessionID }
+        let gets = await transport.count("get_own_session")
+        XCTAssertEqual(gets, 2)
+    }
+
+    func testActivationRejectsCredentialsOnlyAfterARealAuthenticationRejection() async throws {
+        let transport = relaunchTransport([
+            "get_own_session": [.response(HTTPResponse(data: Data(#"{"message":"not_authenticated"}"#.utf8), statusCode: 401))],
+            "token": [.response(HTTPResponse(data: Data(#"{"error":"invalid_grant"}"#.utf8), statusCode: 400))]])
+        let store = InMemorySessionStore(session: try appBackendTestSession())
+        let composition = try relaunchComposition(transport, lifecycle: appBackendTestLifecycle(phase: .active), store: store)
+        await composition.waitForRestoration()
+        await composition.waitForSessionActivationRefresh()
+        XCTAssertEqual(composition.account.state, .signedOut)
+        let stored = try await store.load()
+        XCTAssertNil(stored)
+        XCTAssertEqual(composition.sessionAdapter.state, .none)
+        let stops = await transport.count("stop_session")
+        XCTAssertEqual(stops, 0)
+    }
+
+    func testActivationSkipsAPendingStartWithoutTakingItsReadSlot() async throws {
+        let lifecycle = appBackendTestLifecycle()
+        let transport = relaunchTransport(["start_session": [.held]])
+        let composition = try relaunchComposition(transport, lifecycle: lifecycle)
+        await composition.waitForRestoration()
+        let starting = Task { try await composition.sessionAdapter.actions().startSession() }
+        try await appBackendEventually { await transport.isHeld("start_session") }
+        lifecycle.receive(.active)
+        let answered = await composition.waitForSessionActivationRefresh()
+        XCTAssertFalse(answered)
+        XCTAssertNil(composition.sessionAdapter.failure)
+        XCTAssertEqual(composition.sessionAdapter.state, .starting)
         let gets = await transport.count("get_own_session")
         XCTAssertEqual(gets, 0)
-        XCTAssertEqual(composition.sessionAdapter.state, .none)
+        await transport.release("start_session", with: relaunchSession)
+        _ = try await starting.value
+        XCTAssertNotNil(composition.sessionActivity.payload)
+    }
+
+    func testHeldActivationGetCannotPublishAfterSignOutOrAccountSwitch() async throws {
+        for switching in [false, true] {
+            let other = UUID()
+            let newSessionID = "00000000-0000-0000-0000-000000000445"
+            let transport = relaunchTransport(["get_own_session": [.held, .response(relaunchSessionResponse(id: newSessionID))],
+                "stop_session": [.response(relaunchNull)],
+                "register_time_zone": [.response(appAccountOK()), .response(appAccountOK())],
+                "signin": [.response(appBackendAuthResponse(userID: other))],
+                "accept_declarations": [.response(appAccountOK())]])
+            let composition = try relaunchComposition(transport, lifecycle: appBackendTestLifecycle(phase: .active))
+            await composition.waitForRestoration()
+            try await appBackendEventually { await transport.isHeld("get_own_session") }
+            let claims = RelaunchClaims()
+            let observation = composition.sessionAdapter.$state.sink {
+                if case .active(let value) = $0, value.sessionID == relaunchSessionID { claims.oldSessionAccepted = true }
+            }
+            let entered = RelaunchProgress()
+            let draining = Task { entered.completed = true; return await composition.waitForSessionActivationRefresh() }
+            try await appBackendEventually { entered.completed }
+            try await composition.account.signOut()
+            let stops = await transport.count("stop_session")
+            XCTAssertEqual(stops, 1) // The bounded outgoing stop also completes while the get remains held.
+            if switching {
+                try await composition.account.signIn(using: AuthRequest(path: "signin", body: Data()),
+                    isAdult: true, acceptsTermsAndPrivacy: true, termsVersion: "fixture", privacyVersion: "fixture")
+                try await appBackendEventually { composition.sessionActivity.payload?.sessionID == newSessionID }
+            }
+            await transport.release("get_own_session", with: relaunchSession)
+            let answered = await draining.value
+            XCTAssertFalse(answered)
+            XCTAssertFalse(claims.oldSessionAccepted)
+            if switching {
+                XCTAssertEqual(composition.account.state, .signedIn(other))
+                XCTAssertEqual(composition.sessionActivity.payload?.sessionID, newSessionID)
+            } else {
+                XCTAssertEqual(composition.account.state, .signedOut)
+                XCTAssertEqual(composition.sessionAdapter.state, .none)
+                XCTAssertNil(composition.sessionActivity.payload)
+            }
+            withExtendedLifetime(observation) {}
+        }
+    }
+
+    func testHeldActivationGetCannotRestoreASessionAfterDeletionStarts() async throws {
+        let transport = relaunchTransport(["get_own_session": [.held], "delete_own_account": [.held]])
+        let composition = try relaunchComposition(transport, lifecycle: appBackendTestLifecycle(phase: .active))
+        await composition.waitForRestoration()
+        try await appBackendEventually { await transport.isHeld("get_own_session") }
+        composition.startAccountDeletion()
+        try await appBackendEventually { await transport.isHeld("delete_own_account") }
+        XCTAssertTrue(composition.deletionSuspended)
+        await transport.release("get_own_session", with: relaunchSession)
+        let answered = await composition.waitForSessionActivationRefresh()
+        XCTAssertFalse(answered)
+        XCTAssertNil(composition.sessionActivity.payload)
+        if case .active = composition.sessionAdapter.state { XCTFail("A fenced get must never revive the deleted account's local claim") }
+        await transport.releaseFailure("delete_own_account")
+        try await appBackendEventually { composition.deletionState == .failed }
     }
 }
+
+@MainActor
+private final class RelaunchProgress { var started = false; var completed = false }
+
+@MainActor
+private final class RelaunchClaims { var oldSessionAccepted = false }
 
 @MainActor
 private final class RelaunchActivityController: SessionActivityControlling {
@@ -229,10 +498,14 @@ private final class RelaunchActivityController: SessionActivityControlling {
 }
 
 private let relaunchSessionID = "00000000-0000-0000-0000-000000000444"
-private let relaunchSession = HTTPResponse(data: Data("""
-{"session_id":"00000000-0000-0000-0000-000000000444","starts_at":1000,"expires_at":8200,"server_time":1000}
-""".utf8), statusCode: 200)
+private let relaunchSession = relaunchSessionResponse(id: relaunchSessionID)
 private let relaunchNull = HTTPResponse(data: Data("null".utf8), statusCode: 200)
+
+private func relaunchSessionResponse(id: String) -> HTTPResponse {
+    HTTPResponse(data: Data("""
+    {"session_id":"\(id)","starts_at":1000,"expires_at":8200,"server_time":1000}
+    """.utf8), statusCode: 200)
+}
 
 private func relaunchTransport(_ supplied: [String: [ControlledAppBackendTransport.Reply]]) -> ControlledAppBackendTransport {
     var plans = supplied
@@ -251,10 +524,11 @@ private func relaunchOwner(_ defaults: UserDefaults) throws -> BackendStorageOwn
 }
 
 @MainActor
-private func relaunchComposition(_ transport: ControlledAppBackendTransport, lifecycle: ProductSceneLifecycle,
+private func relaunchComposition(_ transport: ControlledAppBackendTransport, lifecycle: ProductSceneLifecycle = appBackendTestLifecycle(),
     defaults: UserDefaults? = nil, store: (any SessionStore)? = nil,
     controller: (any SessionActivityControlling)? = nil,
-    online: @escaping @MainActor () -> Bool = { true }) throws -> AppComposition {
+    network: SessionNetworkAvailability? = nil,
+    timeZone: @escaping @MainActor () -> String = { "Asia/Tokyo" }) throws -> AppComposition {
     let clock = ManualEncounterClock()
     return AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults ?? appBackendDefaults(),
         notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(), transport: transport,
@@ -263,6 +537,12 @@ private func relaunchComposition(_ transport: ControlledAppBackendTransport, lif
         queueOpener: { InMemoryReceiptQueue() }, transportFactory: {
             await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)
         }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(), productLifecycle: lifecycle,
-        now: { appBackendTestNow }, sessionIsOnline: online, activityController: controller,
-        timeZone: { "Asia/Tokyo" })
+        now: { appBackendTestNow }, sessionNetwork: network ?? SessionNetworkAvailability(monitorsSystemPath: false),
+        activityController: controller, timeZone: timeZone)
+}
+
+@MainActor
+private func relaunchModel(_ composition: AppComposition) -> SessionModel {
+    SessionModel(actions: composition.sessionAdapter.actions(),
+        navigation: .init(openQR: {}, openEncounter: { _ in }, close: {}, openDiscoveryOff: {}), monotonicNow: { 0 })
 }

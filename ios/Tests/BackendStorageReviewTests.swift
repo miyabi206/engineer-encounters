@@ -328,7 +328,8 @@ final class BackendStorageReviewTests: XCTestCase {
         // Intentionally omit queueOpener: exercise the actual file-backed app path.
         let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: defaults, notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
             transport: transport, keychain: keychain, signedOutTokenStore: InMemoryTokenBatchStore(),
-            uploadScheduler: ManualReceiptUploadScheduler(), now: { appBackendTestNow })
+            uploadScheduler: ManualReceiptUploadScheduler(), productLifecycle: appBackendTestLifecycle(),
+            now: { appBackendTestNow })
         await composition.waitForRestoration()
         await composition.refreshLocalSummary()
         XCTAssertEqual(composition.status.pendingReceiptCount, 1)
@@ -382,7 +383,8 @@ final class BackendStorageReviewTests: XCTestCase {
         try await appBackendEventually { await transport.isHeld("get_own_profile") }
         let other = try XCTUnwrap(BackendConfiguration(address: "https://other.example", publicClientKey: "fixture-key"))
         let replacement = AppComposition(configuration: other, defaults: defaults, notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(), transport: AppBackendTransport(),
-            keychain: keychain, signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { InMemoryReceiptQueue() })
+            keychain: keychain, signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { InMemoryReceiptQueue() },
+            productLifecycle: appBackendTestLifecycle())
         await replacement.waitForRestoration()
         await transport.release("get_own_profile", with: appOwnProfileResponse())
         do { _ = try await reading.value; XCTFail("The obsolete profile must be rejected") }
@@ -484,7 +486,8 @@ private func reviewComposition(defaults: UserDefaults, keychain: any KeychainCli
         keychain: keychain, sessionStore: sessionStore, serverTokenStore: tokens, signedOutTokenStore: InMemoryTokenBatchStore(),
         queueOpener: { queue }, transportFactory: {
             await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)
-        }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(), now: { appBackendTestNow })
+        }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(), productLifecycle: appBackendTestLifecycle(),
+        now: { appBackendTestNow })
 }
 
 @MainActor

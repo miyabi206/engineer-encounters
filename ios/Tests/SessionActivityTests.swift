@@ -565,5 +565,6 @@ private func surfaceComposition(_ transport: any HTTPTransport,
         // Surface tests drive their own reads; activation is covered by SessionRelaunchTests.
         productLifecycle: ProductSceneLifecycle(phase: .background, notifications: NotificationCenter()),
         now: { appBackendTestNow },
-        sessionIsOnline: online, activityController: controller ?? RecordingSessionActivityController())
+        sessionIsOnline: online, sessionNetwork: SessionNetworkAvailability(monitorsSystemPath: false),
+        activityController: controller ?? RecordingSessionActivityController())
 }

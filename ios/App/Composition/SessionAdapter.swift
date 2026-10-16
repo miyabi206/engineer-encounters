@@ -50,6 +50,8 @@ enum SessionAdapterFailure: Equatable {
     }
 }
 
+private struct SessionReadBusy: Error {}
+
 @MainActor
 final class SessionAdapter: ObservableObject {
     let holder: SessionHolder
@@ -71,10 +73,14 @@ final class SessionAdapter: ObservableObject {
     private var configuredOwner: BackendStorageOwner?
     private var configuredFence: BackendCallFence?
     private var version: UInt64 = 0
-    private var read: (id: UUID, task: Task<SessionState, any Error>)?
+    private var read: (id: UUID, starting: Bool, task: Task<SessionState, any Error>)?
+    private var readReservation: UUID?
+    private var interactiveOperations: Set<UUID> = []
+    private var getAnswers: UInt64 = 0
     private var upload: (id: UUID, task: Task<Void, any Error>)?
     private var discoveryStop: SessionHolder.Stop?
     private var retry: (id: UUID, task: Task<Void, Never>)?
+    private var activationRetry: (id: UUID, task: Task<Bool, Never>)?
     private var activityReconciled = false
     private var deletionSuspension: Task<Void, Never>?
     private var rejectedAuthorizationEpoch: UUID?
@@ -89,6 +95,8 @@ final class SessionAdapter: ObservableObject {
 
     func configure(_ backend: SessionBackendServices?) async {
         if self.backend !== backend {
+            cancelActivationRetry()
+            readReservation = nil; interactiveOperations.removeAll()
             cancellationPoll?.job.cancel(); cancellationPoll = nil
             retry?.task.cancel(); retry = nil
             read?.task.cancel(); read = nil
@@ -117,6 +125,8 @@ final class SessionAdapter: ObservableObject {
     }
 
     func invalidate() async {
+        cancelActivationRetry()
+        readReservation = nil; interactiveOperations.removeAll()
         activityReconciled = true
         cancellationPoll?.job.cancel(); cancellationPoll = nil
         retry?.task.cancel(); retry = nil
@@ -132,6 +142,7 @@ final class SessionAdapter: ObservableObject {
     func clearControlStartFailure() { controlStartFailure = nil; controlNeedsAccountRefresh = false }
 
     func suspendForDeletion() {
+        cancelActivationRetry()
         clearControlStartFailure()
         activities.end()
         cancellationPoll?.job.cancel(); cancellationPoll = nil
@@ -157,6 +168,10 @@ final class SessionAdapter: ObservableObject {
         controlNeedsAccountRefresh = false
         defer { controlStartInProgress = false }
         let epoch = account.sessionGeneration, fence = account.backendCallFence()
+        await waitForActivationRetry()
+        let operation = UUID()
+        interactiveOperations.insert(operation)
+        defer { interactiveOperations.remove(operation) }
         let state = await presentationState()
         guard fence.isCurrent(), epoch == account.sessionGeneration, !account.deletionSuspended else { return }
         guard !account.sessionChangeInProgress, state != .starting, state != .stopping else {
@@ -201,37 +216,67 @@ final class SessionAdapter: ObservableObject {
         })
     }
 
-    func foreground(refreshSession: Bool = false) async {
+    @discardableResult
+    func foreground(refreshSession: Bool = false) async -> Bool {
         let epoch = account.sessionGeneration
         await update()
         // Reachability and cancellation polls still retry only pending writes. A scene
         // activation uses S08's refresh path after account restoration/setup completes.
         if refreshSession {
-            guard case .signedIn = account.state, isOnline() else { return }
-            await retry?.task.value
+            return await refreshFromActivation(epoch: epoch)
         }
         guard epoch == account.sessionGeneration, let backend, backend.isCurrent, backend.epoch == epoch,
-              !account.sessionChangeInProgress, !account.deletionSuspended, retry == nil else { return }
-        if refreshSession {
-            guard case .signedIn = account.state else { return }
-        }
+              !account.sessionChangeInProgress, !account.deletionSuspended, retry == nil else { return false }
         let id = UUID()
         let task = Task { [weak self] in
             guard let self else { return }
             defer { if self.retry?.id == id { self.retry = nil } }
             do {
                 try Task.checkCancellation()
-                if refreshSession { _ = try await self.refresh(epoch: epoch) }
-                else { try await self.flushStop(backend) }
+                try await self.flushStop(backend)
             }
             catch {
-                // refresh already records the original service error before mapping it.
-                if !refreshSession { await self.handle(error, backend: backend, starting: false) }
+                await self.handle(error, backend: backend, starting: false)
             }
             await self.update()
         }
         retry = (id, task)
-        if refreshSession { await task.value }
+        return false
+    }
+
+    private func cancelActivationRetry() {
+        activationRetry?.task.cancel(); activationRetry = nil
+    }
+
+    private func waitForActivationRetry() async {
+        _ = await activationRetry?.task.value
+    }
+
+    private func refreshFromActivation(epoch: UUID) async -> Bool {
+        if let activationRetry { return await activationRetry.task.value }
+        guard case .signedIn = account.state, epoch == account.sessionGeneration, isOnline(),
+              let backend, backend.isCurrent, backend.epoch == epoch,
+              !account.sessionChangeInProgress, !account.deletionSuspended,
+              read == nil, readReservation == nil, interactiveOperations.isEmpty else { return false }
+        let id = UUID()
+        let task = Task { [weak self] in
+            guard let self else { return false }
+            defer { if self.activationRetry?.id == id { self.activationRetry = nil } }
+            // A pending write still precedes the get. Interactive reads wait for this
+            // task; Stop retains its separate, non-joining marker-check path.
+            await self.retry?.task.value
+            guard !Task.isCancelled, self.activationRetry?.id == id, self.backend === backend,
+                  backend.isCurrent, case .signedIn = self.account.state, self.isOnline(),
+                  !self.account.sessionChangeInProgress, !self.account.deletionSuspended,
+                  self.read == nil, self.readReservation == nil, self.interactiveOperations.isEmpty else { return false }
+            let answers = self.getAnswers
+            do { _ = try await self.refresh(epoch: epoch, fromActivation: true) }
+            catch { return false } // refresh records actual service failures, never a busy read slot.
+            return !Task.isCancelled && self.activationRetry?.id == id && self.backend === backend &&
+                backend.isCurrent && self.getAnswers != answers
+        }
+        activationRetry = (id, task)
+        return await task.value
     }
 
     func discoveryWillChange(enabled: Bool) async throws {
@@ -267,6 +312,7 @@ final class SessionAdapter: ObservableObject {
     /// Runs before the credential tombstone and runtime/storage cleanup. It does not retain
     /// outgoing credentials or wait for an outstanding start/get to drain.
     func prepareToDiscardSession() async {
+        cancelActivationRetry()
         cancellationPoll?.job.cancel(); cancellationPoll = nil
         guard account.hasCurrentSessionContext else { await invalidate(); return }
         guard let backend, backend.isCurrent else {
@@ -316,6 +362,7 @@ final class SessionAdapter: ObservableObject {
     func authorizationWillBeDiscarded() async {
         guard account.hasCurrentSessionContext,
               configuredEpoch == nil || account.sessionGeneration == configuredEpoch else { return }
+        cancelActivationRetry()
         cancellationPoll?.job.cancel(); cancellationPoll = nil
         retry?.task.cancel(); retry = nil
         // Keep the read alive until its caller observes the rejected credential
@@ -333,6 +380,10 @@ final class SessionAdapter: ObservableObject {
     }
 
     private func start(epoch: UUID) async throws -> SessionAcknowledgement {
+        await waitForActivationRetry()
+        let operation = UUID()
+        interactiveOperations.insert(operation)
+        defer { interactiveOperations.remove(operation) }
         clearControlStartFailure()
         let backend = try context(epoch: epoch)
         do {
@@ -352,7 +403,12 @@ final class SessionAdapter: ObservableObject {
         }
     }
 
-    private func refresh(epoch: UUID) async throws -> SessionState {
+    private func refresh(epoch: UUID, fromActivation: Bool = false) async throws -> SessionState {
+        if !fromActivation { await waitForActivationRetry() }
+        if fromActivation, read != nil || readReservation != nil || !interactiveOperations.isEmpty { throw SessionReadBusy() }
+        let operation = fromActivation ? nil : UUID()
+        if let operation { interactiveOperations.insert(operation) }
+        defer { if let operation { interactiveOperations.remove(operation) } }
         let backend = try context(epoch: epoch)
         do {
             if await holder.needsStopCheck(owner: backend.owner) {
@@ -364,6 +420,8 @@ final class SessionAdapter: ObservableObject {
             try await flushStop(backend)
             return try await fetch(backend, starting: false)
         } catch {
+            if fromActivation, error is SessionReadBusy || error is CancellationError ||
+                (Task.isCancelled && (error as? BackendError) != .notAuthenticated) { throw error }
             await handle(error, backend: backend, starting: false)
             if error is CancellationError { throw CancellationError() }
             throw Self.presentationFailure(error, offline: false).actionError
@@ -421,9 +479,16 @@ final class SessionAdapter: ObservableObject {
     }
 
     private func fetch(_ backend: SessionBackendServices, starting: Bool, outgoing: Bool = false) async throws -> SessionState {
-        guard read == nil else { throw SessionActionError.unavailable }
-        let request = try await holder.begin(owner: backend.owner, starting: starting)
+        guard read == nil, readReservation == nil else { throw SessionReadBusy() }
         let id = UUID()
+        // Reserve synchronously: holder.begin crosses actors before read's task exists.
+        readReservation = id
+        defer { if readReservation == id { readReservation = nil } }
+        let request = try await holder.begin(owner: backend.owner, starting: starting)
+        guard readReservation == id, self.backend === backend, backend.isCurrent else {
+            await holder.fail(request, offline: false)
+            throw SessionActionError.unavailable
+        }
         let task = Task {
             do {
                 guard await self.holder.isCurrent(request) else { throw SessionActionError.unavailable }
@@ -438,10 +503,12 @@ final class SessionAdapter: ObservableObject {
                 let response: SessionTransfer?
                 if starting { response = try await self.startWithTimeout(operation) }
                 else { response = try await operation() }
+                try Task.checkCancellation()
                 guard backend.isCurrent else { throw SessionActionError.unavailable }
                 guard try await self.holder.receive(response, for: request, acceptingActive: !outgoing) else {
                     throw SessionActionError.unavailable
                 }
+                if !starting { self.getAnswers &+= 1 }
                 self.activityReconciled = true
                 return await self.holder.snapshot().state
             } catch {
@@ -450,7 +517,8 @@ final class SessionAdapter: ObservableObject {
                 throw error
             }
         }
-        read = (id, task)
+        read = (id, starting, task)
+        readReservation = nil
         defer { if read?.id == id { read = nil } }
         await update()
         do {
@@ -500,20 +568,24 @@ final class SessionAdapter: ObservableObject {
     }
 
     private func flushStop(_ backend: SessionBackendServices) async throws {
-        if await holder.needsStopCheck(owner: backend.owner) {
+        let pendingStart = read?.starting == true ? read : nil
+        if await holder.needsStopCheck(owner: backend.owner), read?.starting != true {
             // A held marker check cannot authorize a stop or be joined here.
             // fetch's local read guard refuses it without touching authorization.
             _ = try await fetch(backend, starting: false)
         }
+        // A cancelled Start can fail and enter quarantine while its fetch is still
+        // publishing failure. Its existing ordered upload waits for that Start below;
+        // an in-flight Get is still refused immediately by fetch's read-slot guard.
         guard let stop = try await holder.pendingStop(owner: backend.owner) else { return }
-        if read == nil, !(await holder.canUploadStop(stop)) { return }
+        if read == nil, pendingStart == nil, !(await holder.canUploadStop(stop)) { return }
         if let upload {
             try await upload.task.value
             if self.upload?.id == upload.id { self.upload = nil }
             try await flushStop(backend)
             return
         }
-        let priorRead = read
+        let priorRead = read ?? pendingStart
         let id = UUID()
         let task = Task {
             // A stop after an in-flight start must reach the server after that start finishes.
