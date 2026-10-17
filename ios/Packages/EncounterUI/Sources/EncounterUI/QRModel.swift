@@ -78,11 +78,15 @@ public final class QRModel: ObservableObject {
 
     public func tick() async {
         if let code {
-            remainingSeconds = secondsLeft
+            let remaining = secondsLeft
+            if remaining != remainingSeconds { remainingSeconds = remaining }
             if remainingSeconds == 0 {
                 self.code = nil; issuedAt = nil; pendingCancellation = code
                 automaticReplacementPending = true
-                if segment == .show, !isRedeeming { error = automaticStopReason ?? .notFound }
+                if segment == .show, !isRedeeming {
+                    let failure = automaticStopReason ?? .notFound
+                    if error != failure { error = failure }
+                }
             }
         }
         guard visible, segment == .show, code == nil, !isIssuing, !isRedeeming, !hasConfirmed, automaticReplacementPending,

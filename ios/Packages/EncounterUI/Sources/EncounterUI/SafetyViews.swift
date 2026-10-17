@@ -4,17 +4,28 @@ import UIKit
 // Resolve the property wrapper instead of the SDK's compiler-plugin macro.
 typealias SafetyViewState<Value> = State<Value>
 
+private struct SafetyPagePushedKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var safetyPageIsPushed: Bool {
+        get { self[SafetyPagePushedKey.self] }
+        set { self[SafetyPagePushedKey.self] = newValue }
+    }
+}
+
 @MainActor
 struct SafetyPage<Content: View>: View {
     let title: String
     @ViewBuilder let content: Content
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) { content }
-                .padding().frame(maxWidth: 680, alignment: .leading).frame(maxWidth: .infinity)
+        EncounterScreen {
+            VStack(alignment: .leading, spacing: 24) { content }
+                .frame(maxWidth: 640, alignment: .leading)
+                .frame(maxWidth: .infinity)
         }
-        .background(Color(uiColor: .systemGroupedBackground))
-        .navigationTitle(title).navigationBarTitleDisplayMode(.large).tint(.teal)
+        .navigationTitle(title).navigationBarTitleDisplayMode(.large)
     }
 }
 
@@ -29,9 +40,8 @@ struct SafetyFailure: View {
             SettingsErrorPresentation.message(error, screen: .visibility, discoveryOn: false))
     }
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(message).foregroundStyle(.red)
-            Button(SettingsStrings.text(.retry)) { Task { await retry() } }.disabled(disabled)
+        EncounterInlineError(message: message, retryLabel: SettingsStrings.text(.retry), disabled: disabled) {
+            Task { await retry() }
         }.accessibilityElement(children: .contain)
     }
 }
@@ -40,34 +50,44 @@ struct SafetyFailure: View {
 public struct SafetyBlockedUsersView: View {
     @ObservedObject private var model: SafetyBlockedModel
     @Environment(\.locale) private var locale
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @SafetyViewState private var selectedBlock: SafetyBlock?
     public init(model: SafetyBlockedModel) { self.model = model }
     public var body: some View {
         SafetyPage(title: SafetyStrings.text(.blockedUsers)) {
-            if model.isBusy { ProgressView(SettingsStrings.text(.loading)) }
+            if model.isBusy { EncounterProgress(SettingsStrings.text(.loading)) }
             if let list = model.list {
                 if list.blocks.isEmpty { Text(SafetyStrings.text(.empty)) }
                 ForEach(list.blocks) { block in
                     OnboardingCard {
-                        Text(block.id).font(.body).textSelection(.enabled)
-                        Text(block.placedDay.formatted(locale: locale)).foregroundStyle(.secondary)
-                        Button(SafetyStrings.text(.unblock)) { selectedBlock = block }
-                            .disabled(model.isBusy)
-                            .accessibilityLabel(SettingsStrings.labelStatus(SafetyStrings.text(.unblock), block.id))
+                        let layout = dynamicTypeSize.isAccessibilitySize ?
+                            AnyLayout(VStackLayout(alignment: .leading, spacing: 16)) :
+                            AnyLayout(HStackLayout(alignment: .top, spacing: 16))
+                        layout {
+                            EncounterSymbolTile(symbol: "nosign")
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(block.id).font(.body).textSelection(.enabled)
+                                Text(block.placedDay.formatted(locale: locale)).font(.caption).foregroundStyle(EncounterPalette.inkSecondary)
+                            }.frame(maxWidth: .infinity, alignment: .leading)
+                            Button(SafetyStrings.text(.unblock)) { selectedBlock = block }
+                                .buttonStyle(EncounterButtonStyle(.secondary, fullWidth: false)).disabled(model.isBusy)
+                                .accessibilityLabel(SettingsStrings.labelStatus(SafetyStrings.text(.unblock), block.id))
+                        }
                     }
                 }
-                if list.truncated { Text(SafetyStrings.text(.limitedList)).foregroundStyle(.secondary) }
+                if list.truncated { Text(SafetyStrings.text(.limitedList)).foregroundStyle(EncounterPalette.inkSecondary) }
             }
             if let error = model.error {
                 SafetyFailure(error: error, fallback: model.failedBlockID == nil ? .listError : .saveError,
                               disabled: model.isBusy) { await model.retry() }
             }
-            Text(SafetyStrings.text(.notRestored)).foregroundStyle(.secondary)
+            Text(SafetyStrings.text(.notRestored)).font(.footnote).foregroundStyle(EncounterPalette.inkSecondary)
         }
         .navigationBarBackButtonHidden(true)
+        .environment(\.safetyPageIsPushed, true)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
-                Button(SettingsStrings.text(.back)) { model.back() }.disabled(model.isBusy)
+                EncounterBackButton(label: SettingsStrings.text(.back)) { model.back() }.disabled(model.isBusy)
             }
         }
         .interactiveDismissDisabled(model.isBusy)
@@ -94,33 +114,35 @@ public struct SafetyReportSheet: View {
             SafetyPage(title: SafetyStrings.text(.reportOrBlock)) {
                 if model.acceptedReport != nil {
                     OnboardingCard {
+                        Image(systemName: "checkmark.circle.fill").font(.title).foregroundStyle(EncounterPalette.accent).accessibilityHidden(true)
                         Text(SafetyStrings.text(.submitted)).font(.headline)
-                        Text(SafetyStrings.text(.acceptedHidden)).foregroundStyle(.secondary)
+                        Text(SafetyStrings.text(.acceptedHidden)).font(.footnote).foregroundStyle(EncounterPalette.inkSecondary)
                     }
                 } else {
                     reportForm
                 }
-                if model.isBusy { ProgressView(SettingsStrings.text(.loading)) }
-                if model.isPendingHide { Text(SafetyStrings.text(.pending)).foregroundStyle(.secondary) }
+                if model.isBusy { EncounterProgress(SettingsStrings.text(.loading)) }
+                if model.isPendingHide { Text(SafetyStrings.text(.pending)).font(.footnote).foregroundStyle(EncounterPalette.inkSecondary) }
                 if model.isBlockUnavailable {
-                    Text(SafetyStrings.text(.blockUnavailable)).foregroundStyle(.secondary)
+                    Text(SafetyStrings.text(.blockUnavailable)).font(.footnote).foregroundStyle(EncounterPalette.inkSecondary)
                 } else if let error = model.error {
                     SafetyFailure(error: error, disabled: model.isBusy) { await model.retry() }
                 }
                 Button(SafetyStrings.text(model.acceptedReport == nil ? .block : .blockAlso), role: .destructive) {
                     confirmsBlock = true
-                }.disabled(!model.canBlock)
-                Text(SafetyStrings.text(.blockExplanation)).foregroundStyle(.secondary)
-                Text(SafetyStrings.text(.review)).font(.callout).foregroundStyle(.secondary)
+                }.buttonStyle(EncounterButtonStyle(.destructive)).disabled(!model.canBlock)
+                Text(SafetyStrings.text(.blockExplanation)).font(.footnote).foregroundStyle(EncounterPalette.inkSecondary)
+                Text(SafetyStrings.text(.review)).font(.callout).foregroundStyle(EncounterPalette.inkSecondary)
                 if model.acceptedReport != nil {
                     Button(SafetyStrings.text(.done)) { model.done() }
-                        .buttonStyle(.borderedProminent).disabled(model.isBusy)
+                        .buttonStyle(EncounterButtonStyle(.primary)).disabled(model.isBusy)
                 }
             }
             .toolbar {
                 if model.acceptedReport == nil {
                     ToolbarItem(placement: .topBarLeading) {
-                        Button(SettingsStrings.text(.cancel)) { Task { await model.cancel() } }.disabled(model.isBusy)
+                        Button(SettingsStrings.text(.cancel)) { Task { await model.cancel() } }
+                            .disabled(model.isBusy)
                     }
                 }
             }
@@ -137,16 +159,16 @@ public struct SafetyReportSheet: View {
         OnboardingCard {
             Text(SafetyStrings.text(.reason)).font(.headline).accessibilityAddTraits(.isHeader)
             ForEach(SafetyReportReason.allCases, id: \.self) { reason in
-                SelectionControl(label: SafetyStrings.text(reason.stringKey), selected: model.reason == reason) {
+                EncounterRadioRow(label: SafetyStrings.text(reason.stringKey), selected: model.reason == reason) {
                     model.reason = reason
                 }.disabled(model.state != .idle || model.isBusy)
             }
             if model.reason == .impersonation && model.link == nil {
-                Text(SafetyStrings.text(.impersonationGuidance)).foregroundStyle(.secondary)
+                Text(SafetyStrings.text(.impersonationGuidance)).font(.footnote).foregroundStyle(EncounterPalette.inkSecondary)
             }
             Button(SafetyStrings.text(.submit)) { Task { await model.submit() } }
-                .buttonStyle(.borderedProminent).disabled(!model.canSubmit)
-            Text(SafetyStrings.text(.hidden)).foregroundStyle(.secondary)
+                .buttonStyle(EncounterButtonStyle(.primary)).disabled(!model.canSubmit)
+            Text(SafetyStrings.text(.hidden)).font(.footnote).foregroundStyle(EncounterPalette.inkSecondary)
         }
     }
 }

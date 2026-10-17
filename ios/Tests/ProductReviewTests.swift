@@ -13,6 +13,36 @@ import XCTest
 
 @MainActor
 final class ProductReviewTests: XCTestCase {
+    func testHostedTabBarUsesEncounterTitlesSymbolsTagsAndAccent() async throws {
+        let navigation = ProductNavigationModel()
+        let lifecycle = ProductSceneLifecycle(phase: .active, notifications: NotificationCenter())
+        let container = ProductTabContainer(navigation: navigation, lifecycle: lifecycle,
+            discover: Text("Discover"), profile: Text("Profile"), settings: Text("Settings"))
+        let host = UIHostingController(rootView: container)
+        let window = UIWindow(windowScene: try appBackendWindowScene())
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil }
+        try await appBackendEventually {
+            reviewPump(window)
+            return host.children.contains { $0 is UITabBarController }
+        }
+        let tabs = try XCTUnwrap(host.children.first(where: { $0 is UITabBarController }) as? UITabBarController)
+        let items = try XCTUnwrap(tabs.tabBar.items)
+        XCTAssertEqual(items.count, 3)
+        XCTAssertEqual(items.map(\.title), ["discoverTab", "profileTab", "settingsTab"].map { AccountStrings.text($0) })
+        for (item, key) in zip(items, ["discoverTab", "profileTab", "settingsTab"]) {
+            XCTAssertNotEqual(item.title, key)
+        }
+        XCTAssertEqual(items.map(\.tag), [0, 1, 2])
+        for (item, symbol) in zip(items, ["magnifyingglass", "person", "gearshape"]) {
+            XCTAssertEqual(item.image, try XCTUnwrap(UIImage(systemName: symbol)), symbol)
+        }
+        for (item, symbol) in zip(items.dropFirst(), ["person.fill", "gearshape.fill"]) {
+            XCTAssertEqual(item.selectedImage, try XCTUnwrap(UIImage(systemName: symbol)), symbol)
+        }
+        XCTAssertEqual(tabs.tabBar.tintColor, EncounterPalette.accentUIColor)
+    }
+
     func testDiscoverStatesAndSessionRoutesFollowTheContracts() {
         XCTAssertEqual(ProductDiscoverState.bluetoothStatus(permission: .notRequested, requested: false), .failed)
         XCTAssertEqual(ProductDiscoverState.bluetoothStatus(permission: .notRequested, requested: true), .checking)
@@ -203,6 +233,7 @@ final class ProductReviewTests: XCTestCase {
         var new = productCard(); new["kind"] = "qr"
         new["day"] = reviewToday()
         let transport = productTransport([
+            "get_own_session": [.response(productResponse(NSNull()))], // Active scenes reconcile on activation.
             "get_encounter_feed": [.response(productResponse(["cards": [old], "truncated": false])),
                 .response(productResponse(["cards": [new, old], "truncated": false]))],
             "issue_qr_code": [.response(productResponse(["code": String(repeating: "a", count: 32), "expires_at": 1120]))],
@@ -274,6 +305,7 @@ final class ProductReviewTests: XCTestCase {
         let receipt = appBackendFinalReceipt()
         let resolved = HTTPResponse(data: try JSONEncoder().encode([ReceiptStatusTransfer(id: receipt.id, status: .resolved)]), statusCode: 200)
         let transport = productTransport(["get_encounter_feed": [.response(empty), .response(productFeed()), .response(productFeed())],
+            "get_own_session": [.response(productResponse(NSNull()))], // Active scene's initial reconciliation.
             "submit_receipts": [.response(resolved)]])
         let composition = try productComposition(transport, clock: clock, confirmationScheduler: scheduler, lifecycle: lifecycle, queue: queue)
         await composition.waitForRestoration(); productAuthorize(composition)
@@ -306,6 +338,7 @@ final class ProductReviewTests: XCTestCase {
         let empty = productResponse(["cards": [], "truncated": false])
         var card = productCard(); card["kind"] = "qr"; card["day"] = reviewToday()
         let transport = productTransport([
+            "get_own_session": [.response(productResponse(NSNull()))], // Active scene's initial reconciliation.
             "get_encounter_feed": [.response(empty), .response(empty),
                 .response(productResponse(["cards": [card], "truncated": false]))],
             "issue_qr_code": [.response(productResponse(["code": String(repeating: "a", count: 32), "expires_at": 1120])),
@@ -354,6 +387,7 @@ final class ProductReviewTests: XCTestCase {
             let scheduler = ManualReceiptUploadScheduler()
             let empty = productResponse(["cards": [], "truncated": false])
             let transport = productTransport([
+                "get_own_session": [.response(productResponse(NSNull()))], // Active scene's initial reconciliation.
                 "delete_own_account": [.failure],
                 "get_own_profile": [.response(appOwnProfileResponse(reviewEnabledProfile()))],
                 "get_encounter_feed": [.response(empty), .response(empty)],

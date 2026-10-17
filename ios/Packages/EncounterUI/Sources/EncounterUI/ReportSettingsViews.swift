@@ -17,9 +17,10 @@ public struct ReportSettingsView: View {
                 OnboardingCard {
                     DatePicker(ReportSettingsStrings.text(.time), selection: timeBinding, displayedComponents: .hourAndMinute)
                         .environment(\.timeZone, TimeZone(secondsFromGMT: 0)!)
+                        .tint(EncounterPalette.accent)
                         .disabled(model.isBusy)
-                    Text(ReportSettingsStrings.text(.localTime)).foregroundStyle(.secondary)
-                    if !model.time.isValid { Text(ReportSettingsStrings.text(.invalidTime)).foregroundStyle(.red) }
+                    Text(ReportSettingsStrings.text(.localTime)).font(.caption).foregroundStyle(EncounterPalette.inkSecondary)
+                    if !model.time.isValid { Text(ReportSettingsStrings.text(.invalidTime)).foregroundStyle(EncounterPalette.destructive) }
                 }
                 if showsNotificationControls {
                     OnboardingCard {
@@ -27,34 +28,36 @@ public struct ReportSettingsView: View {
                             Toggle(ReportSettingsStrings.text(.notifications), isOn: Binding(
                                 get: { model.data?.notificationsEnabled == true },
                                 set: { enabled in Task { await model.setNotifications(enabled) } }))
-                                .disabled(model.isBusy)
+                                .tint(EncounterPalette.accent).disabled(model.isBusy)
                         }
                         Text(ReportSettingsStrings.text(model.pushAvailable ? model.permission.stringKey : .noPush))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(EncounterPalette.inkSecondary)
                         if model.pushAvailable, model.permission == .denied {
                             Button(ReportSettingsStrings.text(.systemSettings), action: model.navigation.systemSettings)
+                                .buttonStyle(EncounterButtonStyle(.secondary))
                         }
-                        Text(ReportSettingsStrings.text(.names)).font(.callout).foregroundStyle(.secondary)
+                        Text(ReportSettingsStrings.text(.names)).font(.callout).foregroundStyle(EncounterPalette.inkSecondary)
                     }
-                } else { Text(ReportSettingsStrings.text(.noPush)).foregroundStyle(.secondary) }
-                Text(ReportSettingsStrings.text(.ambient))
-                Text(ReportSettingsStrings.text(.inApp)).foregroundStyle(.secondary)
-                Text(ReportSettingsStrings.text(.noReport)).foregroundStyle(.secondary)
-                Text(ReportSettingsStrings.text(.waiting)).font(.callout).foregroundStyle(.secondary)
+                } else { Text(ReportSettingsStrings.text(.noPush)).font(.caption).foregroundStyle(EncounterPalette.inkSecondary) }
+                Text(ReportSettingsStrings.text(.ambient)).font(.caption)
+                Text(ReportSettingsStrings.text(.inApp)).font(.caption).foregroundStyle(EncounterPalette.inkSecondary)
+                Text(ReportSettingsStrings.text(.noReport)).font(.caption).foregroundStyle(EncounterPalette.inkSecondary)
+                Text(ReportSettingsStrings.text(.waiting)).font(.callout).foregroundStyle(EncounterPalette.inkSecondary)
                 Button(ReportSettingsStrings.text(.saveTime)) { Task { await model.save() } }
-                    .buttonStyle(.borderedProminent).disabled(!model.canSave)
+                    .buttonStyle(EncounterButtonStyle(.primary)).disabled(!model.canSave)
             }
-            if model.isBusy { ProgressView(SettingsStrings.text(.loading)) }
+            if model.isBusy { EncounterProgress(SettingsStrings.text(.loading)) }
             if let error = model.error {
                 SafetyFailure(error: error, fallback: model.failedOperation == .load ? .listError : .saveError,
                               disabled: model.isBusy) { await model.retry() }
             }
-            if model.savedTime { Text(ReportSettingsStrings.text(.saved)).foregroundStyle(.secondary) }
+            if model.savedTime { EncounterNotice(ReportSettingsStrings.text(.saved)) }
         }
         .navigationBarBackButtonHidden(true).interactiveDismissDisabled(model.isBusy)
+        .environment(\.safetyPageIsPushed, true)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
-                Button(SettingsStrings.text(.back)) {
+                EncounterBackButton(label: SettingsStrings.text(.back)) {
                     if let data = model.data, model.time != data.time { confirmsDiscard = true }
                     else { model.back() }
                 }.disabled(model.isBusy)

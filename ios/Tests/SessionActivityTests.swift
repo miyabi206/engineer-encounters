@@ -561,6 +561,10 @@ private func surfaceComposition(_ transport: any HTTPTransport,
         serverTokenStore: InMemoryTokenBatchStore(), signedOutTokenStore: InMemoryTokenBatchStore(),
         queueOpener: { InMemoryReceiptQueue() }, transportFactory: {
             await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)
-        }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(), now: { appBackendTestNow },
-        sessionIsOnline: online, activityController: controller ?? RecordingSessionActivityController())
+        }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(),
+        // Surface tests drive their own reads; activation is covered by SessionRelaunchTests.
+        productLifecycle: ProductSceneLifecycle(phase: .background, notifications: NotificationCenter()),
+        now: { appBackendTestNow },
+        sessionIsOnline: online, sessionNetwork: SessionNetworkAvailability(monitorsSystemPath: false),
+        activityController: controller ?? RecordingSessionActivityController())
 }

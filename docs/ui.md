@@ -1,9 +1,9 @@
 # User interface — Engineer Encounters
 
-**Version:** 0.6\
+**Version:** 0.9\
 **Status:** Built Units 1–5 interface recorded; later surfaces and open items labelled\
-**Date:** 2026-10-14\
-**Related:** `decisions.md` v0.8, `specification.md` v0.8, `design.md` v0.8\
+**Date:** 2026-10-17\
+**Related:** `decisions.md` v0.8, `specification.md` v0.8, `design.md` v0.11\
 **Platforms:** iOS first, Android later\
 **Languages:** Japanese, English
 
@@ -11,9 +11,11 @@
 
 The public names are **すれちがいエンジニア** and **Engineer Encounters**. Japanese comes first. The interface helps people read another engineer's work without an obligation to talk. Version 1 is free, with no ads or purchases.
 
-`decisions.md`, **User interface**, fixes the screen identifiers and visual direction. Its other product decisions take precedence over `specification.md` v0.8. This document follows `design.md` v0.8 for implementation rules, naming the relevant sections below. **DEFAULT** choices are collected in **Defaults chosen during drafting**; unresolved choices are in **Open items**.
+`decisions.md`, **User interface**, fixes the screen identifiers and visual direction. Its other product decisions take precedence over `specification.md` v0.8. This document follows `design.md` v0.11 for implementation rules, naming the relevant sections below. **DEFAULT** choices are collected in **Defaults chosen during drafting**; unresolved choices are in **Open items**.
 
 Use standard iOS components, light and dark modes, and Dynamic Type. Keep the concept's teal accent, rounded cards, large titles and short subtitles. The light appearance uses an off-white background, dark navy text, white cards and thin borders. In dark appearance, use system dark surfaces and readable text. Teal marks primary actions, selected pills and links. Destructive actions use the standard destructive style. Text wraps and layouts scroll at large text sizes. Icons always have accessible names; color alone never communicates a state.
+
+**FACT — UI restyle, 2026-10-15:** every screen, the tab bar, the Live Activity and the app icon use the shared EncounterUI design system in `ios/Packages/EncounterUI/Sources/EncounterUI/EncounterDesign.swift`. `EncounterPalette` provides light, dark and high-contrast tokens: accent `#13777B` / `#5CC8C2`, high-contrast accent `#0B6064` / `#87E3DD`; light ink `#0E1A2B`, background `#F6F8F9`, white surfaces with `#E3E7EC` borders and destructive `#C62828`. Shared components include `EncounterScreen`, `EncounterSurfaceCard`, `EncounterButtonStyle`, chips, flow layout, check and radio rows, badges, avatars, icon rows, notices, segmented control, fields, stepper and the drawn two-person `EncounterMark`. `DesignTokenTests` checks WCAG contrast. Content width is capped at about 640 pt; side-by-side controls stack and capped panels scroll at accessibility sizes. The extension mirrors the accent values without linking EncounterUI.
 
 The following rules apply to every screen, sketch, card and external surface:
 
@@ -118,18 +120,18 @@ This document governs. Where a mockup differs from the purpose, elements, states
 
 | Screen | Mockup | Known differences (not exhaustive) |
 |---|---|---|
-| S01 Welcome and sign-in | [s01-welcome-sign-in.png](images/s01-welcome-sign-in.png) | None recorded. |
+| S01 Welcome and sign-in | [s01-welcome-sign-in.png](images/s01-welcome-sign-in.png) | The built screen shows the other public name only in the Japanese interface. |
 | S02 Profile basics | [s02-profile-basics.png](images/s02-profile-basics.png) | None recorded. |
 | S03 Interests and purposes | [s03-interests-purposes.png](images/s03-interests-purposes.png) | None recorded. |
-| S04 First link | [s04-first-link.png](images/s04-first-link.png) | The identity warning is shortened. |
+| S04 First link | [s04-first-link.png](images/s04-first-link.png) | The identity warning is shortened. Built source tiles use SF Symbols, with no third-party logos. |
 | S05 Permissions and turning discovery on | [s05-permissions-discovery-on.png](images/s05-permissions-discovery-on.png) | The explanatory sentences are shortened. |
-| S06 Feed | [s06-feed.png](images/s06-feed.png) | The あなたの興味 row starts with a selected すべて chip; the row lists the user's own interests and is not a filter. The background-discovery note is not drawn. |
-| S07 Encounter detail | [s07-encounter-detail.png](images/s07-encounter-detail.png) | One chip under 共通点 is drawn as unselected; every chip there is a shared item. |
-| S08 Active session | [s08-active-session.png](images/s08-active-session.png) | The explanatory line says encounters appear immediately; the two session rules in S08 apply instead. |
+| S06 Feed | [s06-feed.png](images/s06-feed.png) | The built status capsule is below the subtitle. The own-interest row has no すべて chip or filter; Favorites is a chip button. The background-discovery note is not drawn in the mockup. |
+| S07 Encounter detail | [s07-encounter-detail.png](images/s07-encounter-detail.png) | One chip under 共通点 is drawn as unselected; every chip there is a shared item. Built safety and Delete encounter controls are side-by-side destructive text actions. |
+| S08 Active session | [s08-active-session.png](images/s08-active-session.png) | The explanatory line says encounters appear immediately; the two session rules in S08 apply instead. The built screen has no participant count and uses filled accent styling for Stop session. |
 | S09 QR exchange | [s09-qr-exchange.png](images/s09-qr-exchange.png) | None recorded. |
-| S10 Favorites, 相手 segment | [s10-favorites.png](images/s10-favorites.png) | Cards are not grouped by day. A 最近保存したリンク block is drawn under this segment; saved links belong only to the other segment. |
+| S10 Favorites, 相手 segment | [s10-favorites.png](images/s10-favorites.png) | The built screen keeps day groups and omits the mockup's 最近保存したリンク block; saved links belong only to the other segment. |
 | S10 Favorites, 保存したリンク segment | [s10-favorites-saved-links.png](images/s10-favorites-saved-links.png) | None recorded. |
-| S13 Links list | [s13-links-list.png](images/s13-links-list.png) | None recorded. |
+| S13 Links list | [s13-links-list.png](images/s13-links-list.png) | Built source tiles use SF Symbols, with no third-party logos; reorder arrows are in the action row. |
 | S16 Discovery and matching | [s16-discovery-matching.png](images/s16-discovery-matching.png) | None recorded. |
 | Settings list | [settings-list.png](images/settings-list.png) | None recorded. |
 
@@ -424,6 +426,10 @@ Revealed session encounters [cards, day only]
 **Elements:** Own-session status and remaining duration, two-hour limit, stop control, QR and confirmed/revealed session cards. No participant presence indicators or pending ambient results. Starting a session does not disable ambient or QR discovery. Follow `design.md`, **iOS app structure**: a new session becomes active only after server acknowledgement. An offline user may finish an already-started session, but cannot start a new one. Stop immediately clears the local session flag and queues the server stop, including while offline.
 
 **States:** Empty: an active session can have no revealed session encounters; use calm guidance. Loading: starting progress, with no active claim before server acknowledgement; a queued stop never keeps the local session active. Every session scene observes the shared holder. Cancellation of an unacknowledged start presents stopping and refuses new starts/control actions under `design.md`, **Sessions**; an outstanding marker check refuses another stop immediately without signing out. Error: failed/offline start → Retry on S08; failed stop upload → show Session ended with retry status, retaining the queued stop; unmet discovery/Bluetooth conditions → S24/S23. On expiry, show Session ended and a return action. The timer is session duration, never an encounter clock.
+
+**FACT — device session-start freeze, 2026-10-15/16:** the countdown `TimelineView` rescheduled on every render while `tick()` published unchanged values, causing an endless render loop before `start_session` was sent. The same issue affected S09. Fixed in `5a18338` and covered by `SessionTimelineRegressionTests`.
+
+**FACT — `c8859bf`, relaunch session refresh:** after a relaunch, the app shows a running session with View session and Stop without opening S08 first. The activation read and its retry/waiting rules follow `design.md`, **Sessions** and **iOS client and navigation**; device verification is recorded under **Open items and risks**, **Integration environments**.
 
 **Actions:** Successful start stays on S08. Stop ends the session → S06; expiry's Done → S06. QR → S09. A revealed card → S07. Back → S06 while the session continues. Retry → S08. **DEFAULT:** starting has no extra confirmation; stopping is immediate locally, queues the server stop and does not start another session. Never restore the active local flag because a stop upload failed.
 
@@ -1190,6 +1196,8 @@ There are no weekly or immediate ambient notifications in Release. The S22 demo 
 
 **FACT:** the built extension displays the user's own active session for up to 2 hours, with their own display name, Session active, remaining time and Stop session. App-process intents own both start and stop; no extension credential/card store exists. A compact presentation shows the status and remaining duration. Never show another person's name, encounter counts, card, encounter time or place.
 
+**FACT — restyle:** the Live Activity uses an accent tile, monospaced countdown and Stop on the status row, stacking at accessibility sizes. Dynamic Type is capped at `accessibility1`, and the environment chooses the accent. **FACT, 2026-10-16/17:** Lock Screen and Dynamic Island appearance was verified on the iPhone 15; the Lock Screen Stop label wraps to two lines. See `design.md`, **Integration environments**, for device evidence.
+
 ```text
 Engineer Encounters · Session active
 Time remaining 1:25:00                 [Stop session]
@@ -1243,7 +1251,11 @@ See `proposal.pdf`, pages 3–5, and `decisions.md`, **User interface**. Keep th
 | Source feed-card default | Display name, shared interests, first authorized link, per-link verification, kind and day. Omit unauthorized/absent fields rather than inventing replacements. |
 | Source safety and retention defaults | Four report reasons; one dismissible on-device sample; saved links follow favorites and vanish when their encounter is removed; development and internal diagnostics kept 7 days (`design.md`, **Retention and deletion contract**). |
 | Wording and order | Built S01/S02/S03/S05/S12/S16/S17/S22 labels are app strings except the explicitly omitted sketch content; remaining bilingual labels, subtitles, examples, control order and sketches are drafting wording. Keep English sentence case, concise natural Japanese and locale-formatted days. Proper names retain their spelling. |
-| Appearance and accessibility | Off-white/navy/white light palette, adaptive system dark surfaces, thin rounded borders, system symbols, semantic destructive color, visible labels and accessible icon names, wrapping/scrolling for Dynamic Type. No exact custom font sizes are fixed. |
+| Appearance and accessibility | **FACT:** shared `EncounterPalette` tokens: accent `#13777B` / `#5CC8C2`, high contrast `#0B6064` / `#87E3DD`; light ink `#0E1A2B`, background `#F6F8F9`, white surfaces, `#E3E7EC` borders and destructive `#C62828`; adaptive system dark surfaces. `DesignTokenTests` checks WCAG contrast. Content width is capped at about 640 pt; controls stack and capped panels scroll at accessibility sizes. Keep visible labels, accessible icon names and wrapping for Dynamic Type; colour alone never conveys state. |
+| Icons | System symbols chosen like the mockups, but non-binding: tab bar `magnifyingglass` / `person` / `gearshape`; Settings list `person.2.fill` / `globe` / `chart.bar.fill` / `nosign` / `person.fill` / `questionmark.circle` / `stethoscope`; link sources use symbol tiles. |
+| Stop session styling | Filled accent because stopping deletes nothing and the session can be restarted. |
+| App icon | **FACT:** two-person mark on a teal gradient, with dark and tinted variants, rendered reproducibly by `ios/Scripts/render-app-icon.swift`; the `AccentColor` asset includes high-contrast entries. |
+| S01 second public name | Show the other public name only in the Japanese interface. |
 | Navigation | Independent tab stacks, pushed details/editors, S26 sheet, shared-state panels in Discover, no tab bar during onboarding. Preserve form values when returning from a subflow. Resume incomplete onboarding. |
 | Forms | Inline field errors, neutral progress, disable duplicate writes, explicit saves, retained input on failure. Save buttons require required fields; unsaved edits prompt before discarding. Source-reader failure is not successful import. |
 | Purposes | No preselection; require at least one purpose during onboarding and subsequent edits. Users may select both supported purposes. This requirement does not add a fifth discovery prerequisite. |
@@ -1268,7 +1280,9 @@ See `proposal.pdf`, pages 3–5, and `decisions.md`, **User interface**. Keep th
 
 ## Open items
 
-- **Units 4/5 — remaining work:** owner/API inputs, accepted limitations, production prerequisites and never-verified app/device/hosted/OAuth gates are listed once in `design.md`, **Open items and risks**. The completed app/server fixes and cancellation policy are in **Unit 4 and 5 contract**; review verdicts, the final tester pass and independent-review limits are in **Security requirements** / **Automatic checks**.
+- **UI restyle — remaining low items:** `EncounterMark` as the product mark needs owner confirmation; the Live Activity 160 pt limit remains unverified on a device, and the Lock Screen Stop label wraps to two lines; no test ties the extension's copied accent values to `EncounterPalette`; the S10 saved-links segment and app-level surfaces (account root states, Links screen GitHub card, app S20 and deletion recovery, revealed session rows, and the S23 panel above the feed) are absent from the screenshot gallery; the encounter action row uses a fixed -8 pt padding offset with no layout test; `destructiveText` keeps the 52 pt minimum height.
+
+- **Units 4/5 — remaining work:** owner/API inputs, accepted limitations, production prerequisites and remaining app/device/hosted/OAuth gates are listed once in `design.md`, **Open items and risks**. The completed app/server fixes and cancellation policy are in **Unit 4 and 5 contract**; review verdicts, the final tester pass and independent-review limits are in **Security requirements** / **Automatic checks**.
 
 - **Owner — interests and threshold:** supply the real curated interest list and threshold range; the retained scope decision fixes interim values.
 - **Owner — token prerequisite:** revisit requiring discovery once onboarding/link flows exist; see S01's retained account decision.

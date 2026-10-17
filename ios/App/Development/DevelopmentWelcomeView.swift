@@ -20,7 +20,7 @@ struct DevelopmentWelcomeView<Trailing: View>: View {
     var body: some View {
         WelcomeView(declarations: $declarations, isSigningIn: isSigningIn, error: error,
             onRetry: signIn, signIn: {
-                Button(account.temporarySignInTitle, action: signIn).buttonStyle(.borderedProminent)
+                Button(account.temporarySignInTitle, action: signIn).buttonStyle(EncounterButtonStyle(.primary))
             }, trailing: { trailing })
     }
 

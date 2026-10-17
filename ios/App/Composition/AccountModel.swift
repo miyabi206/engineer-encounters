@@ -80,7 +80,7 @@ final class AccountModel: ObservableObject {
     let onboardingCompletion: OnboardingCompletionStore
     var sessionGeneration: UUID { generation }
     private let timeZone: @MainActor () -> String
-    private var registeredTimeZone: String?
+    private let registeredTimeZones: RegisteredTimeZoneStore
     private(set) var sessionChangeInProgress = false
     private(set) var discardingSession = false
     private var localCleanupFailed = false
@@ -113,6 +113,7 @@ final class AccountModel: ObservableObject {
         sessionCleanupFailed = self.cleanup.isPending
         self.timeZone = timeZone
         onboardingCompletion = OnboardingCompletionStore(defaults: defaults)
+        registeredTimeZones = RegisteredTimeZoneStore(defaults: defaults)
         state = sessions == nil ? .unavailable : .restoring
     }
 
@@ -139,7 +140,7 @@ final class AccountModel: ObservableObject {
                     await authorizationWillBeDiscarded()
                     guard epoch == generation, hasCurrentSessionContext else { return }
                     invalidateRefresh()
-                    registeredTimeZone = nil
+                    registeredTimeZones.clear()
                     pendingDeclarations = nil
                     onboardingCompletion.clear()
                 }
@@ -227,7 +228,7 @@ final class AccountModel: ObservableObject {
             self.accountWasDeleted = false
             self.sessions = newSessions
             self.service = serviceFactory(newSessions)
-            self.registeredTimeZone = nil
+            self.registeredTimeZones.clear()
             self.pendingDeclarations = Declarations(age18: isAdult, terms: termsVersion, privacy: privacyVersion)
             self.state = .signedInPending(session.userID)
             // Recreate/start before either of the account setup requests.
@@ -236,7 +237,7 @@ final class AccountModel: ObservableObject {
         }
         guard let epoch = establishedGeneration else { return }
         do {
-            try await finishAccountSetup(epoch: epoch)
+            try await finishAccountSetup(epoch: epoch, account: session.userID)
             guard epoch == generation, hasCurrentSessionContext else { throw BackendError.notAuthenticated }
             state = .signedIn(session.userID)
             if storageFailed { throw BackendError.storageFailure }
@@ -278,7 +279,7 @@ final class AccountModel: ObservableObject {
             guard self.hasCurrentSessionContext else { throw BackendError.notAuthenticated }
             if self.localCleanupFailed { try? self.cleanup.begin() }
             self.sessionCleanupFailed = self.cleanup.isPending
-            self.registeredTimeZone = nil
+            self.registeredTimeZones.clear()
             self.pendingDeclarations = nil
             self.onboardingCompletion.clear()
             self.profile = nil
@@ -322,7 +323,7 @@ final class AccountModel: ObservableObject {
                     await self.sessionDidChange(true)
                     guard epoch == self.generation else { return }
                 }
-                try await self.finishAccountSetup(epoch: epoch)
+                try await self.finishAccountSetup(epoch: epoch, account: session.userID)
                 guard epoch == self.generation else { return }
                 self.state = .signedIn(session.userID)
             } catch is CancellationError {
@@ -343,7 +344,7 @@ final class AccountModel: ObservableObject {
         if refreshTask?.id == id { refreshTask = nil }
     }
 
-    private func finishAccountSetup(epoch: UUID) async throws {
+    private func finishAccountSetup(epoch: UUID, account accountID: UUID) async throws {
         guard epoch == generation else { throw BackendError.notAuthenticated }
         guard !deletionSuspended, !accountWasDeleted else { throw CancellationError() }
         guard canRefreshSession() else { throw BackendError.storageFailure }
@@ -364,11 +365,17 @@ final class AccountModel: ObservableObject {
                 self.pendingDeclarations = nil
             }
             let zone = self.timeZone()
-            if zone != self.registeredTimeZone, let service = self.service {
+            if zone != self.registeredTimeZones.zone(for: accountID), let service = self.service {
                 guard self.canRefreshSession() else { throw BackendError.storageFailure }
-                try await self.protectedOperation { try await fence.call { try await service.registerTimeZone(zone) } }
+                do {
+                    try await self.protectedOperation { try await fence.call { try await service.registerTimeZone(zone) } }
+                } catch BackendError.rateLimited {
+                    guard fence.isCurrent() else { throw BackendError.notAuthenticated }
+                    // Keep setup available and leave the zone unrecorded for a later retry.
+                    return
+                }
                 guard epoch == self.generation else { throw BackendError.notAuthenticated }
-                self.registeredTimeZone = zone
+                self.registeredTimeZones.record(zone, for: accountID)
             }
         }
         setupTask = (id, task)
@@ -410,7 +417,7 @@ final class AccountModel: ObservableObject {
             guard self.hasCurrentSessionContext else { return }
             if self.localCleanupFailed { try? self.cleanup.begin() }
             self.sessionCleanupFailed = self.cleanup.isPending
-            self.registeredTimeZone = nil
+            self.registeredTimeZones.clear()
             self.pendingDeclarations = nil
             self.onboardingCompletion.clear()
             self.state = .signedOut
@@ -458,6 +465,11 @@ final class AccountModel: ObservableObject {
         guard hasCurrentSessionContext, !cleanup.isPending, !deletionSuspended, !accountWasDeleted else { return }
         profileIsStale = stale
         profile = value
+    }
+
+    func reconcileRegisteredTimeZone(with serverZone: String?) {
+        guard case .signedIn(let account) = state, serverZone != timeZone() else { return }
+        registeredTimeZones.forget(account)
     }
 
     /// Serialized session changes contain local cleanup and runtime wiring, never account requests.

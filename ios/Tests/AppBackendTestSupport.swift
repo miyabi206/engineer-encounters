@@ -5,6 +5,7 @@ import EncounterStorage
 import EncounterUI
 import Foundation
 import Security
+import SwiftUI
 import UIKit
 import XCTest
 @testable import EngineerEncounters
@@ -128,6 +129,12 @@ func appBackendEventually(_ condition: @MainActor () async throws -> Bool) async
 }
 
 enum AppBackendTestFailure: Error { case didNotSettle }
+
+/// Non-lifecycle tests never inherit the test host's foreground notifications.
+@MainActor
+func appBackendTestLifecycle(phase: ScenePhase = .background) -> ProductSceneLifecycle {
+    ProductSceneLifecycle(phase: phase, notifications: NotificationCenter())
+}
 
 /// Hosted suites can reach UI tests before UIKit reconnects the host's scene.
 @MainActor

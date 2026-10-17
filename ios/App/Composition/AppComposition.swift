@@ -51,6 +51,9 @@ final class AppComposition: ObservableObject {
     private let clock: any EncounterClock
     private let uploadScheduler: any ReceiptUploadScheduler
     private var restorationTask: Task<Void, Never>?
+    private var sessionActivation: UUID?
+    private var refreshedSessionActivation: (activation: UUID, epoch: UUID)?
+    private var sessionActivationRefresh: (id: UUID, activation: UUID, epoch: UUID, task: Task<Bool, Never>)?
     private var sessionChangeInProgress = false
     var sessionControlAvailable: Bool {
         !sessionChangeInProgress && !account.sessionChangeInProgress && !deletionSuspended && storageReady && !keychainUnavailable
@@ -196,11 +199,6 @@ final class AppComposition: ObservableObject {
         sessionAdapter = SessionAdapter(account: account, holder: sessionHolder, clock: clock,
             isOnline: sessionIsOnline ?? { sessionNetwork.isOnline }, activities: sessionActivity,
             cancellationScheduler: sessionCancellationScheduler)
-        if sessionIsOnline == nil {
-            sessionNetwork.onOnline = { [weak sessionAdapter] in
-                Task { await sessionAdapter?.foreground() }
-            }
-        }
         #if DEVELOPMENT_BUILD || INTERNAL_BUILD
         demoSwitch = DemoSwitchSetting(defaults: defaults)
         demoReveal = DemoRevealController(setting: demoSwitch, center: notificationCenter ?? SystemDemoNotificationCenter(), account: account)
@@ -208,14 +206,27 @@ final class AppComposition: ObservableObject {
         trialRecorder = TrialRecorder(log: trialLog)
         presenceApproach = approachSetting.value
         #endif
+        if sessionIsOnline == nil {
+            sessionNetwork.onOnline = { [weak self] in
+                Task {
+                    guard let self else { return }
+                    // A recovery signal arriving during an unanswered attempt must
+                    // survive that attempt's release of its activation claim.
+                    await self.waitForSessionActivationRefresh()
+                    self.refreshSessionForActivation()
+                    if !(await self.waitForSessionActivationRefresh()) { await self.sessionAdapter.foreground() }
+                }
+            }
+        }
         self.productLifecycle.$phase.removeDuplicates().sink { [weak confirmationPoller] phase in
             confirmationPoller?.receive(foreground: phase == .active)
         }.store(in: &productSubscriptions)
-        account.$state.removeDuplicates().sink { [weak confirmationPoller, weak sessionAdapter] state in
+        account.$state.removeDuplicates().sink { [weak self, weak confirmationPoller, weak sessionAdapter] state in
             sessionAdapter?.clearControlStartFailure()
             if case .signedIn = state {
                 confirmationPoller?.receive(authorized: true)
                 if case .active = sessionAdapter?.state { confirmationPoller?.receive(sessionActive: true) }
+                self?.refreshSessionForActivation()
             } else {
                 let pending: Bool
                 switch state {
@@ -228,8 +239,13 @@ final class AppComposition: ObservableObject {
         account.$profile.dropFirst().sink { [weak sessionAdapter] _ in
             Task { await sessionAdapter?.refreshActivity() }
         }.store(in: &productSubscriptions)
-        self.productLifecycle.$phase.removeDuplicates().sink { [weak sessionAdapter] phase in
-            if phase == .active { Task { await sessionAdapter?.refreshActivity() } }
+        self.productLifecycle.$phase.removeDuplicates().sink { [weak self] phase in
+            guard let self else { return }
+            self.sessionActivation = phase == .active ? UUID() : nil
+            if phase == .active {
+                self.refreshSessionForActivation()
+                Task { await self.sessionAdapter.refreshActivity() }
+            }
         }.store(in: &productSubscriptions)
         isParticipating = participation.isEnabled
         settingsSafetyAdapter.suspendParticipation = { [weak self] in self?.startAccountDeletion() }
@@ -353,6 +369,38 @@ final class AppComposition: ObservableObject {
 
     func waitForRestoration() async { await restorationTask?.value }
 
+    private func refreshSessionForActivation() {
+        guard let activation = sessionActivation else { return }
+        let epoch = account.sessionGeneration
+        guard refreshedSessionActivation?.activation != activation || refreshedSessionActivation?.epoch != epoch else { return }
+        guard sessionActivationRefresh?.activation != activation || sessionActivationRefresh?.epoch != epoch else { return }
+        let id = UUID()
+        let task = Task { [weak self] in
+            guard let self else { return false }
+            defer { if self.sessionActivationRefresh?.id == id { self.sessionActivationRefresh = nil } }
+            // Preserve restoration's credential/storage/account-setup request order.
+            await self.waitForRestoration()
+            guard self.sessionActivation == activation, self.productLifecycle.phase == .active,
+                  self.account.sessionGeneration == epoch, case .signedIn = self.account.state,
+                  !self.sessionChangeInProgress, !self.account.sessionChangeInProgress,
+                  !self.account.deletionSuspended, self.sessionServices?.isCurrent == true else { return false }
+            let answered = await self.sessionAdapter.foreground(refreshSession: true)
+            guard answered, self.sessionActivationRefresh?.id == id, self.sessionActivation == activation,
+                  self.account.sessionGeneration == epoch, case .signedIn = self.account.state,
+                  !self.account.deletionSuspended, self.sessionServices?.isCurrent == true else { return false }
+            // Only an accepted answer consumes this activation; offline, busy, failed,
+            // or replaced work can be retried by refresh/account/network readiness.
+            self.refreshedSessionActivation = (activation, epoch)
+            return true
+        }
+        sessionActivationRefresh = (id, activation, epoch, task)
+    }
+
+    @discardableResult
+    func waitForSessionActivationRefresh() async -> Bool {
+        await sessionActivationRefresh?.task.value ?? false
+    }
+
     var status: EncounterRuntimeStatus {
         var status = runtime?.status ?? EncounterRuntimeStatus()
         status.storageUnavailable = status.storageUnavailable || keychainUnavailable || (binding != nil && (!storageReady || binding?.preparedOwner == nil))
@@ -403,6 +451,8 @@ final class AppComposition: ObservableObject {
         } else if !storageReady || keychainUnavailable { await recreateRuntime(force: true) }
         guard !sessionChangeInProgress, !account.sessionChangeInProgress, !account.deletionSuspended else { return }
         await account.refresh()
+        guard !sessionChangeInProgress, !account.sessionChangeInProgress, !account.deletionSuspended else { return }
+        refreshSessionForActivation()
         guard !sessionChangeInProgress, !account.sessionChangeInProgress, !account.deletionSuspended else { return }
         await sessionAdapter.foreground()
         guard !sessionChangeInProgress, !account.sessionChangeInProgress, !account.deletionSuspended else { return }

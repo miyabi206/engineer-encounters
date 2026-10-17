@@ -215,7 +215,9 @@ actor SessionHolder {
         }
         guard isCurrent(request) else { return }
         self.request = nil
-        if acknowledgement == nil, pending == nil { state = offline ? .startRefusedOffline : .failed; changed() }
+        if request.starting, acknowledgement == nil, pending == nil {
+            state = offline ? .startRefusedOffline : .failed; changed()
+        }
     }
 
     func needsCancellationPoll(owner: BackendStorageOwner) -> Bool {

@@ -328,7 +328,8 @@ private func makeRecoveryComposition(transport: any HTTPTransport, sessions: any
         transport: transport, keychain: AppMemoryKeychain(), sessionStore: sessions, serverTokenStore: tokens,
         signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { queue }, transportFactory: {
             await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)
-        }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(), now: { appBackendTestNow }, timeZone: { "Asia/Tokyo" })
+        }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(), productLifecycle: appBackendTestLifecycle(),
+        now: { appBackendTestNow }, timeZone: { "Asia/Tokyo" })
 }
 
 @MainActor

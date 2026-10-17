@@ -56,7 +56,9 @@ final class BackendStorageRecoveryTests: XCTestCase {
                 queueOpener: { queueOpens += 1; return queue }, transportFactory: {
                     radioBuilds += 1
                     return await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)
-                }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(), now: { appBackendTestNow })
+                }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(),
+                productLifecycle: ProductSceneLifecycle(phase: .background, notifications: NotificationCenter()),
+                now: { appBackendTestNow })
             await composition.waitForRestoration()
             let isolated = try XCTUnwrap(composition.runtime)
             XCTAssertEqual(composition.account.state, .signedInPending(sessionInKeychain ? nil : session.userID))
@@ -304,7 +306,9 @@ final class BackendStorageRecoveryTests: XCTestCase {
                     let pending = try? await queue.pending()
                     radioSawCleanStorage = batch == nil && pending?.isEmpty == true
                     return await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)
-                }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(), now: { appBackendTestNow })
+                }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(),
+                productLifecycle: ProductSceneLifecycle(phase: .background, notifications: NotificationCenter()),
+                now: { appBackendTestNow })
             await composition.waitForRestoration()
             XCTAssertEqual(composition.account.state, .signedIn(appBackendTestUser))
             XCTAssertTrue(radioSawCleanStorage)
@@ -415,7 +419,10 @@ private func storageComposition(configuration: BackendConfiguration, defaults: U
     return AppComposition(configuration: configuration, defaults: defaults, notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(), transport: transport, keychain: keychain,
         serverTokenStore: tokens, signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { queue }, transportFactory: {
             await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)
-        }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(), now: { appBackendTestNow }, timeZone: { "Asia/Tokyo" })
+        }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(),
+        // Storage recovery tests keep authenticated I/O independent of host activation.
+        productLifecycle: ProductSceneLifecycle(phase: .background, notifications: NotificationCenter()),
+        now: { appBackendTestNow }, timeZone: { "Asia/Tokyo" })
 }
 
 @MainActor

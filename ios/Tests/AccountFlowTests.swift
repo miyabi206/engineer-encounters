@@ -416,7 +416,9 @@ final class AccountFlowTests: XCTestCase {
             let composition = AppComposition(configuration: appBackendTestConfiguration(), defaults: appBackendDefaults(), notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(),
                 transport: transport, keychain: AppMemoryKeychain(), sessionStore: sessions, serverTokenStore: tokens,
                 signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { queue },
-                transportFactory: { ConsentTestTransport() }, now: { appBackendTestNow }, timeZone: { "Asia/Tokyo" })
+                transportFactory: { ConsentTestTransport() },
+                productLifecycle: ProductSceneLifecycle(phase: .background, notifications: NotificationCenter()),
+                now: { appBackendTestNow }, timeZone: { "Asia/Tokyo" })
             let flow = AccountFlowModel(composition: composition)
             if !onScreen { try await queue.enqueue(EncounterSamples.receipt()) }
             await flow.start()
@@ -586,7 +588,10 @@ private func appFlowComposition(configuration: BackendConfiguration? = appBacken
     AppComposition(configuration: configuration, defaults: defaults ?? appBackendDefaults(userID: session?.userID ?? appBackendTestUser), notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(), transport: transport,
         keychain: AppMemoryKeychain(), sessionStore: sessionStore ?? InMemorySessionStore(session: session), serverTokenStore: InMemoryTokenBatchStore(),
         signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { InMemoryReceiptQueue() },
-        transportFactory: transportFactory, now: { appBackendTestNow }, timeZone: { "Asia/Tokyo" })
+        transportFactory: transportFactory,
+        // Account-flow fixtures keep their request order independently of host activation.
+        productLifecycle: ProductSceneLifecycle(phase: .background, notifications: NotificationCenter()),
+        now: { appBackendTestNow }, timeZone: { "Asia/Tokyo" })
 }
 
 @MainActor

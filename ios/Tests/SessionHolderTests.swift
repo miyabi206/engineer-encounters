@@ -134,6 +134,32 @@ final class SessionHolderTests: XCTestCase {
         }
     }
 
+    func testCancelledStartCanEnterQuarantineWhileStopIsPublishingItsLocalClear() async throws {
+        let defaults = appBackendDefaults()
+        let controller = HeldCancellationActivityController()
+        let transport = sessionTransport(["start_session": [.held],
+            "get_own_session": [.response(sessionResponse())], "stop_session": [.response(sessionNull)]])
+        let composition = try sessionComposition(transport, defaults: defaults,
+            cancellationScheduler: TestSessionCancellationScheduler(), activityController: controller)
+        await composition.waitForRestoration()
+        let owner = try XCTUnwrap(composition.sessionServices?.owner)
+        let starting = Task { try await composition.sessionAdapter.actions().startSession() }
+        try await appBackendEventually { await transport.isHeld("start_session") }
+        let stopping = Task { try await composition.sessionAdapter.actions().stopSession() }
+        // Hold publication so the Start can fail before Stop reaches flushStop.
+        try await appBackendEventually { controller.waiting }
+        await transport.releaseFailure("start_session")
+        try await appBackendEventually { await composition.sessionHolder.needsStopCheck(owner: owner) }
+        controller.release()
+        do { _ = try await starting.value; XCTFail("Lost Start answer must fail") } catch {}
+        try await stopping.value
+        XCTAssertEqual(composition.sessionAdapter.state, .stopping)
+        XCTAssertTrue(composition.sessionAdapter.stopPending)
+        XCTAssertEqual(cancelledStartKeys(defaults).count, 1)
+        let paths = await transport.recorded().compactMap { $0.url?.lastPathComponent }
+        XCTAssertEqual(paths.suffix(2), ["get_own_session", "stop_session"])
+    }
+
     func testCancelledStartTimeoutQuarantinesAndIgnoresReplyAfterDeliberateLaterStart() async throws {
         let defaults = appBackendDefaults(defaults: AppInMemoryDefaults())
         let clock = ManualEncounterClock(), scheduler = TestSessionCancellationScheduler()
@@ -421,6 +447,8 @@ final class SessionHolderTests: XCTestCase {
                         "stop_session": [.failure]])
                     let first = try sessionComposition(firstTransport, clock: clock, defaults: defaults)
                     await first.waitForRestoration()
+                    let registrations = await firstTransport.count("register_time_zone")
+                    XCTAssertEqual(registrations, 1)
                     let actions = first.sessionAdapter.actions()
                     if inFlight {
                         let starting = Task { try await actions.startSession() }
@@ -467,7 +495,7 @@ final class SessionHolderTests: XCTestCase {
                     XCTAssertTrue(pendingStopKeys(defaults).isEmpty)
                     await assertFlag(next, false)
                     let paths = await transport.recorded().map { $0.url?.lastPathComponent }
-                    XCTAssertEqual(paths, ["register_time_zone", "get_own_session", "stop_session"])
+                    XCTAssertEqual(paths, ["get_own_session", "stop_session"])
                 }
             }
         }
@@ -1307,7 +1335,9 @@ final class SessionHolderTests: XCTestCase {
                 sessionStore: InMemorySessionStore(session: try appBackendTestSession()),
                 serverTokenStore: InMemoryTokenBatchStore(batch: batch),
                 signedOutTokenStore: InMemoryTokenBatchStore(), queueOpener: { queue }, transportFactory: { radio },
-                clock: clock, uploadScheduler: ManualReceiptUploadScheduler(), now: { appBackendTestNow },
+                clock: clock, uploadScheduler: ManualReceiptUploadScheduler(),
+                productLifecycle: ProductSceneLifecycle(phase: .background, notifications: NotificationCenter()),
+                now: { appBackendTestNow },
                 sessionIsOnline: { true })
             await composition.waitForRestoration()
             if mode != "none" { _ = try await composition.sessionAdapter.actions().startSession() }
@@ -1372,15 +1402,31 @@ private func sessionComposition(_ transport: any HTTPTransport, clock: ManualEnc
     network: SessionNetworkAvailability? = nil,
     tokens: any TokenBatchStore = InMemoryTokenBatchStore(),
     queue: any ReceiptQueue = InMemoryReceiptQueue(),
-    cancellationScheduler: (any SessionCancellationScheduling)? = nil) throws -> AppComposition {
+    cancellationScheduler: (any SessionCancellationScheduling)? = nil,
+    activityController: (any SessionActivityControlling)? = nil) throws -> AppComposition {
     AppComposition(configuration: configuration, defaults: defaults ?? appBackendDefaults(), notificationCenter: TestLocalNotificationCenter(), trialLogURL: appTrialLogURL(), transport: transport,
         keychain: keychain, sessionStore: try store ?? InMemorySessionStore(session: appBackendTestSession()),
         serverTokenStore: tokens, signedOutTokenStore: InMemoryTokenBatchStore(),
         queueOpener: { queue }, transportFactory: {
             await FakeBluetoothTransport(phone: .first, link: FakeBluetoothLink(), clock: clock)
-        }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(), now: { appBackendTestNow },
-        sessionIsOnline: online, sessionNetwork: network, sessionCancellationScheduler: cancellationScheduler,
+        }, clock: clock, uploadScheduler: ManualReceiptUploadScheduler(),
+        // Holder/action tests drive their own reads; activation is covered by SessionRelaunchTests.
+        productLifecycle: ProductSceneLifecycle(phase: .background, notifications: NotificationCenter()),
+        now: { appBackendTestNow },
+        sessionIsOnline: online, sessionNetwork: network ?? SessionNetworkAvailability(monitorsSystemPath: false),
+        sessionCancellationScheduler: cancellationScheduler,
+        activityController: activityController,
         timeZone: { "Asia/Tokyo" })
+}
+
+@MainActor
+private final class HeldCancellationActivityController: SessionActivityControlling {
+    private var continuation: CheckedContinuation<Void, Never>?
+    var waiting: Bool { continuation != nil }
+    func apply(_ payload: SessionActivityPayload?) async {
+        await withCheckedContinuation { continuation = $0 }
+    }
+    func release() { continuation?.resume(); continuation = nil }
 }
 
 private actor SessionCredentialClearGate: SessionStore {
