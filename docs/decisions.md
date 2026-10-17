@@ -3,7 +3,7 @@
 **Version:** 0.8\
 **Status:** Confirmed product decisions; drafting defaults and unverified items labelled\
 **Date:** 2026-10-15\
-**Related:** `specification.md` v0.8, `design.md` v0.10, `ui.md` v0.8\
+**Related:** `specification.md` v0.8, `design.md` v0.11, `ui.md` v0.9\
 **Platforms:** iOS first, Android later\
 **Languages:** Japanese, English
 
@@ -120,7 +120,7 @@ All rungs operate at the same time. The app never switches modes.
 ### Sessions
 
 - Started with a Start session button. A session lasts 2 hours or until the user stops it.
-- The built own-session Live Activity and Control Center start control run their intents in the app process. While suspended, expiry only makes the activity stale until the app executes again; device availability remains unverified. See `design.md`, **iOS client and navigation**.
+- The built own-session Live Activity and Control Center start control run their intents in the app process. While suspended, expiry only makes the activity stale until the app executes again. **FACT:** Live Activity was verified on the iPhone 15 on 2026-10-16/17; the Control Center run remains **UNVERIFIED**. See `design.md`, **iOS client and navigation** and **Integration environments**.
 - Two users who are both in a session see each other immediately. Cancelling an unacknowledged start uses the bounded monotonic policy in `design.md`, **Sessions**, with its owner API item and accepted limit under **Open items and risks**.
 
 ### Platform facts and unknowns

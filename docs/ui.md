@@ -1,9 +1,9 @@
 # User interface — Engineer Encounters
 
-**Version:** 0.8\
+**Version:** 0.9\
 **Status:** Built Units 1–5 interface recorded; later surfaces and open items labelled\
-**Date:** 2026-10-16\
-**Related:** `decisions.md` v0.8, `specification.md` v0.8, `design.md` v0.10\
+**Date:** 2026-10-17\
+**Related:** `decisions.md` v0.8, `specification.md` v0.8, `design.md` v0.11\
 **Platforms:** iOS first, Android later\
 **Languages:** Japanese, English
 
@@ -11,7 +11,7 @@
 
 The public names are **すれちがいエンジニア** and **Engineer Encounters**. Japanese comes first. The interface helps people read another engineer's work without an obligation to talk. Version 1 is free, with no ads or purchases.
 
-`decisions.md`, **User interface**, fixes the screen identifiers and visual direction. Its other product decisions take precedence over `specification.md` v0.8. This document follows `design.md` v0.10 for implementation rules, naming the relevant sections below. **DEFAULT** choices are collected in **Defaults chosen during drafting**; unresolved choices are in **Open items**.
+`decisions.md`, **User interface**, fixes the screen identifiers and visual direction. Its other product decisions take precedence over `specification.md` v0.8. This document follows `design.md` v0.11 for implementation rules, naming the relevant sections below. **DEFAULT** choices are collected in **Defaults chosen during drafting**; unresolved choices are in **Open items**.
 
 Use standard iOS components, light and dark modes, and Dynamic Type. Keep the concept's teal accent, rounded cards, large titles and short subtitles. The light appearance uses an off-white background, dark navy text, white cards and thin borders. In dark appearance, use system dark surfaces and readable text. Teal marks primary actions, selected pills and links. Destructive actions use the standard destructive style. Text wraps and layouts scroll at large text sizes. Icons always have accessible names; color alone never communicates a state.
 
@@ -428,6 +428,8 @@ Revealed session encounters [cards, day only]
 **States:** Empty: an active session can have no revealed session encounters; use calm guidance. Loading: starting progress, with no active claim before server acknowledgement; a queued stop never keeps the local session active. Every session scene observes the shared holder. Cancellation of an unacknowledged start presents stopping and refuses new starts/control actions under `design.md`, **Sessions**; an outstanding marker check refuses another stop immediately without signing out. Error: failed/offline start → Retry on S08; failed stop upload → show Session ended with retry status, retaining the queued stop; unmet discovery/Bluetooth conditions → S24/S23. On expiry, show Session ended and a return action. The timer is session duration, never an encounter clock.
 
 **FACT — device session-start freeze, 2026-10-15/16:** the countdown `TimelineView` rescheduled on every render while `tick()` published unchanged values, causing an endless render loop before `start_session` was sent. The same issue affected S09. Fixed in `5a18338` and covered by `SessionTimelineRegressionTests`.
+
+**FACT — `c8859bf`, relaunch session refresh:** after a relaunch, the app shows a running session with View session and Stop without opening S08 first. The activation read and its retry/waiting rules follow `design.md`, **Sessions** and **iOS client and navigation**; device verification is recorded under **Open items and risks**, **Integration environments**.
 
 **Actions:** Successful start stays on S08. Stop ends the session → S06; expiry's Done → S06. QR → S09. A revealed card → S07. Back → S06 while the session continues. Retry → S08. **DEFAULT:** starting has no extra confirmation; stopping is immediate locally, queues the server stop and does not start another session. Never restore the active local flag because a stop upload failed.
 
@@ -1194,7 +1196,7 @@ There are no weekly or immediate ambient notifications in Release. The S22 demo 
 
 **FACT:** the built extension displays the user's own active session for up to 2 hours, with their own display name, Session active, remaining time and Stop session. App-process intents own both start and stop; no extension credential/card store exists. A compact presentation shows the status and remaining duration. Never show another person's name, encounter counts, card, encounter time or place.
 
-**FACT — restyle:** the Live Activity uses an accent tile, monospaced countdown and Stop on the status row, stacking at accessibility sizes. Dynamic Type is capped at `accessibility1`, and the environment chooses the accent. **UNVERIFIED:** device appearance.
+**FACT — restyle:** the Live Activity uses an accent tile, monospaced countdown and Stop on the status row, stacking at accessibility sizes. Dynamic Type is capped at `accessibility1`, and the environment chooses the accent. **FACT, 2026-10-16/17:** Lock Screen and Dynamic Island appearance was verified on the iPhone 15; the Lock Screen Stop label wraps to two lines. See `design.md`, **Integration environments**, for device evidence.
 
 ```text
 Engineer Encounters · Session active
@@ -1278,7 +1280,7 @@ See `proposal.pdf`, pages 3–5, and `decisions.md`, **User interface**. Keep th
 
 ## Open items
 
-- **UI restyle — remaining low items:** `EncounterMark` as the product mark needs owner confirmation; Live Activity layout, the 160 pt limit and Dynamic Island are unverified on a device; no test ties the extension's copied accent values to `EncounterPalette`; the S10 saved-links segment and app-level surfaces (account root states, Links screen GitHub card, app S20 and deletion recovery, revealed session rows, and the S23 panel above the feed) are absent from the screenshot gallery; the encounter action row uses a fixed -8 pt padding offset with no layout test; `destructiveText` keeps the 52 pt minimum height.
+- **UI restyle — remaining low items:** `EncounterMark` as the product mark needs owner confirmation; the Live Activity 160 pt limit remains unverified on a device, and the Lock Screen Stop label wraps to two lines; no test ties the extension's copied accent values to `EncounterPalette`; the S10 saved-links segment and app-level surfaces (account root states, Links screen GitHub card, app S20 and deletion recovery, revealed session rows, and the S23 panel above the feed) are absent from the screenshot gallery; the encounter action row uses a fixed -8 pt padding offset with no layout test; `destructiveText` keeps the 52 pt minimum height.
 
 - **Units 4/5 — remaining work:** owner/API inputs, accepted limitations, production prerequisites and remaining app/device/hosted/OAuth gates are listed once in `design.md`, **Open items and risks**. The completed app/server fixes and cancellation policy are in **Unit 4 and 5 contract**; review verdicts, the final tester pass and independent-review limits are in **Security requirements** / **Automatic checks**.
 
